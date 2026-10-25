@@ -22,8 +22,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 pub const FILE_NAME: &str = "vw-danlon.db";
 
 /// The schema version, kept in `PRAGMA user_version`. Version 2 added the
-/// home-working timer ([`HOME_SCHEMA`]).
-const VERSION: i32 = 2;
+/// home-working timer ([`HOME_SCHEMA`]), version 3 the trip overrides
+/// ([`OVERRIDE_SCHEMA`]).
+const VERSION: i32 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -92,6 +93,12 @@ CREATE TABLE home_running (
 );
 ";
 
+/// The table version 3 added: trips set to business or private by hand,
+/// by their start to the minute.
+const OVERRIDE_SCHEMA: &str = "
+CREATE TABLE trip_overrides (start TEXT PRIMARY KEY, business INTEGER NOT NULL);
+";
+
 /// The JSON files earlier versions kept beside the config file.
 const TRIPS_JSON: &str = "trips.json";
 const STATE_JSON: &str = "state.json";
@@ -126,6 +133,9 @@ fn upgrade(conn: &mut Connection, path: &Path) -> Result<()> {
     let version: i32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version == 1 {
         tx.execute_batch(HOME_SCHEMA)?;
+    }
+    if version <= 2 {
+        tx.execute_batch(OVERRIDE_SCHEMA)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()
@@ -258,6 +268,7 @@ fn build(path: &Path, tmp: &Path) -> Result<Vec<PathBuf>> {
     let tx = conn.transaction()?;
     tx.execute_batch(SCHEMA)?;
     tx.execute_batch(HOME_SCHEMA)?;
+    tx.execute_batch(OVERRIDE_SCHEMA)?;
     let mut moved = Vec::new();
     if let Some(t) = &trips {
         crate::trip_store::insert(&tx, &t.trips)?;
@@ -452,13 +463,14 @@ mod tests {
     }
 
     #[test]
-    fn a_version_1_database_gets_the_home_tables() {
+    fn a_version_1_database_gets_the_home_and_override_tables() {
         let dir = temp_dir("db-upgrade");
         let db = dir.join(FILE_NAME);
         State::update(&db, |s| s.entered.insert("2026-10-05".parse().unwrap())).unwrap();
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
-            "DROP TABLE home_intervals; DROP TABLE home_running; PRAGMA user_version = 1;",
+            "DROP TABLE home_intervals; DROP TABLE home_running; DROP TABLE trip_overrides; \
+             PRAGMA user_version = 1;",
         )
         .unwrap();
         drop(conn);
@@ -468,9 +480,13 @@ mod tests {
         let s = crate::state::read_rows(&conn).unwrap();
         assert_eq!((s.entered.len(), s.home.intervals.len()), (1, 0));
         assert!(!has_table(&conn, "home_intervals").unwrap());
+        assert!(s.trip_overrides.is_empty());
         drop(conn);
 
+        let trip_start: chrono::DateTime<chrono::FixedOffset> =
+            "2026-10-06T07:45:00+02:00".parse().unwrap();
         State::update(&db, |s| {
+            s.trip_overrides.insert(trip_start, true);
             s.home
                 .start("2026-10-06T08:00:00".parse().unwrap(), None, None)
                 .map(|_| ())
@@ -479,6 +495,7 @@ mod tests {
         .unwrap();
         let s = State::load(&db).unwrap();
         assert_eq!((s.entered.len(), s.home.running.is_some()), (1, true));
+        assert_eq!(s.trip_overrides.get(&trip_start), Some(&true));
         let conn = open(&db).unwrap();
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))

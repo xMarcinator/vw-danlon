@@ -61,6 +61,9 @@ title = "Frokost"
 driver_name = "Dit Navn"
 registration_number = "AB12345"
 home = "Hjemvej 3, 8200 Aarhus N"   # with workplace: home ↔ workplace is commuting, never reimbursed
+# address = "Hjemvej 3, 8200 Aarhus N"   # on the logbook (default: home)
+# cpr = ""                                # on the logbook; blank line when empty
+# yderkommune = false                     # befordringsfradrag: higher rate above 120 km a day
 
 # Rates from Skatterådet. VERIFY on skat.dk before use.
 [[mileage.rates]]
@@ -68,6 +71,13 @@ year = 2026
 low = 3.94             # kr/km up to 20,000 km per year
 high = 2.28            # kr/km above
 threshold_km = 20000
+
+# Befordringsfradrag rates (LL § 9 C); 2026 is built in.
+# [[mileage.fradrag_rates]]
+# year = 2027
+# low = 3.17               # kr/km of the daily round trip from 25 to 120 km
+# high = 1.59              # kr/km above 120 km
+# yderkommune_high = 3.51  # above 120 km when yderkommune = true
 
 # Names of home and the workplace as used in the Danløn app's Kørsel routes.
 # Other stops are named by their calendar entry's title, else their address.

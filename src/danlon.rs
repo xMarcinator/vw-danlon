@@ -180,6 +180,7 @@ mod tests {
             m,
             &trips,
             &[],
+            &Default::default(),
         )
         .unwrap();
         let mut buf = Vec::new();

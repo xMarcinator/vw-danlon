@@ -396,9 +396,42 @@ pub struct MileageConfig {
     /// Your home address, as it appears in the trips' `from`/`to`. With
     /// `workplace` set, home ↔ workplace trips are always commuting.
     pub home: Option<String>,
+    /// Your address and CPR number for the logbook header (Skat requires
+    /// them on the logbook; an empty CPR prints a blank line to fill in).
+    /// The address defaults to `home`.
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub cpr: Option<String>,
     /// Rates per year, as published by Skatterådet.
     pub rates: Vec<MileageRate>,
+    /// You live in a yderkommune: km above 120 a day get the higher
+    /// befordringsfradrag rate (see [`FradragRate`]).
+    #[serde(default)]
+    pub yderkommune: bool,
+    /// Befordringsfradrag rates per year (LL § 9 C); 2026 is built in.
+    #[serde(default)]
+    pub fradrag_rates: Vec<FradragRate>,
 }
+
+/// Befordringsfradrag rates for one year: kr/km of the daily round trip
+/// from 25 to 120 km, above 120 km, and above 120 km in a yderkommune.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FradragRate {
+    pub year: i32,
+    pub low: f64,
+    pub high: f64,
+    pub yderkommune_high: f64,
+}
+
+/// The 2026 befordringsfradrag rates (skat.dk).
+pub const FRADRAG_2026: FradragRate = FradragRate {
+    year: 2026,
+    low: 3.17,
+    high: 1.59,
+    yderkommune_high: 3.51,
+};
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(deny_unknown_fields)]
@@ -424,6 +457,21 @@ impl MileageConfig {
             .copied()
             .with_context(|| {
                 format!("no [[mileage.rates]] entry for {year} — add the rates from skat.dk")
+            })
+    }
+
+    /// The befordringsfradrag rates of `year`: the config's, else the
+    /// built-in ones for 2026.
+    pub fn fradrag_rate(&self, year: i32) -> Result<FradragRate> {
+        self.fradrag_rates
+            .iter()
+            .find(|r| r.year == year)
+            .copied()
+            .or((year == FRADRAG_2026.year).then_some(FRADRAG_2026))
+            .with_context(|| {
+                format!(
+                    "no [[mileage.fradrag_rates]] entry for {year} — add the rates from skat.dk"
+                )
             })
     }
 }

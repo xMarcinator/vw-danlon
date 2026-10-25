@@ -55,14 +55,32 @@ enum Command {
         #[arg(short, long)]
         out: PathBuf,
     },
-    /// Write the mileage logbook (kørselsregnskab) for a month.
+    /// Show the mileage logbook (kørselsregnskab) for a month: the
+    /// reimbursable business driving, and with `--all` every trip with the
+    /// rule that decided it.
     Logbook {
         month: String,
         /// Trips file (default: the trips stored by `trips import`).
         #[arg(short, long)]
         trips: Option<PathBuf>,
+        /// Also write the logbook to this file.
         #[arg(short, long)]
-        out: PathBuf,
+        out: Option<PathBuf>,
+        /// List all driving, not only the reimbursable trips.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Set a stored trip to business or private, overriding the mileage
+    /// rules, or reset it to the rules (stored in the database beside the config).
+    Trip {
+        #[command(subcommand)]
+        action: TripAction,
+    },
+    /// Estimate the year's befordringsfradrag (LL § 9 C), for information:
+    /// you enter it yourself in TastSelv.
+    Fradrag {
+        /// Year as YYYY.
+        year: i32,
     },
     /// Write the month's pay lines (lønart, quantity, rate) to a file.
     Export {
@@ -121,6 +139,26 @@ enum Command {
     Backup {
         #[command(subcommand)]
         action: BackupAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TripAction {
+    /// Count the trip as business driving.
+    Business {
+        /// The trip's start as YYYY-MM-DD HH:MM.
+        #[arg(required = true, num_args = 1..=2)]
+        start: Vec<String>,
+    },
+    /// Count the trip as private driving.
+    Private {
+        #[arg(required = true, num_args = 1..=2)]
+        start: Vec<String>,
+    },
+    /// Let the rules decide again.
+    Reset {
+        #[arg(required = true, num_args = 1..=2)]
+        start: Vec<String>,
     },
 }
 
@@ -309,7 +347,12 @@ fn main() -> Result<()> {
             timesheet::write(&cfg, &report, create(&out)?)?;
             println!("Wrote {}", out.display());
         }
-        Command::Logbook { month, trips, out } => {
+        Command::Logbook {
+            month,
+            trips,
+            out,
+            all,
+        } => {
             let mcfg = cfg
                 .mileage
                 .as_ref()
@@ -318,9 +361,40 @@ fn main() -> Result<()> {
             let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
             let m = service::compute_mileage(&cfg, mcfg, month, &trips, &cal)?;
-            mileage::write_logbook(mcfg, &m, create(&out)?)?;
+            if all {
+                print_driving(&m);
+            }
             print_mileage(&m);
-            println!("Wrote {}", out.display());
+            if let Some(out) = out {
+                mileage::write_logbook(mcfg, &m, create(&out)?)?;
+                println!("Wrote {}", out.display());
+            }
+        }
+        Command::Trip { action } => {
+            let (start, business) = match action {
+                TripAction::Business { start } => (start, Some(true)),
+                TripAction::Private { start } => (start, Some(false)),
+                TripAction::Reset { start } => (start, None),
+            };
+            let start = vw_danlon::trips::parse_time(&start.join(" "), cfg.timezone)
+                .context("the trip's start as YYYY-MM-DD HH:MM")?;
+            let t = service::set_trip_override(&cfg, start, business)?;
+            let set = match business {
+                Some(true) => "business (set by you)",
+                Some(false) => "private (set by you)",
+                None => "counted by the rules again",
+            };
+            println!(
+                "{} {} → {} ({:.1} km): {set}",
+                t.start.format("%Y-%m-%d %H:%M"),
+                t.from,
+                t.to,
+                t.distance_km.unwrap_or(0.0)
+            );
+        }
+        Command::Fradrag { year } => {
+            let f = service::fradrag(&cfg, year, today, mode)?;
+            print_fradrag(&f);
         }
         Command::Export { month, trips, out } => {
             let month = Month::parse(&month)?;
@@ -899,7 +973,7 @@ fn print_mileage(m: &MileageMonth) {
             "  {}  {} → {}  {:<24} {:>7.1} km à {:.2} = {:>8.2}",
             e.start.format("%d-%m %H:%M"),
             e.from,
-            e.to,
+            e.destination(),
             e.purpose,
             e.km,
             e.rate,
@@ -907,11 +981,82 @@ fn print_mileage(m: &MileageMonth) {
         );
     }
     println!(
-        "  Total: {:.1} km, {:.2} kr",
+        "  Total: {:.1} km, {:.2} kr; business km this year to date: {:.1}",
         m.total_km(),
-        m.total_amount()
+        m.total_amount(),
+        m.km_year_to_date()
     );
+    let not = m.not_reimbursed();
+    if !not.is_empty() {
+        println!("  Not reimbursed (Skat's rules, LL § 9 B):");
+        for (reason, trips, km) in not {
+            println!("    {reason:<36} {trips:>4} trips {km:>8.1} km");
+        }
+    }
     warn_skipped(m);
+}
+
+/// Every trip of the month with the rule that decided it.
+fn print_driving(m: &MileageMonth) {
+    println!(
+        "All driving {}: {} trips, {:.1} km",
+        m.month,
+        m.driving.len(),
+        m.driven_km()
+    );
+    for d in &m.driving {
+        let paid = if d.km > 0.0 {
+            format!("{:>6.1} km reimbursed", d.km)
+        } else {
+            String::new()
+        };
+        println!(
+            "  {}  {} → {}  {:>6.1} km  {:<36} {paid}",
+            d.trip.start.format("%d-%m %H:%M"),
+            d.trip.from,
+            d.trip.to,
+            d.trip.distance_km.unwrap_or(0.0),
+            d.reason.to_string(),
+        );
+    }
+}
+
+/// The befordringsfradrag estimate.
+fn print_fradrag(f: &mileage::Fradrag) {
+    let kr = |v: f64| format!("{v:.2}").replace('.', ",");
+    println!("Befordringsfradrag {} (LL § 9 C), estimate", f.year);
+    match f.one_way_km {
+        Some(km) => println!(
+            "  Home → workplace: {km:.1} km (median of the year's commuting trips), {:.1} km a day",
+            f.round_trip_km()
+        ),
+        None => println!("  No commuting trips in {}", f.year),
+    }
+    println!(
+        "  Rates {}: {} kr/km from 25 to 120 km a day, {} kr/km above{}",
+        f.rate.year,
+        kr(f.rate.low),
+        kr(if f.yderkommune {
+            f.rate.yderkommune_high
+        } else {
+            f.rate.high
+        }),
+        if f.yderkommune { " (yderkommune)" } else { "" }
+    );
+    println!(
+        "  Commuting days: {} ({} not counted: home working, days off or km reimbursed)",
+        f.days.len(),
+        f.excluded.len()
+    );
+    println!("  Per day: {} kr", kr(f.per_day()));
+    println!("  Estimate: {} kr", kr(f.total()));
+    if f.round_trip_km() <= 24.0 {
+        println!("  No deduction: the first 24 km a day are not deductible.");
+    }
+    println!(
+        "  For information only: enter it yourself in TastSelv (forskudsopgørelse felt 417, \
+         årsopgørelse rubrik 51). Nothing is sent to Skat."
+    );
 }
 
 fn warn_skipped(m: &MileageMonth) {

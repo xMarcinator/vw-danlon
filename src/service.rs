@@ -22,15 +22,24 @@ use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
 use crate::vacation::{self, Overview, Rules};
 
-/// Trips from `file`, else the stored trips `month` needs: those from 1
-/// January through the month's end (the earlier months count towards the
-/// year's mileage).
+/// The first day of the data `month` needs: 1 January of the year before,
+/// so the year's mileage and the 60-day rule's 12 months are counted.
+pub fn history_start(month: Month) -> NaiveDate {
+    NaiveDate::from_ymd_opt(month.year - 1, 1, 1).unwrap()
+}
+
+/// Trips from `file`, else the stored trips `month` needs: those from
+/// [`history_start`] through the month's end.
 pub fn load_trips(cfg: &Config, file: Option<&Path>, month: Month) -> Result<Vec<Trip>> {
     if let Some(file) = file {
         return trips::load(file, cfg.timezone);
     }
-    let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
-    trip_store::stored_trips_between(&cfg.database, cfg.timezone, year_start, month.last_day())
+    trip_store::stored_trips_between(
+        &cfg.database,
+        cfg.timezone,
+        history_start(month),
+        month.last_day(),
+    )
 }
 
 /// Where the calendar comes from when it is a link (a calendar file is
@@ -59,11 +68,11 @@ pub struct Calendar {
     pub fetch_error: Option<String>,
 }
 
-/// Calendar occurrences from 1 January to the end of `month`; the earlier
-/// months are needed for the year's mileage total.
+/// Calendar occurrences from [`history_start`] to the end of `month`; the
+/// earlier months are needed for the year's mileage total and the 60-day
+/// rule.
 pub fn calendar(cfg: &Config, month: Month, mode: CalendarMode) -> Result<Calendar> {
-    let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
-    calendar_between(cfg, year_start, month.last_day(), mode)
+    calendar_between(cfg, history_start(month), month.last_day(), mode)
 }
 
 /// Calendar occurrences from `from` to `to`.
@@ -204,7 +213,8 @@ pub fn mileage_for(
 }
 
 /// The month's mileage; trips starting during recorded private time are
-/// private, like those during a private appointment.
+/// private, like those during a private appointment, and the trips you set
+/// to business or private count so.
 pub fn compute_mileage(
     cfg: &Config,
     mcfg: &MileageConfig,
@@ -212,9 +222,12 @@ pub fn compute_mileage(
     trips: &[Trip],
     cal: &[Occurrence],
 ) -> Result<MileageMonth> {
-    let recorded = State::load(&cfg.database)?.private.intervals;
+    let state = State::load(&cfg.database)?;
     let mut entries = timed_entries(cfg, cal);
-    entries.extend(month::recorded_entries(&recorded, cfg.timezone));
+    entries.extend(month::recorded_entries(
+        &state.private.intervals,
+        cfg.timezone,
+    ));
     mileage::compute(
         mcfg,
         cfg.workplace.as_deref(),
@@ -222,6 +235,87 @@ pub fn compute_mileage(
         month,
         trips,
         &entries,
+        &state.trip_overrides,
+    )
+}
+
+/// Sets the stored trip starting at `start` (to the minute) to business
+/// (`Some(true)`), private (`Some(false)`), or back to the rules (`None`);
+/// returns the trip. A trip that is not stored is refused, naming it.
+pub fn set_trip_override(
+    cfg: &Config,
+    start: DateTime<Tz>,
+    business: Option<bool>,
+) -> Result<Trip> {
+    let key = mileage::minute(start);
+    let date = start.date_naive();
+    let trip = trip_store::stored_trips_between(&cfg.database, cfg.timezone, date, date)?
+        .into_iter()
+        .find(|t| mileage::minute(t.start) == key)
+        .with_context(|| {
+            format!(
+                "no stored trip starts at {} (see `logbook <month> --all`)",
+                start.format("%Y-%m-%d %H:%M")
+            )
+        })?;
+    State::update(&cfg.database, |s| match business {
+        Some(b) => {
+            s.trip_overrides.insert(key, b);
+        }
+        None => {
+            s.trip_overrides.remove(&key);
+        }
+    })?;
+    Ok(trip)
+}
+
+/// The befordringsfradrag estimate for `year` (LL § 9 C); home-working
+/// days and days off do not count.
+pub fn fradrag(
+    cfg: &Config,
+    year: i32,
+    today: NaiveDate,
+    mode: CalendarMode,
+) -> Result<mileage::Fradrag> {
+    let mcfg = cfg
+        .mileage
+        .as_ref()
+        .context("no [mileage] section in config")?;
+    if mcfg.home.is_none() || cfg.workplace.is_none() {
+        anyhow::bail!("the befordringsfradrag needs mileage.home and workplace in the config");
+    }
+    let december = Month { year, month: 12 };
+    let trips = load_trips(cfg, None, december)?;
+    let cal = calendar(cfg, december, mode)?.occurrences;
+    let state = State::load(&cfg.database)?;
+    let mut excluded: std::collections::BTreeMap<NaiveDate, &'static str> = Default::default();
+    for m in 1..=12 {
+        let month = Month { year, month: m };
+        if month.first_day() > today {
+            break;
+        }
+        for day in month::build(cfg, month, &trips, &cal, &state, today).days {
+            if !day.home.is_empty() {
+                excluded.insert(day.date, "home working");
+            } else if day.off_reason.is_some() {
+                excluded.insert(day.date, "day off");
+            }
+        }
+    }
+    let mut entries = timed_entries(cfg, &cal);
+    entries.extend(month::recorded_entries(
+        &state.private.intervals,
+        cfg.timezone,
+    ));
+    mileage::fradrag(
+        mcfg,
+        cfg.workplace.as_deref(),
+        &cfg.known_places,
+        year,
+        &trips,
+        &entries,
+        &state.trip_overrides,
+        |d| excluded.get(&d).copied(),
     )
 }
 
@@ -318,11 +412,10 @@ pub fn month_calendar(
     today: NaiveDate,
     mode: CalendarMode,
 ) -> Result<Calendar> {
-    let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
     let to = month
         .last_day()
         .max(today + Duration::days(PRIVATE_DAYS_AHEAD));
-    calendar_between(cfg, year_start, to, mode)
+    calendar_between(cfg, history_start(month), to, mode)
 }
 
 /// A month as the Month and Day screens show it.
@@ -1018,6 +1111,53 @@ mod tests {
         assert_eq!(
             (i.label.as_str(), i.start, i.end),
             ("Post", at("2026-11-03 12:15"), at("2026-11-03 12:40"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_trip_set_to_business_or_private_and_reset() {
+        let dir = crate::trips::tests::temp_dir("svc-trip-override");
+        let cfg = Config::from_text(
+            "employee_number = \"1\"\nworkplace = \"Kontorvej 1\"\n\
+             [danlon]\nmileage_lonart = \"39\"\n\
+             [mileage]\ndriver_name = \"T\"\nregistration_number = \"AB1\"\nhome = \"Hjem\"\n\
+             [[mileage.rates]]\nyear = 2026\nlow = 3.94\nhigh = 2.28\n",
+            &dir.join("config.toml"),
+        )
+        .unwrap();
+        let date = state::parse_date("2026-11-03").unwrap();
+        let form = ManualTripForm {
+            start: "10:00".into(),
+            end: "10:20".into(),
+            from: "Kontorvej 1".into(),
+            to: "Lager".into(),
+            km: "12".into(),
+            purpose: String::new(),
+        };
+        add_manual_trip(&cfg, date, &form).unwrap();
+        let month = Month {
+            year: 2026,
+            month: 11,
+        };
+        let at = |s| trips::parse_time(s, cfg.timezone).unwrap();
+        let km = || {
+            let trips = load_trips(&cfg, None, month).unwrap();
+            let m = mileage_for(&cfg, month, &trips, &[]).unwrap().unwrap();
+            (m.total_km(), m.driving[0].reason.to_string())
+        };
+        assert_eq!(km(), (0.0, "private driving".into()));
+        set_trip_override(&cfg, at("2026-11-03 10:00"), Some(true)).unwrap();
+        assert_eq!(km(), (12.0, "set by you".into()));
+        set_trip_override(&cfg, at("2026-11-03 10:00"), Some(false)).unwrap();
+        assert_eq!(km(), (0.0, "set by you".into()));
+        set_trip_override(&cfg, at("2026-11-03 10:00"), None).unwrap();
+        assert_eq!(km(), (0.0, "private driving".into()));
+        let err = set_trip_override(&cfg, at("2026-11-03 11:00"), Some(true)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no stored trip starts at 2026-11-03 11:00"),
+            "{err}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

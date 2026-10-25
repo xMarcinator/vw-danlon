@@ -29,6 +29,9 @@ pub struct State {
     /// The connected Min Volkswagen account. Its device token is in the
     /// keychain, never here.
     pub account: Option<Account>,
+    /// Trips you set to business (`true`) or private (`false`), by their
+    /// start to the minute; they win over the mileage rules.
+    pub trip_overrides: BTreeMap<DateTime<FixedOffset>, bool>,
 }
 
 /// The account `account connect` registered, and when trips were last synced.
@@ -434,7 +437,19 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
         home: read_home(conn)?,
         entered,
         account,
+        trip_overrides: read_overrides(conn)?,
     })
+}
+
+/// The trip overrides; none in a database from before them (opened
+/// read-only, so not upgraded).
+fn read_overrides(conn: &Connection) -> rusqlite::Result<BTreeMap<DateTime<FixedOffset>, bool>> {
+    if !crate::db::has_table(conn, "trip_overrides")? {
+        return Ok(BTreeMap::new());
+    }
+    conn.prepare("SELECT start, business FROM trip_overrides")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect()
 }
 
 fn read_next_id(conn: &Connection, key: &str) -> rusqlite::Result<u32> {
@@ -487,7 +502,7 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
     conn.execute_batch(
         "DELETE FROM lunch; DELETE FROM entered; DELETE FROM private_intervals; \
          DELETE FROM private_running; DELETE FROM account; \
-         DELETE FROM home_intervals; DELETE FROM home_running; \
+         DELETE FROM home_intervals; DELETE FROM home_running; DELETE FROM trip_overrides; \
          DELETE FROM meta WHERE key IN ('private_next_id', 'home_next_id');",
     )?;
     let mut st = conn.prepare("INSERT INTO lunch (day, start, minutes) VALUES (?1, ?2, ?3)")?;
@@ -552,6 +567,10 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
             "INSERT INTO account (one, email, last_sync) VALUES (1, ?1, ?2)",
             params![a.email, a.last_sync],
         )?;
+    }
+    let mut st = conn.prepare("INSERT INTO trip_overrides (start, business) VALUES (?1, ?2)")?;
+    for (start, business) in &state.trip_overrides {
+        st.execute(params![start, business])?;
     }
     Ok(())
 }

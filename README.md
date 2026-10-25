@@ -25,7 +25,9 @@ cargo run -- report    2026-10                                 # check first
 cargo run -- checklist 2026-10                                 # see "Danløn app checklist"
 cargo run -- vacation                                          # see "Vacation"
 cargo run -- timesheet 2026-10 -o arbejdstid-2026-10.csv
-cargo run -- logbook   2026-10 -o korebog-2026-10.csv
+cargo run -- logbook   2026-10 -o korebog-2026-10.csv          # --all: every trip with its rule
+cargo run -- trip business "2026-10-06 10:00"                 # or private / reset: override the rules
+cargo run -- fradrag   2026                                    # befordringsfradrag estimate (info only)
 cargo run -- export    2026-10 -o danlon-2026-10.txt
 ```
 
@@ -282,11 +284,32 @@ field, so the default is `hours = "none"`. Set `hours = "actual"` and
   first trip arriving at the entry's address and the last trip leaving it
   are business trips, with the entry's title as purpose. Trips in between,
   such as a lunch errand, are not. A purpose in the trips file always wins.
-- Home ↔ fixed workplace is commuting and is never reimbursed.
+- Home ↔ fixed workplace is commuting (LL § 9 B) and is never reimbursed;
+  it is listed by `logbook --all` as driving.
+- Home ↔ a client counts on at most 60 days per client address within 12
+  months (several trips a day are one day; only trips starting or ending at
+  home count). From the 61st day those trips are private; workplace ↔ client
+  stays business. The count starts over after 60 working days in a row at
+  other workplaces. The trips and calendar of the year before are read for
+  this.
+- Driving without a business purpose (errands on the way home, weekend
+  driving) is private. Client → shops → home gets only the direct client →
+  home km: the shortest drive between the two recorded earlier; without
+  one the trip is flagged so you can set it with `trip business|private`.
+- `trip business|private <YYYY-MM-DD HH:MM>` sets a stored trip by hand (e.g.
+  driving between workplaces), winning over the rules; `trip reset` undoes it.
 - The low rate applies up to 20,000 km per calendar year, the high rate
-  above that. A trip crossing the threshold is split.
-- The logbook includes driver name, registration number and a field for the
-  employer's signature.
+  above that. A trip crossing the threshold is split. A year without rates
+  is an error only when it has business km.
+- The logbook includes driver name, address (`mileage.address`, else
+  `home`), CPR (`mileage.cpr`, blank when not set), registration number,
+  business km this year to date and a field for the employer's signature.
+- `fradrag <year>` estimates the befordringsfradrag (LL § 9 C) for your own
+  TastSelv entry (felt 417 / rubrik 51): (round trip − 24 km) per commuting
+  day at the year's rates (2026 built in: 3,17 kr/km to 120 km, 1,59 above,
+  3,51 above 120 km with `mileage.yderkommune = true`). The round trip is
+  twice the median commuting trip; home-working days, days off and days with
+  reimbursed km from home are left out. Nothing is sent to Skat.
 
 ## Calendar (Proton)
 

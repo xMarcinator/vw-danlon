@@ -496,6 +496,7 @@ END:VEVENT
             m,
             trips,
             &cal,
+            &state.trip_overrides,
         )
         .unwrap();
         let days = build(cfg, &report, trips, Some(&mileage), &cal);
