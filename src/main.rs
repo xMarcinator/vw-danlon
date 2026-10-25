@@ -93,6 +93,44 @@ enum Command {
         #[command(subcommand)]
         action: LunchAction,
     },
+    /// Time private time with a start/stop timer (stored in state.json).
+    Private {
+        #[command(subcommand)]
+        action: PrivateAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PrivateAction {
+    /// Start the timer; it links to the current or next private calendar
+    /// appointment today and takes its title as the label.
+    Start {
+        /// Label (default: the linked appointment's title, else "Privat").
+        label: Option<String>,
+        /// Link the private appointment today with this title.
+        #[arg(long, conflicts_with = "no_event")]
+        event: Option<String>,
+        /// Do not link a calendar appointment.
+        #[arg(long)]
+        no_event: bool,
+    },
+    /// Stop the timer and record the interval.
+    Stop,
+    /// Show the recorded intervals of a month.
+    List {
+        /// Month as YYYY-MM.
+        month: String,
+    },
+    /// Change a recorded interval's start and end.
+    Edit {
+        id: u32,
+        /// Start as HH:MM.
+        start: String,
+        /// End as HH:MM.
+        end: String,
+    },
+    /// Delete a recorded interval.
+    Rm { id: u32 },
 }
 
 #[derive(Subcommand)]
@@ -212,6 +250,7 @@ fn main() -> Result<()> {
             }
         }
         Command::Lunch { action } => lunch(&cfg, action)?,
+        Command::Private { action } => private(&cfg, action)?,
     }
     Ok(())
 }
@@ -246,6 +285,120 @@ fn lunch(cfg: &Config, action: LunchAction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn private(cfg: &Config, action: PrivateAction) -> Result<()> {
+    let path = &cfg.state_file;
+    let now = chrono::Utc::now().with_timezone(&cfg.timezone);
+    match action {
+        PrivateAction::Start {
+            label,
+            event,
+            no_event,
+        } => {
+            let choice = match (event, no_event) {
+                (_, true) => state::EventChoice::None,
+                (Some(title), _) => state::EventChoice::Title(title),
+                (None, false) => state::EventChoice::Auto,
+            };
+            let window = match choice {
+                state::EventChoice::None => None,
+                _ => {
+                    let today = Month {
+                        year: now.year(),
+                        month: now.month(),
+                    };
+                    let cal = calendar(cfg, today)?;
+                    state::link_event(&timed_entries(cfg, &cal), now, &choice)?
+                }
+            };
+            let r = state::State::update(path, |s| {
+                s.private.start(now.naive_local(), label, window).cloned()
+            })??;
+            print!("Timer started {} ({})", r.start.format("%H:%M"), r.label);
+            match &r.replaces {
+                Some(w) => println!(
+                    ", replacing {} {}–{}",
+                    w.title,
+                    w.start.format("%H:%M"),
+                    w.end.format("%H:%M")
+                ),
+                None => println!(),
+            }
+        }
+        PrivateAction::Stop => {
+            let i = state::State::update(path, |s| s.private.stop(now.naive_local()).cloned())??;
+            println!("Recorded {}", interval_text(&i));
+        }
+        PrivateAction::List { month } => {
+            let month = Month::parse(&month)?;
+            let p = state::State::load(path)?.private;
+            let mut any = false;
+            for i in p
+                .intervals
+                .iter()
+                .filter(|i| month.contains(i.start.date()))
+            {
+                println!("{}", interval_text(i));
+                any = true;
+            }
+            if let Some(r) = p.running.filter(|r| month.contains(r.start.date())) {
+                println!(
+                    "running  since {}  {}",
+                    r.start.format("%Y-%m-%d %H:%M"),
+                    r.label
+                );
+                any = true;
+            }
+            if !any {
+                println!("No private time recorded in {month}");
+            }
+        }
+        PrivateAction::Edit { id, start, end } => {
+            let start = state::parse_time(&start)?;
+            let end = state::parse_time(&end)?;
+            let i = state::State::update(path, |s| s.private.edit(id, start, end).cloned())??;
+            println!("Changed {}", interval_text(&i));
+        }
+        PrivateAction::Rm { id } => {
+            let i = state::State::update(path, |s| s.private.remove(id))??;
+            println!("Deleted {}", interval_text(&i));
+        }
+    }
+    Ok(())
+}
+
+/// One recorded interval as a line: id, day, times, hours, label and the
+/// appointment it replaces.
+fn interval_text(i: &state::PrivateInterval) -> String {
+    let end = if i.end.date() == i.start.date() {
+        i.end.format("%H:%M").to_string()
+    } else {
+        i.end.format("%Y-%m-%d %H:%M").to_string()
+    };
+    let hours = (i.end - i.start).num_minutes() as f64 / 60.0;
+    let replaces = i
+        .replaces
+        .as_ref()
+        .map(|w| {
+            format!(
+                "  (replaces {} {}–{})",
+                w.title,
+                w.start.format("%H:%M"),
+                w.end.format("%H:%M")
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "{:>3}  {}  {}–{}  {:>5.2} h  {}{}",
+        i.id,
+        i.start.format("%Y-%m-%d"),
+        i.start.format("%H:%M"),
+        end,
+        hours,
+        i.label,
+        replaces
+    )
 }
 
 fn company_id(cfg: &Config, api: &danlon_api::Client) -> Result<String> {
