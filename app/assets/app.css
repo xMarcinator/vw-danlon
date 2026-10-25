@@ -1927,3 +1927,249 @@ table.logbook tr.total td {
     padding: 0;
   }
 }
+
+/* FNT-26: today marker, days after today, working from home, auto-started
+   private time, mileage rules. */
+table.days tr.today {
+  background: var(--acc-soft);
+  box-shadow: inset 4px 0 0 var(--acc);
+}
+
+table.days td .chip.today,
+table.days td .chip.planned {
+  min-width: 0;
+  border-radius: 999px;
+}
+
+.chip.today {
+  background: var(--acc);
+  color: var(--on-acc);
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.day-list li[aria-current="date"] {
+  background: var(--acc-soft);
+  box-shadow: inset 4px 0 0 var(--acc);
+}
+
+.day-num .today-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--acc-text);
+}
+
+.dot.off {
+  background: var(--ctl);
+}
+
+.home-pill {
+  padding: 3px 4px 3px 12px;
+  gap: 8px;
+}
+
+.home-pill.on {
+  border-color: var(--acc);
+  color: var(--acc-text);
+}
+
+.pill-btn {
+  font: inherit;
+  font-size: 12px;
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--acc);
+  color: var(--on-acc);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.pill-btn.stop {
+  background: var(--surf);
+  color: var(--acc-text);
+  border: 1px solid var(--acc);
+}
+
+.home-card.on {
+  border-color: var(--acc);
+}
+
+.home-head {
+  padding-right: 14px;
+}
+
+.pt-dot.home {
+  background: var(--acc);
+}
+
+.pt-btn.home-stop {
+  background: var(--surf);
+  color: var(--acc-text);
+  border: 1px solid var(--acc);
+}
+
+.pt-status.acc {
+  background: var(--acc-soft);
+  color: var(--acc-text);
+}
+
+.pt-status.auto {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pt-auto-sub {
+  color: var(--sub);
+}
+
+.pt-auto-btn {
+  align-self: flex-start;
+  border-color: var(--warn-line);
+}
+
+.pt-auto-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.pt-auto-edit input {
+  font-size: 14px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--text);
+}
+
+.pt-row .small-btn {
+  flex-shrink: 0;
+}
+
+.seg-tabs,
+.mileage-tabs {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--chip);
+  font-size: 12px;
+}
+
+.seg-tabs button,
+.mileage-tabs button {
+  font: inherit;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--sub);
+  cursor: pointer;
+}
+
+.seg-tabs button[aria-selected="true"],
+.mileage-tabs button[aria-selected="true"] {
+  background: var(--surf);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.biz-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--sub);
+  white-space: nowrap;
+}
+
+.biz-check input {
+  accent-color: var(--acc);
+  width: 16px;
+  height: 16px;
+}
+
+.trip-entry .rule-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.trip-entry .biz-check {
+  justify-self: end;
+}
+
+.trip-entry .rule-cell .chip {
+  font-size: 11px;
+  padding: 1px 7px;
+}
+
+.link-btn.small {
+  font-size: 12px;
+}
+
+.pad-x {
+  padding: 0 4px;
+  margin: 0;
+}
+
+ul.rules {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+table.days.rates {
+  width: auto;
+  min-width: 320px;
+  font-size: 13px;
+}
+
+table.rates td,
+table.rates th {
+  padding: 6px 12px 6px 0;
+}
+
+table.rates td:first-child {
+  padding-left: 0;
+}
+
+.hw-check {
+  align-self: end;
+  padding-bottom: 8px;
+}
+
+@media (max-width: 719px) {
+  .mileage-tabs.narrow-only {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr;
+    padding: 3px;
+    border-radius: 10px;
+  }
+
+  .mileage-tabs button {
+    font-size: 14px;
+    min-height: 40px;
+    border-radius: 8px;
+  }
+
+  .trip-entry .biz-check input {
+    width: 18px;
+    height: 18px;
+  }
+
+  .hw-check {
+    padding-bottom: 0;
+  }
+}

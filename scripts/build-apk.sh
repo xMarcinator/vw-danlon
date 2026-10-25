@@ -38,6 +38,11 @@ dx bundle --platform android --release --target aarch64-linux-android --package-
 gradle_dir=$repo/target/dx/vw-danlon-app/release/android/app
 "$ndk_bin/llvm-strip" --strip-all "$gradle_dir/app/src/main/jniLibs/arm64-v8a/libmain.so"
 sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/' "$gradle_dir/app/build.gradle.kts"
+# dx writes versionCode = 1 for every version; Android only installs an
+# update over the old app when versionCode grows: 0.2.0 -> 200.
+IFS=. read -r major minor patch <<< "$version"
+version_code=$((major * 10000 + minor * 100 + patch))
+sed -i "s/versionCode = [0-9]*/versionCode = $version_code/" "$gradle_dir/app/build.gradle.kts"
 (cd "$gradle_dir" && ./gradlew assembleRelease -q \
   -x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease)
 apk=$gradle_dir/app/build/outputs/apk/release/app-release-unsigned.apk
@@ -55,4 +60,5 @@ trap 'rm -rf "$tmp"' EXIT
 if "$build_tools/aapt2" dump badging "$out" | grep -q application-debuggable; then
   echo "$out is debuggable" >&2; exit 1
 fi
+"$build_tools/aapt2" dump badging "$out" | grep -o "versionCode='[0-9]*' versionName='[^']*'"
 ls -lh "$out"

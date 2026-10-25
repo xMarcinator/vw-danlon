@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 use vw_danlon::calendar::Occurrence;
 use vw_danlon::config::Config;
 use vw_danlon::service::{self, LunchChoice, ManualTripForm, PrivateItem, PrivateState};
-use vw_danlon::state::{self, EventChoice};
+use vw_danlon::state::{self, EventChoice, IntervalKind};
 use vw_danlon::trips::Trip;
 
 /// Hours as the mockup writes them: "7,58".
@@ -164,6 +164,14 @@ pub enum Action {
     /// title, or without one.
     Start(Option<String>),
     Stop,
+    /// The real start, as typed, of the appointment started automatically.
+    StartedAt(String),
+    /// You did not go to the private appointment on that day with this
+    /// title: it counts no private time.
+    Skip(NaiveDate, String),
+    /// Start or stop the working-from-home timer.
+    HomeStart,
+    HomeStop,
     Change {
         id: u32,
         label: String,
@@ -188,6 +196,7 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Panel {
     Private,
+    Home,
     Lunch,
     Trips,
 }
@@ -197,6 +206,7 @@ impl Action {
         match self {
             Action::Lunch(..) | Action::LunchAt { .. } => Panel::Lunch,
             Action::AddTrip(..) | Action::DeleteTrip(_) => Panel::Trips,
+            Action::HomeStart | Action::HomeStop => Panel::Home,
             _ => Panel::Private,
         }
     }
@@ -247,6 +257,31 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
                 hm(i.start),
                 hm(i.end)
             )
+        }
+        Action::StartedAt(at) => {
+            let at = state::parse_time(at.trim())?;
+            let r = service::start_private(cfg, cal, now, &EventChoice::Auto, Some(at), None)?;
+            format!("Timer running since {} ({})", hm(r.start), r.label)
+        }
+        Action::Skip(date, title) => {
+            let w = service::skip_private(cfg, cal, *date, Some(title), now.naive_local())?;
+            format!(
+                "Skipped {} {}–{}: no private time",
+                w.title,
+                hm(w.start),
+                hm(w.end)
+            )
+        }
+        Action::HomeStart => {
+            let r = state::State::update(&cfg.database, |s| {
+                s.home.start(now.naive_local(), None, None).cloned()
+            })??;
+            format!("Working from home since {}", hm(r.start))
+        }
+        Action::HomeStop => {
+            let i =
+                state::State::update(&cfg.database, |s| s.home.stop(now.naive_local()).cloned())??;
+            format!("Recorded {} {}–{}", i.label, hm(i.start), hm(i.end))
         }
         Action::Change {
             id,
@@ -306,14 +341,24 @@ fn when(start: NaiveDateTime, end: Option<NaiveDateTime>, today: NaiveDate) -> S
     }
 }
 
-/// The note, chip text and chip class of an item.
-fn describe(item: &PrivateItem, current: bool) -> (String, &'static str, &'static str) {
+/// The note, chip text and chip class of an item; `auto_start` when
+/// private appointments start automatically.
+fn describe(
+    item: &PrivateItem,
+    current: bool,
+    auto_start: bool,
+) -> (String, &'static str, &'static str) {
     let replaces = |planned: Option<(NaiveDateTime, NaiveDateTime)>| {
         planned
             .map(|(s, e)| format!(" · replaces {}–{}", hm(s), hm(e)))
             .unwrap_or_default()
     };
     match &item.state {
+        PrivateState::Planned if current && auto_start => (
+            format!("Next · starts automatically at {}", hm(item.start())),
+            "Next",
+            "chip acc",
+        ),
         PrivateState::Planned if current => ("Next · from the calendar".into(), "Next", "chip acc"),
         PrivateState::Planned => ("From the calendar".into(), "Planned", "chip"),
         PrivateState::Running { since } => (
@@ -326,12 +371,16 @@ fn describe(item: &PrivateItem, current: bool) -> (String, &'static str, &'stati
             "chip warn",
         ),
         PrivateState::StartedAutomatically { since } => (
-            format!(
-                "Started automatically at {}{}",
-                hm(*since),
-                replaces(item.planned)
-            ),
-            "Started",
+            format!("Started automatically at {}", hm(*since)),
+            "Auto",
+            "chip warn",
+        ),
+        PrivateState::Recorded {
+            kind: IntervalKind::CalendarTime,
+            ..
+        } => (
+            "Not tracked · calendar time used · Edit to change".into(),
+            "Calendar time",
             "chip warn",
         ),
         PrivateState::Recorded { start, end, .. } => (
@@ -347,30 +396,41 @@ fn describe(item: &PrivateItem, current: bool) -> (String, &'static str, &'stati
     }
 }
 
-/// Private-time items, each recorded one with an editor for its label and
-/// times and a Delete button.
+/// Private-time items: a recorded one (also calendar time) with an editor
+/// for its label and times and a Delete button; an appointment not
+/// recorded (planned or started automatically) with Skip.
 #[component]
 pub fn PrivateList(
     items: Vec<PrivateItem>,
     current: Option<usize>,
     today: NaiveDate,
+    auto_start: bool,
     on_action: Callback<Action, bool>,
 ) -> Element {
     let mut editing = use_signal(|| None::<u32>);
     rsx! {
         for (i , item) in items.into_iter().enumerate() {
             {
-                let (note, chip, chip_class) = describe(&item, current == Some(i));
+                let (note, chip, chip_class) = describe(&item, current == Some(i), auto_start);
                 let (start, end) = match &item.state {
                     PrivateState::Recorded { start, end, .. } => (*start, Some(*end)),
-                    PrivateState::Running { since }
-                    | PrivateState::StartedAutomatically { since } => (*since, None),
+                    PrivateState::Running { since } => (*since, None),
+                    PrivateState::StartedAutomatically { since } => {
+                        (*since, item.planned.map(|p| p.1))
+                    }
                     PrivateState::Planned => (item.start(), item.planned.map(|p| p.1)),
                 };
                 let id = match item.state {
                     PrivateState::Recorded { id, .. } => Some(id),
                     _ => None,
                 };
+                // An appointment not recorded can be skipped: you did not go.
+                let skip = matches!(
+                    item.state,
+                    PrivateState::Planned | PrivateState::StartedAutomatically { .. }
+                )
+                .then(|| item.planned.map(|(s, _)| (s.date(), item.label.clone())))
+                .flatten();
                 let label = item.label.clone();
                 rsx! {
                     li { class: "pt-item",
@@ -393,6 +453,16 @@ pub fn PrivateList(
                                         editing.set(if open { None } else { Some(id) });
                                     },
                                     "Edit"
+                                }
+                            }
+                            if let Some((date, title)) = skip {
+                                button {
+                                    class: "small-btn",
+                                    title: "I didn't go: no private time",
+                                    onclick: move |_| {
+                                        on_action.call(Action::Skip(date, title.clone()));
+                                    },
+                                    "Skip"
                                 }
                             }
                         }

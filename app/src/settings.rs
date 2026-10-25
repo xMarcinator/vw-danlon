@@ -7,7 +7,7 @@ use vw_danlon::service::SyncOutcome;
 
 use crate::Screen;
 use crate::import::{self, PickButton, Picked};
-use crate::setup::{self, AccountStatus, Problem, SettingsForm, Setup, Theme};
+use crate::setup::{self, AccountStatus, HomeWorkingForm, Problem, SettingsForm, Setup, Theme};
 
 /// Switches the theme now and remembers it in `app.toml`.
 pub fn apply_theme(mut setup: Signal<Setup>, theme: Theme) {
@@ -50,7 +50,7 @@ type DataJob = Box<dyn FnOnce(&Setup) -> anyhow::Result<String> + Send>;
 const IMPORT_OLD: &str = "Import old data…";
 
 #[cfg(not(target_os = "android"))]
-const DATA_NOTE: &str = "Import old data: pick the folder you used with the command-line tool (config.toml, trips.json, state.json). Its settings, trips and state replace this app's; then trips.json and state.json are deleted there, config.toml stays. A backup holds settings, trips, ticks, lunch and private time — not the calendar link or account token, which you enter again on the other device. Importing a backup replaces this app's data.";
+const DATA_NOTE: &str = "Import old data: pick the folder you used with the command-line tool (config.toml, trips.json, state.json). Its settings, trips and state replace this app's; then trips.json and state.json are deleted there, config.toml stays. A backup holds settings, trips, ticks, lunch, private and home-working time — not the calendar link or account token, which you enter again on the other device. Importing a backup replaces this app's data.";
 #[cfg(target_os = "android")]
 const DATA_NOTE: &str = "Move your data from the computer: export a backup there, then import it here; it replaces the data on this phone. The calendar link and account token are not in the backup.";
 
@@ -106,6 +106,12 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut link = use_signal(String::new);
     let mut workplace = use_signal(|| initial.workplace.clone());
     let mut home = use_signal(|| initial.home.clone());
+    let initial_hw = initial.home_working.clone().unwrap_or(HomeWorkingForm {
+        keywords: String::new(),
+        at_home_address: true,
+    });
+    let mut hw_keywords = use_signal(|| initial_hw.keywords.clone());
+    let mut hw_at_home = use_signal(|| initial_hw.at_home_address);
     let mut status = use_signal(|| Status::None);
     let mut trips_status = use_signal(|| None::<Result<String, String>>);
     let mut account_status = use_signal(|| None::<Result<String, String>>);
@@ -127,6 +133,28 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let store = s.secret_store().describe();
     let no_calendar = s.problems.contains(&Problem::NoCalendar);
     let has_mileage = s.config.as_ref().is_some_and(|c| c.mileage.is_some());
+    // The yearly rates, newest first: (year, low, high, threshold km).
+    let mut rates: Vec<(i32, String, String, String)> = s
+        .config
+        .as_ref()
+        .and_then(|c| c.mileage.as_ref())
+        .map(|m| {
+            m.rates
+                .iter()
+                .map(|r| {
+                    (
+                        r.year,
+                        crate::screens::hours(r.low),
+                        crate::screens::hours(r.high),
+                        crate::screens::kroner(r.threshold_km)
+                            .trim_end_matches(",00 kr")
+                            .to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    rates.sort_by_key(|r| std::cmp::Reverse(r.0));
     let file_mode = s.settings.secret_file.is_some();
     let theme = s.settings.theme;
     let link_hint = if s.link_in_store {
@@ -178,6 +206,10 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             calendar_link: link(),
             workplace: workplace(),
             home: home(),
+            home_working: Some(HomeWorkingForm {
+                keywords: hw_keywords(),
+                at_home_address: hw_at_home(),
+            }),
         };
         let result = setup::save(&setup.peek(), &form);
         match result {
@@ -383,6 +415,95 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        section { class: "card", "aria-labelledby": "s-home",
+            h2 { id: "s-home", "Working from home" }
+            span { class: "sub",
+                "A work event titled like this, or placed at your home address, counts its planned hours as worked (minus lunch and private time). The Start/Stop timer on Month counts the time you measure instead. Days at home are not commuting days."
+            }
+            div { class: "grid2",
+                div { class: "field",
+                    label { r#for: "h-kw", "Event titles containing" }
+                    input {
+                        id: "h-kw",
+                        r#type: "text",
+                        value: "{hw_keywords}",
+                        oninput: move |e| hw_keywords.set(e.value()),
+                    }
+                    span { class: "note", "Whole words, separated by commas" }
+                }
+                label { class: "check hw-check",
+                    input {
+                        r#type: "checkbox",
+                        checked: hw_at_home(),
+                        onchange: move |e| hw_at_home.set(e.checked()),
+                    }
+                    span { "An event at the home address is home working" }
+                }
+            }
+        }
+
+        section { class: "card", "aria-labelledby": "s-rules",
+            h2 { id: "s-rules", "Mileage rules" }
+            span { class: "sub",
+                "All driving is logged. Only trips that count under Skat’s rules for tax-free kørselsgodtgørelse are reimbursed; the rest are listed as “not reimbursable” with the reason."
+            }
+            ul { class: "rules",
+                li {
+                    b { "Client visits" }
+                    " (work events at other addresses): reimbursed, and the time is work hours. Home ↔ client counts for 60 working days per address within 12 months; work ↔ client always."
+                }
+                li {
+                    b { "Home ↔ fixed workplace" }
+                    ": private (commute). Logged as driving, never reimbursed, not work hours."
+                }
+                li {
+                    b { "Errands on the way home" }
+                    ": private. After a client visit only the direct km home are reimbursed."
+                }
+                li {
+                    b { "Between workplaces" }
+                    " during the day: reimbursed (tick Business on the trip if the tool can’t see it)."
+                }
+            }
+            span { class: "note",
+                "These follow Skat (LL § 9 B, skat.dk) and can’t be switched off. Kørselsfradrag (LL § 9 C) is separate; the Mileage screen shows the estimate. Nothing is sent to Skat; godtgørelse reaches Skat through Danløn."
+            }
+            if rates.is_empty() {
+                span { class: "note",
+                    "No yearly rates: the mileage logbook isn't set up. "
+                    button {
+                        class: "link-btn",
+                        onclick: move |_| screen.set(Screen::Mileage),
+                        "Set it up"
+                    }
+                }
+            } else {
+                table { class: "days rates",
+                    thead {
+                        tr {
+                            th { scope: "col", "Year" }
+                            th { scope: "col", class: "r", "kr/km" }
+                            th { scope: "col", class: "r", "up to" }
+                            th { scope: "col", class: "r", "then kr/km" }
+                        }
+                    }
+                    tbody {
+                        for (year , low , high , threshold) in rates {
+                            tr {
+                                td { "{year}" }
+                                td { class: "r", "{low}" }
+                                td { class: "r", "{threshold} km" }
+                                td { class: "r", "{high}" }
+                            }
+                        }
+                    }
+                }
+                span { class: "note",
+                    "Rates are Skatterådet’s for each year, in [[mileage.rates]] in config.toml; add next year’s when published."
                 }
             }
         }

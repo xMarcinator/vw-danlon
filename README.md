@@ -549,7 +549,7 @@ keystore.
 
 ```sh
 scripts/build-apk.sh             # -> dist/vw-danlon-<version>-arm64.apk
-adb install -r dist/vw-danlon-0.1.0-arm64.apk
+adb install -r dist/vw-danlon-0.2.0-arm64.apk
 ```
 
 The script runs `dx bundle --platform android --release`, rebuilds the

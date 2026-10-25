@@ -208,6 +208,7 @@ pub fn render(a: DayArgs) -> Element {
                         items: private.items.clone(),
                         current: None,
                         today,
+                        auto_start: cfg.private.auto_start,
                         on_action,
                     }
                 }

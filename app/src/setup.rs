@@ -338,6 +338,35 @@ pub struct SettingsForm {
     pub calendar_link: String,
     pub workplace: String,
     pub home: String,
+    /// `[home_working]`; none leaves it as it is.
+    pub home_working: Option<HomeWorkingForm>,
+}
+
+/// The Settings screen's Working from home section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HomeWorkingForm {
+    /// Comma-separated words, e.g. "Hjemmearbejde, Hjemme".
+    pub keywords: String,
+    pub at_home_address: bool,
+}
+
+impl HomeWorkingForm {
+    fn from_config(cfg: Option<&Config>) -> HomeWorkingForm {
+        let h = cfg.map(|c| c.home_working.clone()).unwrap_or_default();
+        HomeWorkingForm {
+            keywords: h.keywords.join(", "),
+            at_home_address: h.at_home_address,
+        }
+    }
+
+    fn keywords(&self) -> Vec<String> {
+        self.keywords
+            .split(',')
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect()
+    }
 }
 
 impl SettingsForm {
@@ -350,6 +379,7 @@ impl SettingsForm {
                 .and_then(|c| c.mileage.as_ref())
                 .and_then(|m| m.home.clone())
                 .unwrap_or_default(),
+            home_working: Some(HomeWorkingForm::from_config(cfg)),
         }
     }
 }
@@ -382,6 +412,30 @@ pub fn save(setup: &Setup, form: &SettingsForm) -> Result<()> {
             bail!("home is part of the mileage logbook: set it up on the Mileage screen first")
         }
         None => {}
+    }
+    if let Some(h) = &form.home_working {
+        // The defaults need no section; an existing one is kept up to date.
+        let default = vw_danlon::config::HomeWorkingConfig::default();
+        let words = h.keywords();
+        if doc.contains_key("home_working")
+            || words != default.keywords
+            || h.at_home_address != default.at_home_address
+        {
+            if !doc.contains_key("home_working") {
+                let mut t = toml_edit::Table::new();
+                t.decor_mut()
+                    .set_prefix("\n# Working from home, set in the app.\n");
+                doc.insert("home_working", toml_edit::Item::Table(t));
+            }
+            let t = doc["home_working"]
+                .as_table_like_mut()
+                .context("[home_working] is not a table")?;
+            t.insert(
+                "keywords",
+                toml_edit::value(words.iter().collect::<toml_edit::Array>()),
+            );
+            t.insert("at_home_address", toml_edit::value(h.at_home_address));
+        }
     }
     let new = doc.to_string();
 
@@ -730,6 +784,7 @@ pub mod tests {
             calendar_link: " https://calendar.example/x.ics ".into(),
             workplace: "Kontorvej 1, 8000 Aarhus C".into(),
             home: "Hjemvej 3, 8200 Aarhus N".into(),
+            ..SettingsForm::from_config(None)
         };
         save(&s, &form).unwrap();
 
@@ -769,11 +824,41 @@ pub mod tests {
             calendar_link: "https://calendar.example/y.ics".into(),
             workplace: "Kontorvej 1".into(),
             home: String::new(),
+            home_working: None,
         };
         save(&s, &form).unwrap();
         let cfg = Config::load(&dir.join("config.toml")).unwrap();
         assert_eq!(cfg.workplace.as_deref(), Some("Kontorvej 1"));
         assert!(cfg.calendar.is_none());
+    }
+
+    #[test]
+    fn home_working_words_are_saved_and_defaults_add_nothing() {
+        let dir = file_dir("home-working");
+        let s = Setup::load(Ok(dir.clone()));
+        save(&s, &SettingsForm::from_config(None)).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(!text.contains("home_working"), "{text}");
+
+        let s = Setup::load(Ok(dir.clone()));
+        let form = SettingsForm {
+            home_working: Some(HomeWorkingForm {
+                keywords: " Hjemme , WFH,, ".into(),
+                at_home_address: false,
+            }),
+            ..SettingsForm::from_config(s.config.as_ref())
+        };
+        save(&s, &form).unwrap();
+        let cfg = Config::load(&dir.join("config.toml")).unwrap();
+        assert_eq!(cfg.home_working.keywords, ["Hjemme", "WFH"]);
+        assert!(!cfg.home_working.at_home_address);
+        assert_eq!(
+            SettingsForm::from_config(Some(&cfg)).home_working.unwrap(),
+            HomeWorkingForm {
+                keywords: "Hjemme, WFH".into(),
+                at_home_address: false,
+            }
+        );
     }
 
     #[test]
@@ -789,6 +874,7 @@ pub mod tests {
             calendar_link: "https://calendar.example/z.ics".into(),
             workplace: String::new(),
             home: "Hjemvej 3".into(),
+            home_working: None,
         };
         let err = save(&s, &form).unwrap_err();
         assert!(err.to_string().contains("Mileage screen"), "{err}");
