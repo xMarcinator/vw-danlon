@@ -1,15 +1,16 @@
-//! Trips imported from Min Volkswagen exports, merged in one JSON file
-//! beside the config. A trip is identified by its start time and start
+//! Trips imported from Min Volkswagen exports or synced from the account,
+//! merged in one JSON file beside the config. A trip is identified by its start time and start
 //! odometer reading, so overlapping exports add each trip once. Driver name
 //! and licence plate are never stored.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, FixedOffset, NaiveDate};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
+use crate::month::Month;
 use crate::trips::{ExportTrip, Position, Trip};
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -78,6 +79,70 @@ pub fn import(
         .zip(imported.last())
         .map(|(f, l)| (f.trip.start.date_naive(), l.trip.start.date_naive()));
     Ok((merged, period))
+}
+
+/// What a sync changed, over the whole period.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Synced {
+    pub merged: Merged,
+    /// Fetched trips without an address or coordinates.
+    pub without_position: usize,
+}
+
+/// Fetches the trips starting `from` through `to` month by month with
+/// `fetch(first_day, last_day)` and merges each month into the store at
+/// `store` once it has been fetched whole. A failed month stops the sync:
+/// the months before it stay stored, it and the later ones are not touched.
+/// Trips a fetch returns that start outside its days are left to the month
+/// they start in, so a trip across midnight is counted once.
+pub fn sync(
+    store: &Path,
+    from: NaiveDate,
+    to: NaiveDate,
+    tz: Tz,
+    mut fetch: impl FnMut(NaiveDate, NaiveDate) -> Result<Vec<ExportTrip>>,
+) -> Result<Synced> {
+    let mut synced = Synced {
+        merged: Merged {
+            added: 0,
+            already: 0,
+        },
+        without_position: 0,
+    };
+    let mut first = from;
+    while first <= to {
+        let month = Month {
+            year: first.year(),
+            month: first.month(),
+        };
+        let last = month.last_day().min(to);
+        let mut fetched = fetch(first, last).with_context(|| {
+            format!("syncing {month} stopped; nothing from {first} on was stored")
+        })?;
+        fetched.retain(|t| (first..=last).contains(&t.trip.start.with_timezone(&tz).date_naive()));
+        let mut trips = TripStore::load(store)?;
+        let merged = trips.merge(&fetched);
+        if merged.added > 0 {
+            trips.save(store)?;
+        }
+        synced.merged.added += merged.added;
+        synced.merged.already += merged.already;
+        synced.without_position += crate::connected_cars::without_position(&fetched);
+        first = last + chrono::Duration::days(1);
+    }
+    Ok(synced)
+}
+
+/// The day a sync without `--from` starts: the newest stored trip's day
+/// (trips later that day may be missing from an export), else 1 January of
+/// `today`'s year.
+pub fn sync_start(store: &Path, tz: Tz, today: NaiveDate) -> Result<NaiveDate> {
+    Ok(TripStore::load(store)?
+        .trips
+        .iter()
+        .map(|t| t.start.with_timezone(&tz).date_naive())
+        .max()
+        .unwrap_or_else(|| NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap()))
 }
 
 /// The stored trips, for commands run without `-t`. An empty or missing
@@ -213,6 +278,63 @@ mod tests {
         let dir = temp_dir("store-none");
         let err = stored_trips(&dir.join("trips.json"), TZ).unwrap_err();
         assert!(err.to_string().contains("trips import"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn trip(day: u32, hour: u32, min: u32, odometer: f64) -> ExportTrip {
+        use chrono::TimeZone;
+        let start = TZ.with_ymd_and_hms(2026, 9, day, hour, min, 0).unwrap();
+        ExportTrip {
+            trip: Trip {
+                start,
+                end: start + chrono::Duration::minutes(20),
+                distance_km: Some(5.0),
+                from: "A".into(),
+                to: "B".into(),
+                purpose: String::new(),
+                business: None,
+                start_pos: None,
+                end_pos: None,
+            },
+            start_odometer: Some(odometer),
+        }
+    }
+
+    #[test]
+    fn a_failed_month_leaves_the_store_unchanged_for_that_month() {
+        let dir = temp_dir("store-sync-fail");
+        let store = dir.join("trips.json");
+        let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let mut asked = Vec::new();
+        let err = sync(
+            &store,
+            day("2026-09-20"),
+            day("2026-11-05"),
+            TZ,
+            |first, last| {
+                asked.push((first, last));
+                match first.month() {
+                    9 => Ok(vec![trip(21, 8, 0, 100.0), trip(30, 23, 50, 200.0)]),
+                    _ => Err(anyhow::anyhow!("Connected Cars answered HTTP 500")),
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            asked,
+            [
+                (day("2026-09-20"), day("2026-09-30")),
+                (day("2026-10-01"), day("2026-10-31"))
+            ],
+            "the sync stops at the failed month"
+        );
+        assert!(
+            format!("{err:#}").contains("syncing 2026-10 stopped; nothing from 2026-10-01 on was stored: Connected Cars answered HTTP 500"),
+            "{err:#}"
+        );
+        let stored = TripStore::load(&store).unwrap().trips;
+        assert_eq!(stored.len(), 2, "September is stored, October is not");
+        assert!(stored.iter().all(|t| t.start.month() == 9));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

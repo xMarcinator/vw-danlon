@@ -111,7 +111,7 @@ enum Command {
         #[command(subcommand)]
         action: AccountAction,
     },
-    /// Imported trips (stored in trips.json beside the config).
+    /// Imported and synced trips (stored in trips.json beside the config).
     Trips {
         #[command(subcommand)]
         action: TripsAction,
@@ -159,6 +159,14 @@ enum AccountAction {
 enum TripsAction {
     /// Merge a Min Volkswagen trip export (.xlsx) into the stored trips.
     Import { file: PathBuf },
+    /// Fetch trips from the connected Min Volkswagen account (unofficial,
+    /// read-only) and merge them into the stored trips, month by month.
+    Sync {
+        /// First day as YYYY-MM-DD (default: the newest stored trip's day,
+        /// else 1 January).
+        #[arg(long)]
+        from: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -302,9 +310,10 @@ fn main() -> Result<()> {
         Command::Lunch { action } => lunch(&cfg, action)?,
         Command::Private { action } => private(&cfg, action)?,
         Command::Account { action } => account(&cfg, action)?,
-        Command::Trips {
-            action: TripsAction::Import { file },
-        } => import_trips(&cfg, &file)?,
+        Command::Trips { action } => match action {
+            TripsAction::Import { file } => import_trips(&cfg, &file)?,
+            TripsAction::Sync { from } => sync_trips(&cfg, from.as_deref())?,
+        },
     }
     Ok(())
 }
@@ -329,20 +338,96 @@ fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn account(cfg: &Config, action: AccountAction) -> Result<()> {
-    let cc = cfg.connected_cars.as_ref();
-    let namespace = cc.map_or("semler:minvolkswagen", |c| c.namespace.as_str());
-    let tokens = match cc.and_then(|c| c.token_file.as_deref()) {
-        Some(f) => connected_cars::TokenStore::File(f.into()),
-        None => connected_cars::TokenStore::Keychain,
-    };
+/// How to reach the account: namespace, where the device token is kept,
+/// and the connected (else configured) email.
+struct AccountAccess<'a> {
+    namespace: &'a str,
+    tokens: connected_cars::TokenStore,
+    email: Option<String>,
+    vehicle: Option<&'a str>,
+}
+
+impl AccountAccess<'_> {
+    fn new<'a>(cfg: &'a Config, state: &state::State) -> AccountAccess<'a> {
+        let cc = cfg.connected_cars.as_ref();
+        AccountAccess {
+            namespace: cc.map_or("semler:minvolkswagen", |c| c.namespace.as_str()),
+            tokens: match cc.and_then(|c| c.token_file.as_deref()) {
+                Some(f) => connected_cars::TokenStore::File(f.into()),
+                None => connected_cars::TokenStore::Keychain,
+            },
+            email: state
+                .account
+                .as_ref()
+                .map(|a| a.email.clone())
+                .or_else(|| cc.and_then(|c| c.email.clone())),
+            vehicle: cc.and_then(|c| c.vehicle.as_deref()),
+        }
+    }
+
+    /// The stored device token, or an error naming `account connect` and
+    /// `trips import`.
+    fn token(&self) -> Result<String> {
+        self.email
+            .as_deref()
+            .map(|e| self.tokens.get(e))
+            .transpose()?
+            .flatten()
+            .context("no device token: run `account connect`, or use `trips import`")
+    }
+}
+
+/// Fetches trips from the account month by month into the trip store.
+fn sync_trips(cfg: &Config, from: Option<&str>) -> Result<()> {
     let state = state::State::load(&cfg.state_file)?;
-    // The connected account, else the configured one.
-    let email = state
-        .account
-        .as_ref()
-        .map(|a| a.email.clone())
-        .or_else(|| cc.and_then(|c| c.email.clone()));
+    let access = AccountAccess::new(cfg, &state);
+    let token = access.token()?;
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
+    let from = match from {
+        Some(f) => state::parse_date(f)?,
+        None => trip_store::sync_start(&cfg.trip_store, cfg.timezone, today)?,
+    };
+    if from > today {
+        anyhow::bail!("--from {from} is after today");
+    }
+    let mut sleep = std::thread::sleep;
+    let session = connected_cars::retry_429(&mut sleep, || {
+        connected_cars::Session::login(access.namespace, &token)
+    })?;
+    let vehicles = connected_cars::retry_429(&mut sleep, || session.vehicles())?;
+    let vehicle = connected_cars::pick_vehicle(&vehicles, access.vehicle)?;
+    let synced = trip_store::sync(&cfg.trip_store, from, today, cfg.timezone, |first, last| {
+        connected_cars::retry_429(&mut sleep, || {
+            session.trips_on_days(&vehicle.id, first, last, cfg.timezone)
+        })
+    })?;
+    let email = access.email.clone().unwrap_or_default();
+    state::State::update(&cfg.state_file, |s| {
+        s.account
+            .get_or_insert(state::Account {
+                email,
+                last_sync: None,
+            })
+            .last_sync = Some(chrono::Utc::now().fixed_offset());
+    })?;
+    println!(
+        "{} added, {} already present",
+        synced.merged.added, synced.merged.already
+    );
+    if synced.without_position > 0 {
+        println!(
+            "{} trips without position: turn on position sharing in the app",
+            synced.without_position
+        );
+    }
+    println!("Period: {from} – {today}");
+    Ok(())
+}
+
+fn account(cfg: &Config, action: AccountAction) -> Result<()> {
+    let state = state::State::load(&cfg.state_file)?;
+    let access = AccountAccess::new(cfg, &state);
+    let (namespace, tokens, email) = (access.namespace, &access.tokens, access.email.clone());
     match action {
         AccountAction::Connect => {
             let email = prompt_email(email.as_deref())?;
@@ -405,12 +490,7 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
             }
         }
         AccountAction::Check { from, to } => {
-            let token = email
-                .as_deref()
-                .map(|e| tokens.get(e))
-                .transpose()?
-                .flatten()
-                .context("no device token: run `account connect`, or use `trips import`")?;
+            let token = access.token()?;
             let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
             let to = to
                 .as_deref()
@@ -423,22 +503,8 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
             };
             let session = connected_cars::Session::login(namespace, &token)?;
             let vehicles = session.vehicles()?;
-            let vehicle =
-                connected_cars::pick_vehicle(&vehicles, cc.and_then(|c| c.vehicle.as_deref()))?;
-            let at = |d: NaiveDate| {
-                use chrono::TimeZone;
-                cfg.timezone
-                    .from_local_datetime(&d.and_time(chrono::NaiveTime::MIN))
-                    .earliest()
-                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .with_context(|| format!("{d} has no midnight in {}", cfg.timezone))
-            };
-            let trips = session.trips(
-                &vehicle.id,
-                at(from)?,
-                at(to + chrono::Duration::days(1))?,
-                cfg.timezone,
-            )?;
+            let vehicle = connected_cars::pick_vehicle(&vehicles, access.vehicle)?;
+            let trips = session.trips_on_days(&vehicle.id, from, to, cfg.timezone)?;
             println!("Vehicle {} (id {})", vehicle.plate, vehicle.id);
             println!("{} trips {from} – {to} (nothing stored)", trips.len());
             let km: f64 = trips.iter().filter_map(|t| t.trip.distance_km).sum();

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -261,6 +261,61 @@ impl Session {
     ) -> Result<Vec<ExportTrip>> {
         parse_trips(&self.query(&trips_query(vehicle_id, from, to)?)?, tz)
     }
+
+    /// The vehicle's trips around the local days `first` through `last`
+    /// (midnight to midnight in `tz`).
+    pub fn trips_on_days(
+        &self,
+        vehicle_id: &str,
+        first: NaiveDate,
+        last: NaiveDate,
+        tz: Tz,
+    ) -> Result<Vec<ExportTrip>> {
+        let midnight = |d: NaiveDate| {
+            tz.from_local_datetime(&d.and_time(NaiveTime::MIN))
+                .earliest()
+                .map(|t| t.with_timezone(&Utc))
+                .with_context(|| format!("{d} has no midnight in {tz}"))
+        };
+        self.trips(
+            vehicle_id,
+            midnight(first)?,
+            midnight(last + chrono::Duration::days(1))?,
+            tz,
+        )
+    }
+}
+
+/// Seconds to wait on a 429 without a Retry-After.
+const DEFAULT_RETRY_AFTER: u64 = 60;
+
+/// Runs `call`; a 429 is retried once after its Retry-After (waited with
+/// `sleep`), a second 429 stops with a message. Other errors pass through.
+pub fn retry_429<T>(
+    sleep: &mut dyn FnMut(Duration),
+    mut call: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let wait = |e: &anyhow::Error| {
+        e.downcast_ref::<HttpError>()
+            .filter(|h| h.status == 429)
+            .map(|h| h.retry_after.unwrap_or(DEFAULT_RETRY_AFTER))
+    };
+    match call() {
+        Err(e) => match wait(&e) {
+            Some(secs) => {
+                eprintln!("Connected Cars asks to slow down (HTTP 429); retrying in {secs} s");
+                sleep(Duration::from_secs(secs));
+                call().map_err(|e| match wait(&e) {
+                    Some(_) => e.context(
+                        "Connected Cars still rate limits after one retry (HTTP 429); try again later",
+                    ),
+                    None => e,
+                })
+            }
+            None => Err(e),
+        },
+        ok => ok,
+    }
 }
 
 /// The `data` of a GraphQL answer; HTTP and GraphQL errors become errors.
@@ -446,11 +501,15 @@ fn parse_trips(data: &Value, tz: Tz) -> Result<Vec<ExportTrip>> {
     Ok(trips)
 }
 
-/// Trips that came without coordinates (position sharing off in the app).
+/// Trips that came without an address or coordinates (position sharing off
+/// in the app).
 pub fn without_position(trips: &[ExportTrip]) -> usize {
     trips
         .iter()
-        .filter(|t| t.trip.start_pos.is_none() || t.trip.end_pos.is_none())
+        .map(|t| &t.trip)
+        .filter(|t| {
+            t.start_pos.is_none() || t.end_pos.is_none() || t.from.is_empty() || t.to.is_empty()
+        })
         .count()
 }
 
@@ -759,6 +818,90 @@ mod tests {
         let q = trips_query("123", from, to).unwrap();
         assert!(q.contains(r#"vehicle(id: 123) { trips(fromTime: "2026-09-30T22:00:00Z", toTime: "2026-10-31T23:00:00Z""#), "{q}");
         assert!(trips_query("1) { x", from, to).is_err());
+    }
+
+    #[test]
+    fn syncing_trips_already_imported_from_an_export_adds_nothing() {
+        use crate::trip_store;
+        use crate::trips::tests::{HEADER, ROWS, temp_dir, write_export};
+        let dir = temp_dir("sync-after-export");
+        let (store, export) = (dir.join("trips.json"), dir.join("export.xlsx"));
+        write_export(&export, &HEADER, &ROWS);
+        trip_store::import(&store, &export, Copenhagen).unwrap();
+        let before = std::fs::read_to_string(&store).unwrap();
+
+        // The same three trips as the account answers them (UTC times).
+        let body = r#"{"data":{"vehicle":{"trips":{"items":[
+            {"startTime":"2026-08-01T07:40:07.000Z","endTime":"2026-08-01T08:05:30.000Z",
+             "startAddressString":"Testvej 1, 8000 Aarhus","endAddressString":"Prøvegade, 8600 Silkeborg",
+             "startLatitude":56.1,"startLongitude":10.2,"endLatitude":56.2,"endLongitude":9.5,
+             "startOdometer":1000.0,"endOdometer":1041.0,"mileage":40.0},
+            {"startTime":"2026-08-02T14:00:00.000Z","endTime":"2026-08-02T14:30:00.000Z",
+             "startAddressString":null,"endAddressString":null,
+             "startLatitude":null,"startLongitude":null,"endLatitude":null,"endLongitude":null,
+             "startOdometer":null,"endOdometer":null,"mileage":42.0},
+            {"startTime":"2026-08-03T05:15:00.000Z","endTime":"2026-08-03T05:20:00.000Z",
+             "startAddressString":"Testvej 1, 8000 Aarhus","endAddressString":"Eksempelvej 3, Lysby",
+             "startLatitude":56.1,"startLongitude":10.2,"endLatitude":56.11,"endLongitude":10.21,
+             "startOdometer":1083.0,"endOdometer":1086.0,"mileage":2.0}
+        ]}}}}"#;
+        let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let synced = trip_store::sync(
+            &store,
+            day("2026-07-31"),
+            day("2026-08-03"),
+            Copenhagen,
+            |_, _| parse_trips(&data(body), Copenhagen),
+        )
+        .unwrap();
+        assert_eq!(
+            synced,
+            trip_store::Synced {
+                merged: trip_store::Merged {
+                    added: 0,
+                    already: 3
+                },
+                without_position: 1,
+            },
+            "each trip counted once although both July and August fetch it"
+        );
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), before);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_429_is_retried_once_after_retry_after() {
+        let busy = || -> Result<u8> {
+            Err(HttpError {
+                status: 429,
+                retry_after: Some(7),
+                message: String::new(),
+            }
+            .into())
+        };
+        let run = |answers: Vec<fn() -> Result<u8>>| {
+            let mut waits = Vec::new();
+            let mut calls = answers.into_iter();
+            let out = retry_429(&mut |d| waits.push(d.as_secs()), || calls.next().unwrap()());
+            (out, waits)
+        };
+
+        let (out, waits) = run(vec![busy, || Ok(1)]);
+        assert_eq!((out.unwrap(), waits), (1, vec![7]));
+
+        let (out, waits) = run(vec![busy, busy]);
+        let err = out.unwrap_err();
+        assert_eq!(waits, [7]);
+        assert_eq!(
+            err.to_string(),
+            "Connected Cars still rate limits after one retry (HTTP 429); try again later"
+        );
+
+        let (out, waits) = run(vec![|| Err(anyhow!("HTTP 500"))]);
+        assert_eq!(
+            (out.unwrap_err().to_string(), waits),
+            ("HTTP 500".into(), vec![])
+        );
     }
 
     #[test]

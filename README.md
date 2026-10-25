@@ -20,6 +20,7 @@ holidays.
 cp config.example.toml config.toml   # once, then edit
 
 cargo run -- trips import ~/Downloads/export.xlsx              # see "Trips from Min Volkswagen"
+#   or: cargo run -- trips sync                                # see "Trip sync from the account"
 cargo run -- report    2026-10                                 # check first
 cargo run -- checklist 2026-10                                 # see "Danløn app checklist"
 cargo run -- timesheet 2026-10 -o arbejdstid-2026-10.csv
@@ -32,7 +33,8 @@ cargo run -- export    2026-10 -o danlon-2026-10.txt
 2. Use `danlon-…txt` to check the month's pay lines (lønart and quantity).
 3. Keep `arbejdstid-…csv` and `korebog-…csv` for at least 5 years.
 
-Without `-t`, the commands use the trips stored by `trips import`. Pass
+Without `-t`, the commands use the trips stored by `trips import` or
+`trips sync`. Pass
 `-t trips.csv` (or a `.json` or `.xlsx` export) to use a file instead. Keep
 all trips for the year: the 20,000 km rate threshold is counted from
 1 January.
@@ -63,6 +65,66 @@ radius_m = 150          # default
 ```
 
 A trip ending within `radius_m` of one counts as arriving there.
+
+## Trip sync from the account (optional)
+
+Instead of exporting by hand, `trips sync` can fetch the same trips from
+your own Min Volkswagen account. This access is **unofficial**: Connected
+Cars, the service behind the app, offers official access only to business
+partners, so it may stop working at any time. The export above stays the
+fallback and keeps working; both feed the same `trips.json`. The sync only
+reads; nothing is written to the account.
+
+Connect once:
+
+```sh
+cargo run -- account connect
+```
+
+It asks for the account email and password (the password is not shown and
+never stored), registers this computer as a device and keeps only the
+device token, in the system keychain. On a machine without a keychain
+service, keep the token in a file instead:
+
+```toml
+[connected_cars]
+email = "you@example.com"              # offered as the default
+token_file = "connected-cars-token"    # relative to the config; git-ignored
+```
+
+The file is readable only by you (mode 0600) and holds the account email,
+so another account's token is never used. If the account has several cars,
+set `vehicle = "AB12345"` (plate or vehicle id); without it the sync lists
+the cars and stops.
+
+Then sync:
+
+```sh
+cargo run -- trips sync                      # from the newest stored trip's day
+cargo run -- trips sync --from 2026-10-01    # from a given day
+```
+
+Without `--from` it starts on the day of the newest stored trip (1 January
+when nothing is stored yet) and runs to today. Trips are fetched month by
+month and merged like an export: a trip with the same start time and start
+odometer is stored once, so syncing trips already imported from an export
+adds nothing. It prints how many trips were added, how many were already
+present, how many came without position, and the period. Trips without an
+address or coordinates are still stored; turn on position sharing in the
+app to get them.
+
+If the service answers 429 (too many requests), the sync waits as long as
+it asks and retries once. Any other failure stops the sync with the HTTP
+status: the months before are stored, the failed month and later ones are
+not, and running `trips sync` again continues from there. A device token
+the service no longer accepts (unused for a year, or deleted) asks you to
+run `account connect` again.
+
+```sh
+cargo run -- account status       # connected or not, and the last sync
+cargo run -- account check        # fetch 30 days without storing, to test access
+cargo run -- account disconnect   # delete the stored device token
+```
 
 ## Danløn app checklist
 
@@ -285,8 +347,3 @@ arrival.
 - Check the `[danlon]` delimiter, decimal format and column order against
   Danløn's current file description. Danløn changed its format in 2026.
 - Check the year's km rates on skat.dk.
-
-## Not yet done
-
-- Fetching trips directly from myVolkswagen. There is no official API, and
-  the unofficial login used by CarConnectivity would have to be ported.
