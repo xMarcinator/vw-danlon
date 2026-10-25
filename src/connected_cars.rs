@@ -93,7 +93,7 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .tls_config(
             ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .root_certs(crate::root_certs())
                 .build(),
         )
         .http_status_as_error(false)

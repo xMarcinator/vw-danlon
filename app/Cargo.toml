@@ -7,9 +7,11 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 chrono = "0.4.45"
+chrono-tz = "0.10.4"
 dioxus = "0.7.10"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt", "time"] }
 toml = "1.1.8"
 toml_edit = "0.25.17"
 vw-danlon = { path = ".." }

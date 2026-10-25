@@ -3,6 +3,7 @@
 
 use dioxus::prelude::*;
 
+mod screens;
 mod secrets;
 mod settings;
 mod setup;
@@ -81,7 +82,7 @@ impl Screen {
         }
     }
 
-    fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static str {
         match self {
             Screen::Month => "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4",
             Screen::Vacation => "M12 3a9 9 0 0 1 9 9H3a9 9 0 0 1 9-9zM12 12v8a2 2 0 0 1-4 0",
@@ -160,7 +161,7 @@ fn App() -> Element {
         div { class: "app", "data-theme": theme.id(),
             Sidebar { screen, setup }
             div { class: "main-col",
-                header { class: "topbar",
+                header { class: if current == Screen::Month { "topbar hidden" } else { "topbar" },
                     if current == Screen::Settings {
                         button {
                             class: "icon-btn",
@@ -179,10 +180,18 @@ fn App() -> Element {
                         }
                     }
                 }
-                main { class: "content",
-                    h1 { "{current.title()}" }
+                main { class: if current == Screen::Month { "content full" } else { "content" },
+                    if current != Screen::Month {
+                        h1 { "{current.title()}" }
+                    }
                     if current == Screen::Settings {
                         settings::Settings { setup }
+                    } else if current == Screen::Month {
+                        if setup.read().config.is_some() {
+                            screens::month::MonthScreen { setup, screen }
+                        } else {
+                            NeedsSetup { screen }
+                        }
                     } else {
                         Placeholder { screen: current }
                     }
@@ -253,6 +262,20 @@ fn Sidebar(screen: Signal<Screen>, setup: Signal<Setup>) -> Element {
                         Icon { d: theme_icon(t), size: 15 }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// The Month screen without a usable config.
+#[component]
+fn NeedsSetup(screen: Signal<Screen>) -> Element {
+    rsx! {
+        div { class: "alert", role: "alert",
+            span { "aria-hidden": "true", style: "font-weight: 700", "!" }
+            div {
+                "The config can't be used yet. "
+                button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
             }
         }
     }

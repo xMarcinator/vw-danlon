@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer};
 use crate::address::Places;
 use crate::trips::Position;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Your employee number in Danløn (must match exactly).
@@ -53,7 +53,7 @@ fn default_timezone() -> chrono_tz::Tz {
 }
 
 /// Norm hours per weekday, used when the calendar does not set the norm.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkWeek {
     pub mon: f64,
@@ -96,7 +96,7 @@ impl WorkWeek {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HolidayConfig {
     #[serde(default = "yes")]
@@ -130,7 +130,7 @@ impl Default for HolidayConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CalendarConfig {
     /// Proton Calendar share link (https://… or webcal://…) or a local .ics file.
@@ -156,7 +156,7 @@ pub struct CalendarConfig {
     pub default_location: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeriodConfig {
     /// Round each day's worked time to the nearest N minutes (0 = no rounding).
@@ -168,7 +168,7 @@ pub struct PeriodConfig {
 }
 
 /// The daily lunch break. It is deducted only where it overlaps time at work.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LunchConfig {
     /// Default start of lunch.
@@ -208,7 +208,7 @@ impl Default for LunchConfig {
 /// Coordinates ("56.1694, 9.5432", as copied from a map) of home and the
 /// workplace. A trip ending within `radius_m` of one counts as arriving
 /// there, whatever address the trip export shows.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlacesConfig {
     pub home: Option<String>,
@@ -238,7 +238,7 @@ fn parse_position(key: &str, s: &str) -> Result<Position> {
 }
 
 /// The Danløn app checklist.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChecklistConfig {
     /// Name of home as used in the Danløn app's routes.
@@ -267,7 +267,7 @@ impl Default for ChecklistConfig {
 }
 
 /// Vacation (samtidighedsferie) from all-day calendar events.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VacationConfig {
     /// All-day events whose title contains one of these words
@@ -340,7 +340,7 @@ fn optional_date<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NaiveDate>, D
 /// The Min Volkswagen account, read through the Connected Cars backend. The
 /// password is never stored; `account connect` keeps a device token in the
 /// operating system's keychain, or in `token_file` when there is none.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectedCarsConfig {
     /// Account email, offered as the default by `account connect`.
@@ -359,7 +359,7 @@ fn default_namespace() -> String {
 }
 
 /// Tax-free mileage allowance (skattefri kørselsgodtgørelse).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MileageConfig {
     pub driver_name: String,
@@ -411,7 +411,7 @@ pub enum HoursReporting {
     Actual,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DanlonConfig {
     #[serde(default)]

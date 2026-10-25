@@ -18,3 +18,14 @@ pub mod timesheet;
 pub mod trip_store;
 pub mod trips;
 pub mod vacation;
+
+/// Root certificates for HTTPS: the platform's verifier, except on Android,
+/// where that verifier needs a JVM hand-off and a Java component the app
+/// does not ship; there the bundled Mozilla roots (webpki-roots) are used.
+pub(crate) fn root_certs() -> ureq::tls::RootCerts {
+    if cfg!(target_os = "android") {
+        ureq::tls::RootCerts::WebPki
+    } else {
+        ureq::tls::RootCerts::PlatformVerifier
+    }
+}

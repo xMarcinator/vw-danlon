@@ -84,8 +84,11 @@ pub struct Day {
     /// Start of the first and end of the last period at work.
     pub first_start: Option<DateTime<Tz>>,
     pub last_end: Option<DateTime<Tz>>,
-    /// Anything that needs checking (e.g. arrival without departure).
+    /// Anything that needs checking (e.g. arrival without departure),
+    /// followed by the day's private appointments.
     pub note: Option<String>,
+    /// What in `note` needs checking, without the private appointments.
+    pub check: Option<String>,
     /// The day's lunch break, deducted where it overlaps `segments`.
     pub lunch: Lunch,
     pub worked_hours: f64,
@@ -480,6 +483,7 @@ pub fn build(
                 note = Some(format!("kalenderpost uden adresse: {summary}"));
             }
 
+            let check = note.clone();
             let day_appointments = appointments.get(&date).map(Vec::as_slice).unwrap_or(&[]);
             for ((s, e), summary) in day_appointments {
                 let text = format!(
@@ -507,6 +511,7 @@ pub fn build(
                 appointments,
                 segments,
                 note,
+                check,
                 lunch,
                 worked_hours,
             }

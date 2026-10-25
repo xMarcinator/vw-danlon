@@ -239,6 +239,17 @@ impl Private {
         Ok(interval)
     }
 
+    /// Changes an interval's label.
+    pub fn relabel(&mut self, id: u32, label: &str) -> Result<&PrivateInterval> {
+        let label = label.trim();
+        if label.is_empty() {
+            bail!("the label is empty");
+        }
+        let i = self.find(id)?;
+        self.intervals[i].label = label.to_string();
+        Ok(&self.intervals[i])
+    }
+
     /// Deletes an interval.
     pub fn remove(&mut self, id: u32) -> Result<PrivateInterval> {
         let i = self.find(id)?;
@@ -565,6 +576,11 @@ mod tests {
                 "no private interval with id 9",
             ),
             (p.remove(9).unwrap_err(), "no private interval with id 9"),
+            (
+                p.relabel(9, "Bank").unwrap_err(),
+                "no private interval with id 9",
+            ),
+            (p.relabel(1, "  ").unwrap_err(), "the label is empty"),
         ] {
             assert_eq!(err.to_string(), want);
         }
@@ -574,6 +590,7 @@ mod tests {
         let err = long.edit(1, t("15:00"), t("14:00")).unwrap_err();
         assert!(err.to_string().contains("over 24 hours"), "{err}");
 
+        assert_eq!(p.relabel(2, " Tandlæge ").unwrap().label, "Tandlæge");
         assert_eq!(p.remove(1).unwrap().label, "Bank");
         assert_eq!(p.intervals.iter().map(|i| i.id).collect::<Vec<_>>(), [2]);
         p.start(at("2026-11-07 10:00"), None, None).unwrap();

@@ -7,15 +7,16 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono_tz::Tz;
 
 use crate::calendar::{self, Occurrence};
 use crate::checklist::{self, ChecklistDay};
 use crate::config::{Config, MileageConfig};
 use crate::connected_cars::{self, TokenStore, Vehicle};
-use crate::mileage::{self, MileageMonth};
+use crate::mileage::{self, MileageMonth, Status};
 use crate::month::{self, Month, MonthReport, TimedEntry};
-use crate::state::{self, RunningTimer, State};
+use crate::state::{self, EventChoice, Private, RunningTimer, State};
 use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
 use crate::vacation::{self, Overview, Rules};
@@ -170,6 +171,252 @@ pub fn forgotten_timer(cfg: &Config, now: NaiveDateTime) -> Result<Option<Runnin
         .private
         .running
         .filter(|r| r.forgotten(now)))
+}
+
+/// How many days after today the Month screen lists coming private
+/// appointments.
+pub const PRIVATE_DAYS_AHEAD: i64 = 14;
+
+/// The calendar for the Month screen: what [`calendar`] fetches, through
+/// [`PRIVATE_DAYS_AHEAD`] days after `today` for the coming private
+/// appointments.
+pub fn month_calendar(cfg: &Config, month: Month, today: NaiveDate) -> Result<Calendar> {
+    let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
+    let to = month
+        .last_day()
+        .max(today + Duration::days(PRIVATE_DAYS_AHEAD));
+    calendar_between(cfg, year_start, to)
+}
+
+/// A month as the Month and Day screens show it.
+#[derive(Debug)]
+pub struct MonthView {
+    pub report: MonthReport,
+    pub mileage: Option<MileageMonth>,
+    /// Today's and the coming private time.
+    pub private: PrivateTime,
+}
+
+/// The month's days and mileage as `report` builds them, and the private
+/// time from `now`'s day through [`PRIVATE_DAYS_AHEAD`] days later. `cal`
+/// may reach past the month (see [`month_calendar`]); the days and mileage
+/// use only the occurrences up to the month's end, like `report`.
+pub fn month_view(
+    cfg: &Config,
+    month: Month,
+    trips: &[Trip],
+    cal: &[Occurrence],
+    now: DateTime<Tz>,
+) -> Result<MonthView> {
+    let last = month.last_day();
+    let up_to: Vec<Occurrence> = cal
+        .iter()
+        .filter(|o| occurrence_date(o) <= last)
+        .cloned()
+        .collect();
+    let report = build_month(cfg, month, trips, &up_to)?;
+    let mileage = mileage_for(cfg, month, trips, &up_to)?;
+    let today = now.date_naive();
+    let private = private_time(
+        &timed_entries(cfg, cal),
+        &State::load(&cfg.state_file)?.private,
+        today,
+        today + Duration::days(PRIVATE_DAYS_AHEAD),
+        now.naive_local(),
+    );
+    Ok(MonthView {
+        report,
+        mileage,
+        private,
+    })
+}
+
+fn occurrence_date(o: &Occurrence) -> NaiveDate {
+    match o {
+        Occurrence::Timed { start, .. } => start.date_naive(),
+        Occurrence::AllDay { date, .. } => *date,
+    }
+}
+
+/// Where a private-time item stands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrivateState {
+    /// A private calendar appointment, not measured with the timer.
+    Planned,
+    /// The timer measures it now.
+    Running { since: NaiveDateTime },
+    /// Measured with the timer; `id` is the recorded interval's.
+    Recorded {
+        id: u32,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+    },
+}
+
+/// A private calendar appointment, recorded private time, or both when
+/// the recording replaces the appointment's planned window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrivateItem {
+    pub label: String,
+    /// The calendar appointment's planned window.
+    pub planned: Option<(NaiveDateTime, NaiveDateTime)>,
+    pub state: PrivateState,
+}
+
+impl PrivateItem {
+    /// When it starts: as measured, else as planned.
+    pub fn start(&self) -> NaiveDateTime {
+        match (&self.state, self.planned) {
+            (PrivateState::Running { since }, _) => *since,
+            (PrivateState::Recorded { start, .. }, _) => *start,
+            (PrivateState::Planned, Some((start, _))) => start,
+            (PrivateState::Planned, None) => NaiveDateTime::MIN,
+        }
+    }
+}
+
+/// The private time of some days, in start order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PrivateTime {
+    pub running: Option<RunningTimer>,
+    pub items: Vec<PrivateItem>,
+    /// The item to show first: the running one, else the first planned
+    /// appointment that has not ended at `now`.
+    pub current: Option<usize>,
+}
+
+/// The private appointments and recorded intervals starting `from`
+/// through `to`, and the running timer when it started then or `now` is
+/// in that range. A recording or timer linked to an appointment is shown
+/// as that appointment.
+pub fn private_time(
+    entries: &[TimedEntry],
+    private: &Private,
+    from: NaiveDate,
+    to: NaiveDate,
+    now: NaiveDateTime,
+) -> PrivateTime {
+    let in_range = |d: NaiveDate| from <= d && d <= to;
+    let mut items: Vec<PrivateItem> = entries
+        .iter()
+        .filter(|e| e.kind == month::EntryKind::Private && in_range(e.start.date_naive()))
+        .map(|e| PrivateItem {
+            label: e.summary.to_string(),
+            planned: Some((e.start.naive_local(), e.end.naive_local())),
+            state: PrivateState::Planned,
+        })
+        .collect();
+    let mut place = |label: &str, replaces: Option<&state::PlannedWindow>, state: PrivateState| {
+        let linked = replaces.and_then(|w| {
+            items.iter_mut().find(|i| {
+                i.state == PrivateState::Planned
+                    && i.planned == Some((w.start, w.end))
+                    && i.label == w.title
+            })
+        });
+        match linked {
+            Some(i) => {
+                i.label = label.to_string();
+                i.state = state;
+            }
+            None => items.push(PrivateItem {
+                label: label.to_string(),
+                planned: replaces.map(|w| (w.start, w.end)),
+                state,
+            }),
+        }
+    };
+    for i in private
+        .intervals
+        .iter()
+        .filter(|i| in_range(i.start.date()))
+    {
+        place(
+            &i.label,
+            i.replaces.as_ref(),
+            PrivateState::Recorded {
+                id: i.id,
+                start: i.start,
+                end: i.end,
+            },
+        );
+    }
+    let running = private
+        .running
+        .clone()
+        .filter(|r| in_range(r.start.date()) || in_range(now.date()));
+    if let Some(r) = &running {
+        place(
+            &r.label,
+            r.replaces.as_ref(),
+            PrivateState::Running { since: r.start },
+        );
+    }
+    items.sort_by_key(PrivateItem::start);
+    let current = items
+        .iter()
+        .position(|i| matches!(i.state, PrivateState::Running { .. }))
+        .or_else(|| {
+            items.iter().position(|i| {
+                i.state == PrivateState::Planned && i.planned.is_some_and(|(_, end)| end > now)
+            })
+        });
+    PrivateTime {
+        running,
+        items,
+        current,
+    }
+}
+
+/// Starts the private timer at `now`, linked to the private calendar
+/// appointment that day that `choice` names, and saves it.
+pub fn start_private(
+    cfg: &Config,
+    cal: &[Occurrence],
+    now: DateTime<Tz>,
+    choice: &EventChoice,
+) -> Result<RunningTimer> {
+    let window = state::link_event(&timed_entries(cfg, cal), now, choice)?;
+    State::update(&cfg.state_file, |s| {
+        s.private.start(now.naive_local(), None, window).cloned()
+    })?
+}
+
+/// Sets a recorded interval's label and start and end times; nothing is
+/// saved when either change is refused.
+pub fn change_private(
+    cfg: &Config,
+    id: u32,
+    label: &str,
+    start: NaiveTime,
+    end: NaiveTime,
+) -> Result<()> {
+    let mut s = State::load(&cfg.state_file)?;
+    s.private.edit(id, start, end)?;
+    s.private.relabel(id, label)?;
+    s.save(&cfg.state_file)
+}
+
+/// The trips starting on `date`, each with how the mileage counts it
+/// (`None` without a `[mileage]` section).
+pub fn day_trips<'a>(
+    trips: &'a [Trip],
+    mileage: Option<&MileageMonth>,
+    date: NaiveDate,
+) -> Vec<(&'a Trip, Option<Status>)> {
+    trips
+        .iter()
+        .filter(|t| t.start.date_naive() == date)
+        .map(|t| {
+            let status = mileage.map(|m| {
+                m.skipped
+                    .iter()
+                    .find(|(s, _)| s == t)
+                    .map_or(Status::Business, |(_, status)| status.clone())
+            });
+            (t, status)
+        })
+        .collect()
 }
 
 /// The vacation overview of the open holiday years on `today`.
@@ -366,4 +613,134 @@ pub fn check_account(
         to,
         trips,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::month::EntryKind;
+    use crate::state::PlannedWindow;
+
+    fn at(s: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
+    }
+
+    fn private(summary: &'static str, start: &str, end: &str) -> TimedEntry<'static> {
+        let tz = chrono_tz::Europe::Copenhagen;
+        TimedEntry {
+            kind: EntryKind::Private,
+            start: at(start).and_local_timezone(tz).unwrap(),
+            end: at(end).and_local_timezone(tz).unwrap(),
+            summary,
+            location: "",
+        }
+    }
+
+    fn window(title: &str, start: &str, end: &str) -> Option<PlannedWindow> {
+        Some(PlannedWindow {
+            title: title.into(),
+            start: at(start),
+            end: at(end),
+        })
+    }
+
+    #[test]
+    fn private_time_merges_recordings_into_their_appointments() {
+        let entries = [
+            private("Læge", "2026-11-24 13:00", "2026-11-24 14:00"),
+            private("Tandlæge", "2026-11-27 08:30", "2026-11-27 09:15"),
+            private("Fysioterapeut", "2026-12-20 15:00", "2026-12-20 16:00"),
+            private("Gammel", "2026-11-20 09:00", "2026-11-20 10:00"),
+        ];
+        let mut p = Private::default();
+        p.start(at("2026-11-24 10:02"), None, None).unwrap();
+        p.stop(at("2026-11-24 11:14")).unwrap();
+        let day = |s: &str| state::parse_date(s).unwrap();
+        let view = |p: &Private, now: &str| {
+            private_time(&entries, p, day("2026-11-24"), day("2026-12-08"), at(now))
+        };
+
+        // Nothing running: the next appointment comes first.
+        let t = view(&p, "2026-11-24 12:00");
+        let labels: Vec<&str> = t.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Privat", "Læge", "Tandlæge"]);
+        assert_eq!(t.current, Some(1));
+        assert!(matches!(
+            t.items[0].state,
+            PrivateState::Recorded { id: 1, .. }
+        ));
+
+        // A timer linked to Læge shows as Læge, running.
+        p.start(
+            at("2026-11-24 12:30"),
+            None,
+            window("Læge", "2026-11-24 13:00", "2026-11-24 14:00"),
+        )
+        .unwrap();
+        let t = view(&p, "2026-11-24 12:40");
+        assert_eq!(t.items.len(), 3);
+        assert_eq!(t.current, Some(1));
+        assert_eq!(
+            t.items[1].state,
+            PrivateState::Running {
+                since: at("2026-11-24 12:30")
+            }
+        );
+
+        // Stopped and relabelled: recorded, keeping the planned window; the
+        // next appointment is now Tandlæge.
+        p.stop(at("2026-11-24 14:10")).unwrap();
+        p.relabel(2, "Læge (blodprøve)").unwrap();
+        let t = view(&p, "2026-11-24 14:20");
+        assert_eq!(t.items[1].label, "Læge (blodprøve)");
+        assert_eq!(
+            t.items[1].planned,
+            Some((at("2026-11-24 13:00"), at("2026-11-24 14:00")))
+        );
+        assert!(matches!(
+            t.items[1].state,
+            PrivateState::Recorded { id: 2, .. }
+        ));
+        assert_eq!(t.current, Some(2));
+
+        // A timer left running since yesterday still shows today.
+        let mut p = Private::default();
+        p.start(at("2026-11-23 16:00"), None, None).unwrap();
+        let t = view(&p, "2026-11-24 08:00");
+        assert_eq!(t.items[0].label, state::DEFAULT_LABEL);
+        assert_eq!(t.current, Some(0));
+        assert!(t.running.is_some());
+    }
+
+    #[test]
+    fn a_refused_change_saves_nothing() {
+        let dir = std::env::temp_dir().join(format!("vw-danlon-change-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let cfg = Config::from_text("employee_number = \"1\"\n[danlon]\n", &path).unwrap();
+        State::update(&cfg.state_file, |s| {
+            s.private
+                .start(at("2026-11-03 12:30"), Some("Bank".into()), None)?;
+            s.private.stop(at("2026-11-03 13:00")).map(|_| ())
+        })
+        .unwrap()
+        .unwrap();
+        let t = |s| state::parse_time(s).unwrap();
+
+        let err = change_private(&cfg, 1, "Post", t("13:00"), t("12:00")).unwrap_err();
+        assert_eq!(err.to_string(), "end 12:00 is not after start 13:00");
+        let err = change_private(&cfg, 1, " ", t("12:00"), t("12:40")).unwrap_err();
+        assert_eq!(err.to_string(), "the label is empty");
+        let i = &State::load(&cfg.state_file).unwrap().private.intervals[0];
+        assert_eq!((i.label.as_str(), i.end), ("Bank", at("2026-11-03 13:00")));
+
+        change_private(&cfg, 1, "Post", t("12:15"), t("12:40")).unwrap();
+        let i = &State::load(&cfg.state_file).unwrap().private.intervals[0];
+        assert_eq!(
+            (i.label.as_str(), i.start, i.end),
+            ("Post", at("2026-11-03 12:15"), at("2026-11-03 12:40"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
