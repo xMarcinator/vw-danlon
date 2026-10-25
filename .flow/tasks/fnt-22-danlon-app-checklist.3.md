@@ -29,9 +29,13 @@ Delete the Danløn API client and everything that reaches it, so the tool has no
 
 
 ## Done summary
-TBD
+Removed the Danløn API client (src/danlon_api.rs), `export --send`/`--yes`, the `danlon info|delete` subcommand and the `[danlon.api]` config; a config that still has `[danlon.api]` is refused as an unknown field naming the section (test `config::tests::old_api_section_is_refused`). README, config.example.toml and `--help` no longer mention the API or tokens; `export` remains as a pay-line file writer. `ureq` stays (calendar fetch); state/trip store never used `resolve_token_file`, so no helper was moved; `danlon-token` stays in .gitignore.
 
+baseline: green (cargo test, cargo clippy --all-targets; pre-existing dead_code warning on month::Day::appointments unchanged)
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: f983b3c777ebb9b0dd747110aa8107df8c68b7c8
+- Tests: cargo test (42 passed), cargo clippy --all-targets (rc 0), cargo fmt --check
 - PRs:
