@@ -19,9 +19,11 @@ The planned calendar time includes lunch; subtract the day's lunch window (overr
 - [ ] `cargo test` passes
 
 ## Done summary
-TBD
+Norm = planned calendar time minus the lunch window inside it (R6). Tests updated (calendar norm 12×7,5; Frokost day 7,5) and new asserts for default, 45-min and 0-min overrides.
+stage: impl-review - skipped(config: no review backend configured)
 
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 8f1f17f121b18589c14fb74777baf55c0e14fc58
+- Tests: cargo test
 - PRs:
