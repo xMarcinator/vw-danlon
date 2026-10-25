@@ -7,3 +7,4 @@ trips.json
 trips.json.tmp
 connected-cars-token
 connected-cars-token.tmp
+dist/
