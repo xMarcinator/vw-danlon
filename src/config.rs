@@ -30,6 +30,9 @@ pub struct Config {
     #[serde(default)]
     pub lunch: LunchConfig,
     pub mileage: Option<MileageConfig>,
+    #[serde(default)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the checklist CLI"))]
+    pub checklist: ChecklistConfig,
     pub danlon: DanlonConfig,
     /// The local state file (`state.json` beside the config file).
     #[serde(skip)]
@@ -227,6 +230,35 @@ fn parse_position(key: &str, s: &str) -> Result<Position> {
         _ => bail!(
             "{key} = {s:?} is not a coordinate; expected \"lat, lon\", e.g. \"56.1694, 9.5432\""
         ),
+    }
+}
+
+/// The Danløn app checklist.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChecklistConfig {
+    /// Name of home as used in the Danløn app's routes.
+    #[serde(default = "default_home_name")]
+    pub home_name: String,
+    /// Name of the fixed workplace as used in the Danløn app's routes.
+    #[serde(default = "default_workplace_name")]
+    pub workplace_name: String,
+}
+
+fn default_home_name() -> String {
+    "Hjem".into()
+}
+
+fn default_workplace_name() -> String {
+    "Kontoret".into()
+}
+
+impl Default for ChecklistConfig {
+    fn default() -> Self {
+        ChecklistConfig {
+            home_name: default_home_name(),
+            workplace_name: default_workplace_name(),
+        }
     }
 }
 

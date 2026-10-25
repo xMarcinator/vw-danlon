@@ -1,0 +1,608 @@
+//! What to type into the Danløn app, day by day: Komme/gå registrations from
+//! the day's work periods and one Kørsel registration from its business
+//! trips. Neither form's Description is filled in.
+//!
+//! Private time splits the day into separate Komme/gå entries and is never
+//! registered; a gap overlapping the lunch window (an errand) is bridged and
+//! becomes the entry's break, like the lunch deduction itself. Any other
+//! unworked gap splits the day too.
+
+use chrono::{Datelike, NaiveDate, Weekday};
+
+use crate::address::{self, Places};
+use crate::config::Config;
+use crate::mileage::{Entry, MileageMonth};
+use crate::month::{Day, EntryKind, MonthReport, Span, TimedEntry};
+use crate::trips::{Position, Trip};
+
+#[derive(Debug, Clone)]
+pub struct ChecklistDay {
+    pub date: NaiveDate,
+    pub status: Status,
+    pub komme_gaa: Vec<KommeGaa>,
+    pub korsel: Option<Korsel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    ToEnter,
+    /// Weekend, holiday, vacation or no work: the reason.
+    NothingToEnter(String),
+    /// The day's trips need fixing first: the report's remark.
+    FixFirst(String),
+}
+
+/// One Komme/gå registration: Time = start to end, Break = `break_minutes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KommeGaa {
+    pub time: Span,
+    pub break_minutes: i64,
+}
+
+impl KommeGaa {
+    /// Worked minutes: the span minus the break.
+    pub fn minutes(&self) -> i64 {
+        (self.time.1 - self.time.0).num_minutes() - self.break_minutes
+    }
+
+    /// E.g. "07:58 to 10:00".
+    pub fn time_text(&self) -> String {
+        format!(
+            "{} to {}",
+            self.time.0.format("%H:%M"),
+            self.time.1.format("%H:%M")
+        )
+    }
+
+    /// E.g. "30m", or "none".
+    pub fn break_text(&self) -> String {
+        match self.break_minutes {
+            0 => "none".into(),
+            m if m < 60 => format!("{m}m"),
+            m => duration_text(m),
+        }
+    }
+
+    /// E.g. "4h 15m".
+    pub fn total_text(&self) -> String {
+        duration_text(self.minutes())
+    }
+}
+
+fn duration_text(minutes: i64) -> String {
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
+/// One Kørsel registration for a day's business trips.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Korsel {
+    /// The visited calendar entries' names (the trips' purposes).
+    pub purpose: String,
+    /// Ordered stops by name; only the way out when `return_trip` is on.
+    pub route: Vec<String>,
+    /// "Add return trip": the business driving ends where it started.
+    pub return_trip: bool,
+    /// The day's business km, for checking against the app's route.
+    pub km: f64,
+    /// Where one trip ends and the next starts elsewhere (from, to).
+    pub gaps: Vec<(String, String)>,
+}
+
+impl Korsel {
+    /// E.g. "Hjem → Kunde A".
+    pub fn route_text(&self) -> String {
+        self.route.join(" → ")
+    }
+
+    /// E.g. "148,0".
+    pub fn km_text(&self) -> String {
+        format!("{:.1}", self.km).replace('.', ",")
+    }
+}
+
+/// The month's registrations. `trips` are those the mileage was computed
+/// from (for their coordinates); `calendar` names the visited addresses.
+pub fn build(
+    cfg: &Config,
+    report: &MonthReport,
+    trips: &[Trip],
+    mileage: Option<&MileageMonth>,
+    calendar: &[TimedEntry],
+) -> Vec<ChecklistDay> {
+    let names = Names {
+        cfg,
+        places: &cfg.known_places,
+        calendar,
+    };
+    let entries: &[Entry] = mileage.map(|m| m.entries.as_slice()).unwrap_or_default();
+    report
+        .days
+        .iter()
+        .map(|day| {
+            let day_entries: Vec<&Entry> = entries
+                .iter()
+                .filter(|e| e.start.date_naive() == day.date)
+                .collect();
+            let korsel = korsel(day.date, &day_entries, trips, &names);
+            ChecklistDay {
+                date: day.date,
+                status: status(day, korsel.is_some()),
+                komme_gaa: komme_gaa(day),
+                korsel,
+            }
+        })
+        .collect()
+}
+
+fn status(day: &Day, driving: bool) -> Status {
+    let weekend = matches!(day.date.weekday(), Weekday::Sat | Weekday::Sun);
+    let working = !day.segments.is_empty()
+        || driving
+        || day.norm_hours > 0.0
+        || (day.off_reason.is_none() && !weekend);
+    let nothing = || {
+        let reason = match &day.off_reason {
+            Some(reason) => reason.clone(),
+            None if weekend => "weekend".into(),
+            None => "ingen arbejdstid".into(),
+        };
+        Status::NothingToEnter(reason)
+    };
+    if !working {
+        return nothing();
+    }
+    // Private time is in the remark too, but is no reason to fix anything.
+    let flags: Vec<&str> = day
+        .note
+        .as_deref()
+        .unwrap_or_default()
+        .split("; ")
+        .filter(|part| !part.is_empty() && !part.ends_with(" · private"))
+        .collect();
+    if !flags.is_empty() {
+        Status::FixFirst(flags.join("; "))
+    } else if day.segments.is_empty() && !driving {
+        nothing()
+    } else {
+        Status::ToEnter
+    }
+}
+
+/// The day's periods at work, joined across gaps that overlap the lunch
+/// window unless private time falls in the gap.
+fn komme_gaa(day: &Day) -> Vec<KommeGaa> {
+    let bridges = |gap: Span| {
+        day.lunch.window.is_some_and(|l| overlaps(gap, l))
+            && !day.appointments.iter().any(|p| overlaps(gap, *p))
+    };
+    let mut stretches: Vec<Span> = Vec::new();
+    for &(start, end) in &day.segments {
+        match stretches.last_mut() {
+            Some(last) if bridges((last.1, start)) => last.1 = end,
+            _ => stretches.push((start, end)),
+        }
+    }
+    stretches
+        .into_iter()
+        .map(|time| {
+            let worked: i64 = day
+                .segments
+                .iter()
+                .filter(|s| time.0 <= s.0 && s.1 <= time.1)
+                .map(|&s| minutes(s) - day.lunch.window.map_or(0, |l| overlap_minutes(s, l)))
+                .sum();
+            KommeGaa {
+                time,
+                break_minutes: minutes(time) - worked,
+            }
+        })
+        .collect()
+}
+
+fn minutes((start, end): Span) -> i64 {
+    (end - start).num_minutes()
+}
+
+fn overlaps(a: Span, b: Span) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+
+fn overlap_minutes(a: Span, b: Span) -> i64 {
+    (a.1.min(b.1) - a.0.max(b.0)).num_minutes().max(0)
+}
+
+/// Stop names as used in the Danløn app.
+struct Names<'a> {
+    cfg: &'a Config,
+    places: &'a Places,
+    calendar: &'a [TimedEntry<'a>],
+}
+
+impl Names<'_> {
+    /// The configured name of home or the workplace, else the title of the
+    /// day's work entry at that address, else the address itself.
+    fn name(&self, date: NaiveDate, address: &str, pos: Option<Position>) -> String {
+        let at = |place: &str| self.places.at(address, pos, place);
+        let home = self.cfg.mileage.as_ref().and_then(|m| m.home.as_deref());
+        if home.is_some_and(at) {
+            return self.cfg.checklist.home_name.clone();
+        }
+        if self.cfg.workplace.as_deref().is_some_and(at) {
+            return self.cfg.checklist.workplace_name.clone();
+        }
+        self.calendar
+            .iter()
+            .find(|e| {
+                e.kind == EntryKind::Work
+                    && e.start.date_naive() == date
+                    && !e.location.trim().is_empty()
+                    && at(e.location)
+            })
+            .map_or_else(|| address.to_string(), |e| e.summary.to_string())
+    }
+}
+
+/// One registration for the day's reimbursed trips; a trip split across two
+/// rates counts once.
+fn korsel(date: NaiveDate, entries: &[&Entry], trips: &[Trip], names: &Names) -> Option<Korsel> {
+    let mut legs: Vec<(&Entry, f64)> = Vec::new();
+    for e in entries {
+        match legs.last_mut() {
+            Some((prev, km)) if prev.start == e.start && prev.from == e.from && prev.to == e.to => {
+                *km += e.km;
+            }
+            _ => legs.push((e, e.km)),
+        }
+    }
+    if legs.is_empty() {
+        return None;
+    }
+
+    let mut purposes: Vec<&str> = Vec::new();
+    let mut route: Vec<String> = Vec::new();
+    let mut gaps = Vec::new();
+    let mut prev: Option<(&Entry, String)> = None;
+    for (e, _) in &legs {
+        let trip = trips
+            .iter()
+            .find(|t| t.start == e.start && t.from == e.from && t.to == e.to);
+        let from = names.name(date, &e.from, trip.and_then(|t| t.start_pos));
+        let to = names.name(date, &e.to, trip.and_then(|t| t.end_pos));
+        if let Some((p, p_to)) = &prev
+            && *p_to != from
+            && !address::matches(&p.to, &e.from)
+        {
+            gaps.push((p_to.clone(), from.clone()));
+        }
+        for stop in [&from, &to] {
+            if route.last() != Some(stop) {
+                route.push(stop.clone());
+            }
+        }
+        if !e.purpose.is_empty() && !purposes.contains(&e.purpose.as_str()) {
+            purposes.push(&e.purpose);
+        }
+        prev = Some((e, to));
+    }
+
+    let return_trip = route.len() > 2 && route.first() == route.last();
+    if return_trip {
+        route.pop();
+    }
+    Some(Korsel {
+        purpose: purposes.join(", "),
+        route,
+        return_trip,
+        km: legs.iter().map(|(_, km)| km).sum(),
+        gaps,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::calendar;
+    use crate::mileage;
+    use crate::month::{self, Month, timed_entries};
+    use crate::trips::parse_time;
+
+    const BASE: &str = r#"
+employee_number = "1"
+workplace = "Kontorvej 1, 8000 Aarhus C"
+[calendar]
+source = ""
+[mileage]
+driver_name = "Test"
+registration_number = "AB12345"
+home = "Hjemvej 3, 8200 Aarhus N"
+[[mileage.rates]]
+year = 2026
+low = 3.94
+high = 2.28
+threshold_km = 100
+[danlon]
+"#;
+
+    const HOME: &str = "Hjemvej 3, 8200 Aarhus N";
+    const OFFICE: &str = "Kontorvej 1, 8000 Aarhus";
+    const KUNDE_A: &str = "Vestergade 12, 5000 Odense";
+    const KUNDE_C: &str = "Industrivej 9, 8000 Aarhus C";
+
+    fn trip(day: &str, start: &str, end: &str, from: &str, to: &str, km: f64) -> Trip {
+        let tz = chrono_tz::Europe::Copenhagen;
+        let at = |t: &str| parse_time(&format!("2026-11-{day} {t}"), tz).unwrap();
+        Trip {
+            start: at(start),
+            end: at(end),
+            distance_km: Some(km),
+            from: from.into(),
+            to: to.into(),
+            purpose: String::new(),
+            business: None,
+            start_pos: None,
+            end_pos: None,
+        }
+    }
+
+    /// Kontor every weekday at the workplace, plus the given entries.
+    fn checklist(cfg: &Config, ics: &str, trips: &[Trip]) -> (MonthReport, Vec<ChecklistDay>) {
+        let ics = format!(
+            "BEGIN:VEVENT
+UID:kontor
+SUMMARY:Kontor
+LOCATION:Kontorvej 1\\, 8000 Aarhus C
+DTSTART;TZID=Europe/Copenhagen:20261102T080000
+DTEND;TZID=Europe/Copenhagen:20261102T160000
+RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
+END:VEVENT
+{ics}"
+        );
+        let m = Month::parse("2026-11").unwrap();
+        let occ = calendar::occurrences(&ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
+        let private = &cfg.calendar.as_ref().unwrap().private_keywords;
+        let cal = timed_entries(&occ, private, &cfg.lunch.title);
+        let report = month::build(cfg, m, trips, &occ, &BTreeMap::new(), &[]);
+        let mileage = mileage::compute(
+            cfg.mileage.as_ref().unwrap(),
+            cfg.workplace.as_deref(),
+            &cfg.known_places,
+            m,
+            trips,
+            &cal,
+        )
+        .unwrap();
+        let days = build(cfg, &report, trips, Some(&mileage), &cal);
+        (report, days)
+    }
+
+    fn entry(summary: &str, location: &str, day: &str) -> String {
+        format!(
+            "BEGIN:VEVENT
+UID:{summary}{day}
+SUMMARY:{summary}
+LOCATION:{location}
+DTSTART;TZID=Europe/Copenhagen:202611{day}T090000
+DTEND;TZID=Europe/Copenhagen:202611{day}T150000
+END:VEVENT
+"
+        )
+    }
+
+    fn texts(day: &ChecklistDay) -> Vec<(String, String, String)> {
+        day.komme_gaa
+            .iter()
+            .map(|k| (k.time_text(), k.break_text(), k.total_text()))
+            .collect()
+    }
+
+    fn texts_of(entries: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+        entries
+            .iter()
+            .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+            .collect()
+    }
+
+    fn november() -> (MonthReport, Vec<ChecklistDay>) {
+        let cfg = Config::parse(BASE).unwrap();
+        let ics = [
+            "BEGIN:VEVENT
+UID:laege
+SUMMARY:Læge
+DTSTART;TZID=Europe/Copenhagen:20261119T100000
+DTEND;TZID=Europe/Copenhagen:20261119T111500
+END:VEVENT
+BEGIN:VEVENT
+UID:ferie
+SUMMARY:Ferie
+DTSTART;VALUE=DATE:20261126
+END:VEVENT
+"
+            .to_string(),
+            entry("Kunde A", "Vestergade 12\\, 5000 Odense C", "18"),
+            entry("Kunde C", "Industrivej 9\\, 8000 Aarhus C", "20"),
+            entry("Kunde A", "Vestergade 12\\, 5000 Odense C", "23"),
+            entry("Kunde C", "Industrivej 9\\, 8000 Aarhus C", "23"),
+            entry("Kunde A", "Vestergade 12\\, 5000 Odense C", "27"),
+            entry("Kunde C", "Industrivej 9\\, 8000 Aarhus C", "27"),
+        ]
+        .concat();
+        let trips = vec![
+            // Lunch errand 11:50–12:35.
+            trip("04", "07:20", "07:41", HOME, OFFICE, 20.0),
+            trip("04", "11:50", "12:00", OFFICE, "Bager", 1.0),
+            trip("04", "12:25", "12:35", "Bager", OFFICE, 1.0),
+            trip("04", "15:55", "16:15", OFFICE, HOME, 20.0),
+            // Customer visit, the second trip split across the two rates.
+            trip("18", "07:30", "08:30", HOME, KUNDE_A, 74.0),
+            trip("18", "15:30", "16:30", KUNDE_A, HOME, 74.0),
+            // Læge 10:00–11:15 from the calendar.
+            trip("19", "07:40", "07:58", HOME, OFFICE, 20.0),
+            trip("19", "16:00", "16:20", OFFICE, HOME, 20.0),
+            // Office → customer → office.
+            trip("20", "07:40", "08:00", HOME, OFFICE, 20.0),
+            trip("20", "09:00", "09:30", OFFICE, KUNDE_C, 30.0),
+            trip("20", "14:00", "14:30", KUNDE_C, OFFICE, 30.0),
+            trip("20", "16:00", "16:20", OFFICE, HOME, 20.0),
+            // Not returning: home → A → C → office.
+            trip("23", "07:00", "08:00", HOME, KUNDE_A, 70.0),
+            trip("23", "12:40", "13:30", KUNDE_A, KUNDE_C, 60.0),
+            trip("23", "15:00", "15:15", KUNDE_C, OFFICE, 5.0),
+            trip("23", "16:00", "16:20", OFFICE, HOME, 20.0),
+            // A private errand 09:00–10:00, outside the lunch window.
+            trip("24", "07:40", "08:00", HOME, OFFICE, 20.0),
+            trip("24", "09:00", "09:10", OFFICE, "Bauhaus", 3.0),
+            trip("24", "09:50", "10:00", "Bauhaus", OFFICE, 3.0),
+            trip("24", "16:00", "16:20", OFFICE, HOME, 20.0),
+            // Arrival without departure.
+            trip("25", "07:40", "08:00", HOME, OFFICE, 20.0),
+            // The drive from A to C is missing.
+            trip("27", "07:00", "08:00", HOME, KUNDE_A, 70.0),
+            trip("27", "14:00", "15:00", KUNDE_C, OFFICE, 5.0),
+            trip("27", "16:00", "16:20", OFFICE, HOME, 20.0),
+        ];
+        checklist(&cfg, &ics, &trips)
+    }
+
+    fn day(days: &[ChecklistDay], d: u32) -> &ChecklistDay {
+        days.iter().find(|c| c.date.day() == d).unwrap()
+    }
+
+    #[test]
+    fn private_time_splits_the_day() {
+        let (_, days) = november();
+        let nov19 = day(&days, 19);
+        assert_eq!(nov19.status, Status::ToEnter);
+        assert_eq!(
+            texts(nov19),
+            texts_of(&[
+                ("07:58 to 10:00", "none", "2h 02m"),
+                ("11:15 to 16:00", "30m", "4h 15m"),
+            ])
+        );
+    }
+
+    #[test]
+    fn lunch_errand_is_the_break() {
+        let (_, days) = november();
+        assert_eq!(
+            texts(day(&days, 4)),
+            texts_of(&[("07:41 to 15:55", "45m", "7h 29m")])
+        );
+    }
+
+    #[test]
+    fn unworked_gap_outside_lunch_splits_the_day() {
+        let (_, days) = november();
+        assert_eq!(
+            texts(day(&days, 24)),
+            texts_of(&[
+                ("08:00 to 09:00", "none", "1h 00m"),
+                ("10:00 to 16:00", "30m", "5h 30m"),
+            ])
+        );
+    }
+
+    #[test]
+    fn entries_add_up_to_worked_hours() {
+        let (report, days) = november();
+        for (d, c) in report.days.iter().zip(&days) {
+            let entered: i64 = c.komme_gaa.iter().map(KommeGaa::minutes).sum();
+            assert_eq!(
+                entered,
+                (d.worked_hours * 60.0).round() as i64,
+                "{}",
+                d.date
+            );
+        }
+    }
+
+    #[test]
+    fn statuses() {
+        let (_, days) = november();
+        let nothing = |reason: &str| Status::NothingToEnter(reason.into());
+        assert_eq!(day(&days, 21).status, nothing("weekend"));
+        assert_eq!(day(&days, 26).status, nothing("Ferie"));
+        // A workday without trips.
+        assert_eq!(day(&days, 3).status, nothing("ingen arbejdstid"));
+        match &day(&days, 25).status {
+            Status::FixFirst(reason) => assert!(reason.contains("uden registreret afgang")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn return_trip_to_the_start() {
+        let (_, days) = november();
+        let korsel = |d| day(&days, d).korsel.clone().unwrap();
+        let nov18 = korsel(18);
+        assert_eq!(nov18.purpose, "Kunde A");
+        assert_eq!(nov18.route_text(), "Hjem → Kunde A");
+        assert!(nov18.return_trip);
+        assert_eq!(nov18.km_text(), "148,0");
+        assert!(nov18.gaps.is_empty());
+
+        let nov20 = korsel(20);
+        assert_eq!(nov20.route_text(), "Kontoret → Kunde C");
+        assert!(nov20.return_trip);
+        assert_eq!(nov20.km_text(), "60,0");
+
+        let nov23 = korsel(23);
+        assert_eq!(nov23.purpose, "Kunde A, Kunde C");
+        assert_eq!(nov23.route_text(), "Hjem → Kunde A → Kunde C → Kontoret");
+        assert!(!nov23.return_trip);
+        assert_eq!(nov23.km_text(), "135,0");
+
+        // Commuting and errands are no Kørsel.
+        assert_eq!(day(&days, 4).korsel, None);
+        assert_eq!(day(&days, 19).korsel, None);
+    }
+
+    #[test]
+    fn trips_that_do_not_chain_flag_the_gap() {
+        let (_, days) = november();
+        let nov27 = day(&days, 27).korsel.clone().unwrap();
+        assert_eq!(nov27.route_text(), "Hjem → Kunde A → Kunde C → Kontoret");
+        assert!(!nov27.return_trip);
+        assert_eq!(
+            nov27.gaps,
+            vec![("Kunde A".to_string(), "Kunde C".to_string())]
+        );
+    }
+
+    #[test]
+    fn stops_are_named_as_in_the_app() {
+        let cfg = Config::parse(&format!(
+            "{BASE}[places]\nhome = \"56.1890, 10.1820\"\n[checklist]\nhome_name = \"Hjemme\"\nworkplace_name = \"Arbejde\"\n"
+        ))
+        .unwrap();
+        let ics = entry("Kunde A", "Vestergade 12\\, 5000 Odense C", "03");
+        let fabrik = "Fabriksvej 4, 8600 Silkeborg";
+        let mut trips = vec![
+            // The export names the road; the coordinates say home.
+            trip(
+                "03",
+                "07:00",
+                "08:00",
+                "Gødvadvej, 8200 Aarhus N",
+                KUNDE_A,
+                74.0,
+            ),
+            trip("03", "12:00", "13:00", KUNDE_A, fabrik, 80.0),
+            trip("03", "14:00", "15:00", fabrik, OFFICE, 40.0),
+        ];
+        trips[0].start_pos = Some(Position {
+            lat: 56.1890,
+            lon: 10.1820,
+        });
+        trips[2].purpose = "Levering".into();
+        let (_, days) = checklist(&cfg, &ics, &trips);
+        let korsel = day(&days, 3).korsel.clone().unwrap();
+        assert_eq!(
+            korsel.route_text(),
+            "Hjemme → Kunde A → Fabriksvej 4, 8600 Silkeborg → Arbejde"
+        );
+        assert_eq!(korsel.purpose, "Kunde A, Levering");
+    }
+}

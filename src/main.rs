@@ -1,5 +1,7 @@
 mod address;
 mod calendar;
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the checklist CLI"))]
+mod checklist;
 mod config;
 mod danlon;
 mod holidays;

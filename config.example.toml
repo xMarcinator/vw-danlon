@@ -69,6 +69,12 @@ low = 3.94             # kr/km up to 20,000 km per year
 high = 2.28            # kr/km above
 threshold_km = 20000
 
+# Names of home and the workplace as used in the Danløn app's Kørsel routes.
+# Other stops are named by their calendar entry's title, else their address.
+# [checklist]
+# home_name = "Hjem"
+# workplace_name = "Kontoret"
+
 [danlon]
 # "none": Danløn reports its own Normtimer (160,33 for 37 h/week), which is
 #         what Skat expects for full-time monthly salaried employees.
