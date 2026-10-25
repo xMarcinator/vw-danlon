@@ -25,9 +25,16 @@ Move trips, state (ticks, lunch, private and home-working intervals, trip overri
 
 
 ## Done summary
-TBD
+Trips, state and a calendar cache moved into SQLite (vw-danlon.db beside the config) with a verified one-time JSON migration that deletes the JSON only after read-back, 0 km trip filtering (R15), CLI `backup export` and `--offline`, and the app's Settings > Data (import old data from the CLI folder on desktop, export/import backup). Harness: all CLI stdout/stderr identical except the "no stored trips in <path>" error now naming vw-danlon.db; final trips/state equal to the JSON baseline.
 
+Decisions: CLI fetches the calendar link fresh by default, falls back to the kept copy with a warning, `--offline` uses the copy only; local .ics files are never cached. Importing a backup or old data replaces the app's data with no .bak copy (user asked for no backups). The calendar link is keyed in the cache by an FNV-1a hash so the link itself is not stored.
+
+baseline: green (cargo test --workspace, cargo clippy pre-edit build; harness base0 recorded)
+stage: impl-review - skipped(config: review backend not configured; conductor owns review)
+Tier: not given by conductor (model: claude-opus-5-5)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: c1bbf0e977a660bf0e072d8c7f91479f1ed11139, 2f40ad07c2f79726d3a4587cf066c015f06a1ea5, 7fef84404ee3743b0726ebb0af56dbfc77969bd7, 600e5fa4624e37bcfa05d7cd74348ac1790930c2
+- Tests: cargo test --workspace, cargo clippy --workspace --all-targets, cargo clippy -p vw-danlon-app -p vw-danlon --target aarch64-linux-android --no-default-features --features vw-danlon-app/mobile, dx build --platform android --target aarch64-linux-android, dx build --platform desktop, fnt21-harness run.sh after2 vs base0
 - PRs:
