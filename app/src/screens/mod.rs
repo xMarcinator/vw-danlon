@@ -70,8 +70,60 @@ pub fn now(cfg: &Config) -> DateTime<Tz> {
     Utc::now().with_timezone(&cfg.timezone)
 }
 
+/// The calendar link's refresh, shared by the screens: they show the
+/// copy kept from the last fetch at once, and load again when a refresh
+/// (in the background every [`REFRESH_EVERY`], or on demand) changed it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CalendarSync {
+    /// Bumped when a refresh changed the kept calendar.
+    pub version: u32,
+    pub refreshing: bool,
+    /// Why the last refresh failed; the kept copy is used meanwhile.
+    pub error: Option<String>,
+}
+
+/// How often the app refreshes the calendar while it runs.
+pub const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Fetches the calendar link and keeps the copy, off the UI thread.
+pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Signal<CalendarSync>) {
+    let Some(cfg) = setup.peek().config.clone() else {
+        return;
+    };
+    if sync.peek().refreshing {
+        return;
+    }
+    sync.write().refreshing = true;
+    let result = tokio::task::spawn_blocking(move || service::refresh_calendar(&cfg))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| format!("{e:#}")));
+    let mut s = sync.write();
+    s.refreshing = false;
+    match result {
+        Ok(Some((_, true))) => {
+            s.version += 1;
+            s.error = None;
+        }
+        Ok(_) => s.error = None,
+        Err(e) => s.error = Some(e),
+    }
+}
+
+/// How old the kept calendar is, for the screens: "fetched 14:02", or
+/// "fetched 3 days ago".
+pub fn calendar_age(fetched_at: DateTime<Utc>, now: DateTime<Tz>) -> String {
+    let local = fetched_at.with_timezone(&now.timezone());
+    let days = (now.date_naive() - local.date_naive()).num_days();
+    match days {
+        ..=0 => format!("fetched {}", local.format("%H:%M")),
+        1 => format!("fetched yesterday {}", local.format("%H:%M")),
+        d => format!("fetched {d} days ago"),
+    }
+}
+
 /// What the Month and Day screens are built from: the trips and the
-/// calendar, fetched off the UI thread.
+/// calendar, loaded off the UI thread.
 #[derive(Clone)]
 pub struct Loaded {
     pub trips: Vec<Trip>,
@@ -79,23 +131,25 @@ pub struct Loaded {
     pub manual: BTreeSet<DateTime<Tz>>,
     pub occurrences: Vec<Occurrence>,
     pub calendar_warning: Option<String>,
-    pub fetched_at: NaiveDateTime,
+    /// When the calendar shown was fetched; none for a calendar file.
+    pub calendar_fetched_at: Option<DateTime<Utc>>,
 }
 
-/// Loads the trips and fetches the calendar for `month` without blocking
-/// the UI.
+/// Loads the trips and the kept calendar for `month` without blocking
+/// the UI; the calendar is fetched only when no copy is kept yet.
 pub async fn load(cfg: Config, month: vw_danlon::month::Month) -> Result<Loaded, String> {
     tokio::task::spawn_blocking(move || -> Result<Loaded> {
         let now = now(&cfg);
-        let trips = service::load_trips(&cfg, None)?;
+        let trips = service::load_trips(&cfg, None, month)?;
         let manual = service::manual_trip_starts(&cfg)?;
-        let cal = service::month_calendar(&cfg, month, now.date_naive())?;
+        let cal =
+            service::month_calendar(&cfg, month, now.date_naive(), service::CalendarMode::Cached)?;
         Ok(Loaded {
             trips,
             manual,
             occurrences: cal.occurrences,
             calendar_warning: cal.warning,
-            fetched_at: now.naive_local(),
+            calendar_fetched_at: cal.fetched_at,
         })
     })
     .await
@@ -181,7 +235,7 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
             format!("Timer started {} ({})", hm(r.start), r.label)
         }
         Action::Stop => {
-            let i = State::update(&cfg.state_file, |s| {
+            let i = State::update(&cfg.database, |s| {
                 s.private.stop(now.naive_local()).cloned()
             })??;
             let replaces = i
@@ -208,7 +262,7 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
             format!("Changed {label}")
         }
         Action::Delete(id) => {
-            let i = State::update(&cfg.state_file, |s| s.private.remove(*id))??;
+            let i = State::update(&cfg.database, |s| s.private.remove(*id))??;
             format!("Deleted {} {}–{}", i.label, hm(i.start), hm(i.end))
         }
         Action::Lunch(date, choice) => service::set_lunch(cfg, *date, *choice)?,

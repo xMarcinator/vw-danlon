@@ -154,6 +154,14 @@ fn App() -> Element {
             Screen::Settings
         }
     });
+    let cal_sync = use_context_provider(|| Signal::new(screens::CalendarSync::default()));
+    // The screens show the kept calendar; it is refreshed now and then.
+    use_future(move || async move {
+        loop {
+            screens::refresh_calendar(setup, cal_sync).await;
+            tokio::time::sleep(screens::REFRESH_EVERY).await;
+        }
+    });
     let theme = setup.read().settings.theme;
     let current = screen();
 

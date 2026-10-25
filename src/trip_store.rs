@@ -1,18 +1,21 @@
 //! Trips imported from Min Volkswagen exports or synced from the account,
-//! merged in one JSON file beside the config, and trips added by hand. A
-//! trip is identified by its start time and start odometer reading, so
-//! overlapping exports add each trip once; a trip added by hand has no
-//! odometer and is identified by its start minute, so a later import of the
-//! same trip does not double it. Driver name and licence plate are never
+//! merged in the database beside the config (see [`crate::db`]), and trips
+//! added by hand. A trip is identified by its start time and start odometer
+//! reading, so overlapping exports add each trip once; a trip added by hand
+//! has no odometer and is identified by its start minute, so a later import
+//! of the same trip does not double it. Trips of 0 km (the engine only
+//! turned on) are not stored. Driver name and licence plate are never
 //! stored.
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate};
 use chrono_tz::Tz;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::month::Month;
 use crate::trips::{ExportTrip, Position, Trip};
 
@@ -75,10 +78,16 @@ impl From<&ExportTrip> for StoredTrip {
     }
 }
 
-/// Adds `trip` to the store at `store` as a trip added by hand. Refused
-/// when a stored trip starts the same minute, or the trip ends before it
-/// starts.
-pub fn add_manual(store: &Path, trip: &Trip) -> Result<()> {
+/// Whether a trip of `distance_km` is 0 km: the engine was only turned on.
+/// Such trips are not stored.
+pub fn zero_km(distance_km: Option<f64>) -> bool {
+    distance_km == Some(0.0)
+}
+
+/// Adds `trip` to the store in the database `db` as a trip added by hand.
+/// Refused when a stored trip starts the same minute, the trip ends before
+/// it starts, or it is 0 km.
+pub fn add_manual(db: &Path, trip: &Trip) -> Result<()> {
     if trip.end <= trip.start {
         bail!(
             "the trip ends {} before it starts {}",
@@ -92,43 +101,59 @@ pub fn add_manual(store: &Path, trip: &Trip) -> Result<()> {
     if trip.distance_km.is_some_and(|k| k.is_nan() || k < 0.0) {
         bail!("km must be 0 or more");
     }
-    let mut trips = TripStore::load(store)?;
+    if zero_km(trip.distance_km) {
+        bail!("a 0 km trip is not stored: the engine was only turned on");
+    }
     let mut new = StoredTrip::from(&ExportTrip {
         trip: trip.clone(),
         start_odometer: None,
     });
     new.manual = true;
-    if let Some(s) = trips.trips.iter().find(|s| s.same_trip(&new)) {
-        bail!(
-            "a trip starting {} is already stored ({} → {})",
-            s.start.format("%Y-%m-%d %H:%M"),
-            s.from,
-            s.to
-        );
-    }
-    trips.trips.push(new);
-    trips.trips.sort_by_key(|t| t.start);
-    trips.save(store)
+    db::write(db, |tx| {
+        let start = new.start.timestamp().div_euclid(60) * 60;
+        let near = read_where(
+            tx,
+            "start_ts >= ?1 AND start_ts < ?2",
+            params![start, start + 60],
+        )?;
+        if let Some(s) = near.iter().find(|s| s.same_trip(&new)) {
+            bail!(
+                "a trip starting {} is already stored ({} → {})",
+                s.start.format("%Y-%m-%d %H:%M"),
+                s.from,
+                s.to
+            );
+        }
+        insert(tx, std::slice::from_ref(&new))?;
+        Ok(())
+    })
 }
 
 /// Deletes the trip added by hand that starts at `start`'s minute and
 /// returns it. Imported and synced trips are refused.
-pub fn delete_manual(store: &Path, start: DateTime<FixedOffset>) -> Result<StoredTrip> {
-    let mut trips = TripStore::load(store)?;
-    let at = start.format("%Y-%m-%d %H:%M");
-    let Some(i) = trips
-        .trips
-        .iter()
-        .position(|t| same_minute(t.start, start) && t.manual)
-    else {
-        if trips.trips.iter().any(|t| same_minute(t.start, start)) {
-            bail!("the trip starting {at} was imported; only trips added by hand can be deleted");
-        }
-        bail!("no trip starting {at} is stored");
-    };
-    let removed = trips.trips.remove(i);
-    trips.save(store)?;
-    Ok(removed)
+pub fn delete_manual(db: &Path, start: DateTime<FixedOffset>) -> Result<StoredTrip> {
+    db::write(db, |tx| {
+        let at = start.format("%Y-%m-%d %H:%M");
+        let minute = start.timestamp().div_euclid(60) * 60;
+        let mut st = tx.prepare(&format!(
+            "SELECT id, {COLUMNS} FROM trips WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY id"
+        ))?;
+        let found: Vec<(i64, StoredTrip)> = st
+            .query_map(params![minute, minute + 60], |r| {
+                Ok((r.get(0)?, row(r, 1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let Some((id, trip)) = found.iter().find(|(_, t)| t.manual).cloned() else {
+            if !found.is_empty() {
+                bail!(
+                    "the trip starting {at} was imported; only trips added by hand can be deleted"
+                );
+            }
+            bail!("no trip starting {at} is stored");
+        };
+        tx.execute("DELETE FROM trips WHERE id = ?1", [id])?;
+        Ok(trip)
+    })
 }
 
 /// What an import changed.
@@ -136,6 +161,19 @@ pub fn delete_manual(store: &Path, start: DateTime<FixedOffset>) -> Result<Store
 pub struct Merged {
     pub added: usize,
     pub already: usize,
+    /// Trips of 0 km, not stored.
+    pub zero_km: usize,
+}
+
+impl Merged {
+    /// ", 2 skipped (0 km)", or nothing when none were.
+    pub fn zero_km_text(&self) -> String {
+        if self.zero_km == 0 {
+            String::new()
+        } else {
+            format!(", {} skipped (0 km)", self.zero_km)
+        }
+    }
 }
 
 /// What an import read and changed: the counts, and the first and last
@@ -143,27 +181,55 @@ pub struct Merged {
 pub type Imported = (Merged, Option<(NaiveDate, NaiveDate)>);
 
 /// Reads the whole file (a Min Volkswagen .xlsx export, or a CSV/JSON trips
-/// file), then merges it into the store at `store`. A bad row fails before
-/// the store is touched, so nothing is imported.
-pub fn import(store: &Path, file: &Path, tz: Tz) -> Result<Imported> {
+/// file), then merges it into the store in the database `db`. A bad row
+/// fails before the store is touched, so nothing is imported.
+pub fn import(db: &Path, file: &Path, tz: Tz) -> Result<Imported> {
     let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    import_bytes(store, &file.display().to_string(), &bytes, tz)
+    import_bytes(db, &file.display().to_string(), &bytes, tz)
 }
 
 /// [`import`] of a file's bytes; `name` (its file name) picks the format by
 /// its extension and names the file in errors.
-pub fn import_bytes(store: &Path, name: &str, bytes: &[u8], tz: Tz) -> Result<Imported> {
+pub fn import_bytes(db: &Path, name: &str, bytes: &[u8], tz: Tz) -> Result<Imported> {
     let imported = read_trips_file(name, bytes, tz)?;
-    let mut trips = TripStore::load(store)?;
-    let merged = trips.merge(&imported);
-    if merged.added > 0 {
-        trips.save(store)?;
-    }
+    let merged = merge_into(db, &imported)?;
     let period = imported
         .first()
         .zip(imported.last())
         .map(|(f, l)| (f.trip.start.date_naive(), l.trip.start.date_naive()));
     Ok((merged, period))
+}
+
+/// Adds the trips of `imported` not stored yet, in one transaction.
+fn merge_into(db: &Path, imported: &[ExportTrip]) -> Result<Merged> {
+    db::write(db, |tx| {
+        let Some((first, last)) = imported
+            .iter()
+            .map(|e| e.trip.start.timestamp())
+            .fold(None, |r: Option<(i64, i64)>, t| {
+                Some(r.map_or((t, t), |(a, b)| (a.min(t), b.max(t))))
+            })
+        else {
+            return Ok(Merged {
+                added: 0,
+                already: 0,
+                zero_km: 0,
+            });
+        };
+        // Only stored trips starting in the same span (to the minute) can
+        // be the same trip.
+        let mut store = TripStore {
+            trips: read_where(
+                tx,
+                "start_ts >= ?1 AND start_ts < ?2",
+                params![first.div_euclid(60) * 60, (last.div_euclid(60) + 1) * 60],
+            )?,
+        };
+        let before = store.trips.len();
+        let merged = store.merge(imported);
+        insert(tx, &store.trips[before..])?;
+        Ok(merged)
+    })
 }
 
 fn read_trips_file(name: &str, bytes: &[u8], tz: Tz) -> Result<Vec<ExportTrip>> {
@@ -200,13 +266,13 @@ pub struct Synced {
 }
 
 /// Fetches the trips starting `from` through `to` month by month with
-/// `fetch(first_day, last_day)` and merges each month into the store at
-/// `store` once it has been fetched whole. A failed month stops the sync:
+/// `fetch(first_day, last_day)` and merges each month into the store in
+/// `db` once it has been fetched whole. A failed month stops the sync:
 /// the months before it stay stored, it and the later ones are not touched.
 /// Trips a fetch returns that start outside its days are left to the month
 /// they start in, so a trip across midnight is counted once.
 pub fn sync(
-    store: &Path,
+    db: &Path,
     from: NaiveDate,
     to: NaiveDate,
     tz: Tz,
@@ -216,6 +282,7 @@ pub fn sync(
         merged: Merged {
             added: 0,
             already: 0,
+            zero_km: 0,
         },
         without_position: 0,
     };
@@ -230,15 +297,12 @@ pub fn sync(
             format!("syncing {month} stopped; nothing from {first} on was stored")
         })?;
         fetched.retain(|t| (first..=last).contains(&t.trip.start.with_timezone(&tz).date_naive()));
-        let mut trips = TripStore::load(store)?;
-        let merged = trips.merge(&fetched);
-        if merged.added > 0 {
-            trips.save(store)?;
-        }
+        let merged = merge_into(db, &fetched)?;
         synced.merged.added += merged.added;
         synced.merged.already += merged.already;
+        synced.merged.zero_km += merged.zero_km;
         synced.without_position += crate::connected_cars::without_position(&fetched);
-        first = last + chrono::Duration::days(1);
+        first = last + Duration::days(1);
     }
     Ok(synced)
 }
@@ -246,44 +310,194 @@ pub fn sync(
 /// The day a sync without `--from` starts: the newest stored trip's day
 /// (trips later that day may be missing from an export), else 1 January of
 /// `today`'s year.
-pub fn sync_start(store: &Path, tz: Tz, today: NaiveDate) -> Result<NaiveDate> {
-    Ok(TripStore::load(store)?
-        .trips
-        .iter()
-        .map(|t| t.start.with_timezone(&tz).date_naive())
-        .max()
+pub fn sync_start(db: &Path, tz: Tz, today: NaiveDate) -> Result<NaiveDate> {
+    Ok(summary(db, tz)?
+        .last_start
         .unwrap_or_else(|| NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap()))
 }
 
-/// The stored trips, for commands run without `-t`. An empty or missing
-/// store is an error naming `trips import`.
-pub fn stored_trips(store: &Path, tz: Tz) -> Result<Vec<Trip>> {
-    let trips = TripStore::load(store)?.trips(tz);
+/// How many trips are stored and the days they span.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    pub count: usize,
+    /// The first trip's start day.
+    pub first: Option<NaiveDate>,
+    /// The newest trip's start day, and the day it ended.
+    pub last_start: Option<NaiveDate>,
+    pub last_end: Option<NaiveDate>,
+}
+
+/// The stored trips' count and span, without reading them all.
+pub fn summary(db: &Path, tz: Tz) -> Result<Summary> {
+    let conn = db::open(db)?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM trips", [], |r| r.get(0))?;
+    let first = read_where(&conn, "1 ORDER BY start_ts, id LIMIT 1", [])?;
+    let last = read_where(&conn, "1 ORDER BY start_ts DESC, id DESC LIMIT 1", [])?;
+    let day = |t: DateTime<FixedOffset>| t.with_timezone(&tz).date_naive();
+    Ok(Summary {
+        count: count as usize,
+        first: first.first().map(|t| day(t.start)),
+        last_start: last.first().map(|t| day(t.start)),
+        last_end: last.first().map(|t| day(t.end)),
+    })
+}
+
+/// The start times of the trips added by hand.
+pub fn manual_starts(db: &Path) -> Result<Vec<DateTime<FixedOffset>>> {
+    let conn = db::open(db)?;
+    Ok(read_where(&conn, "manual = 1 ORDER BY start_ts, id", [])?
+        .into_iter()
+        .map(|t| t.start)
+        .collect())
+}
+
+/// The stored trips, for commands run without `-t`. An empty store is an
+/// error naming `trips import`.
+pub fn stored_trips(db: &Path, tz: Tz) -> Result<Vec<Trip>> {
+    let trips = TripStore::load(db)?.trips(tz);
     if trips.is_empty() {
-        bail!(
-            "no stored trips in {}; run `trips import <export.xlsx>` or pass -t <file>",
-            store.display()
-        );
+        bail!(no_trips(db));
     }
     Ok(trips)
 }
 
+fn no_trips(db: &Path) -> String {
+    format!(
+        "no stored trips in {}; run `trips import <export.xlsx>` or pass -t <file>",
+        db.display()
+    )
+}
+
+/// The stored trips starting `from` through `to` (days in `tz`), reading
+/// only those rows. An empty store is an error naming `trips import`.
+pub fn stored_trips_between(
+    db: &Path,
+    tz: Tz,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<Trip>> {
+    let conn = db::open(db)?;
+    let midnight = |d: NaiveDate| {
+        d.and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(tz)
+            .earliest()
+            .map_or(d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp(), |t| {
+                t.timestamp()
+            })
+    };
+    let trips = read_where(
+        &conn,
+        "start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+        params![midnight(from), midnight(to + Duration::days(1))],
+    )?;
+    if trips.is_empty() {
+        let any: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM trips)", [], |r| r.get(0))?;
+        if !any {
+            bail!(no_trips(db));
+        }
+    }
+    Ok(TripStore { trips }.trips(tz))
+}
+
+/// The trips in a JSON file an earlier version wrote; `None` when there
+/// is no file.
+pub(crate) fn read_json(path: &Path) -> Result<Option<TripStore>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading trips {}", path.display()));
+        }
+    };
+    serde_json::from_str(&text).map(Some).with_context(|| {
+        format!(
+            "parsing trips {} (fix or remove the file; it was not changed)",
+            path.display()
+        )
+    })
+}
+
+const COLUMNS: &str = "start, end, start_odometer, distance_km, from_place, to_place, \
+    start_lat, start_lon, end_lat, end_lon, purpose, business, manual";
+
+fn position(lat: Option<f64>, lon: Option<f64>) -> Option<Position> {
+    Some(Position {
+        lat: lat?,
+        lon: lon?,
+    })
+}
+
+fn row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<StoredTrip> {
+    Ok(StoredTrip {
+        start: r.get(at)?,
+        end: r.get(at + 1)?,
+        start_odometer: r.get(at + 2)?,
+        distance_km: r.get(at + 3)?,
+        from: r.get(at + 4)?,
+        to: r.get(at + 5)?,
+        start_pos: position(r.get(at + 6)?, r.get(at + 7)?),
+        end_pos: position(r.get(at + 8)?, r.get(at + 9)?),
+        purpose: r.get(at + 10)?,
+        business: r.get(at + 11)?,
+        manual: r.get(at + 12)?,
+    })
+}
+
+/// The trips matching `filter` (an SQL condition, with any ORDER BY).
+fn read_where(
+    conn: &Connection,
+    filter: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Vec<StoredTrip>> {
+    let mut st = conn.prepare(&format!("SELECT {COLUMNS} FROM trips WHERE {filter}"))?;
+    st.query_map(params, |r| row(r, 0))?.collect()
+}
+
+/// All stored trips, by start.
+pub(crate) fn read_all(conn: &Connection) -> rusqlite::Result<TripStore> {
+    Ok(TripStore {
+        trips: read_where(conn, "1 ORDER BY start_ts, id", [])?,
+    })
+}
+
+pub(crate) fn insert(conn: &Connection, trips: &[StoredTrip]) -> rusqlite::Result<()> {
+    let mut st = conn.prepare(&format!(
+        "INSERT INTO trips (start_ts, {COLUMNS}) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
+    ))?;
+    for t in trips {
+        st.execute(params![
+            t.start.timestamp(),
+            t.start,
+            t.end,
+            t.start_odometer,
+            t.distance_km,
+            t.from,
+            t.to,
+            t.start_pos.map(|p| p.lat),
+            t.start_pos.map(|p| p.lon),
+            t.end_pos.map(|p| p.lat),
+            t.end_pos.map(|p| p.lon),
+            t.purpose,
+            t.business,
+            t.manual,
+        ])?;
+    }
+    Ok(())
+}
+
 impl TripStore {
-    /// Reads the store; a missing file is an empty store.
-    pub fn load(path: &Path) -> Result<Self> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => {
-                return Err(e).with_context(|| format!("reading trips {}", path.display()));
-            }
-        };
-        serde_json::from_str(&text).with_context(|| {
-            format!(
-                "parsing trips {} (fix or remove the file; it was not changed)",
-                path.display()
-            )
-        })
+    /// Reads all stored trips.
+    pub fn load(db: &Path) -> Result<Self> {
+        let conn = db::open(db)?;
+        Ok(read_all(&conn)?)
+    }
+
+    /// Replaces all stored trips with these.
+    pub(crate) fn replace(tx: &Connection, trips: &[StoredTrip]) -> rusqlite::Result<()> {
+        tx.execute("DELETE FROM trips", [])?;
+        insert(tx, trips)
     }
 
     /// The start times of the trips added by hand.
@@ -316,25 +530,27 @@ impl TripStore {
         trips
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
-        crate::state::write_json(path, self)
-            .with_context(|| format!("writing trips {}", path.display()))
-    }
-
-    /// Adds the trips not stored yet, keeping the store sorted by start.
+    /// Adds the trips not stored yet, keeping the store sorted by start;
+    /// 0 km trips are skipped.
     pub fn merge(&mut self, imported: &[ExportTrip]) -> Merged {
-        let mut added = 0;
+        let (mut added, mut zero) = (0, 0);
+        let before = self.trips.len();
         for e in imported {
+            if zero_km(e.trip.distance_km) {
+                zero += 1;
+                continue;
+            }
             let t = StoredTrip::from(e);
             if !self.trips.iter().any(|s| s.same_trip(&t)) {
                 self.trips.push(t);
                 added += 1;
             }
         }
-        self.trips.sort_by_key(|t| t.start);
+        self.trips[before..].sort_by_key(|t| t.start);
         Merged {
             added,
-            already: imported.len() - added,
+            already: imported.len() - added - zero,
+            zero_km: zero,
         }
     }
 }
@@ -349,7 +565,7 @@ mod tests {
     #[test]
     fn overlapping_exports_add_each_trip_once() {
         let dir = temp_dir("store-merge");
-        let store = dir.join("trips.json");
+        let store = dir.join(db::FILE_NAME);
         let (a, b) = (dir.join("a.xlsx"), dir.join("b.xlsx"));
         write_export(&a, &HEADER, &ROWS[..2]);
         write_export(&b, &HEADER, &ROWS[1..]);
@@ -359,7 +575,8 @@ mod tests {
             merged,
             Merged {
                 added: 2,
-                already: 0
+                already: 0,
+                zero_km: 0
             }
         );
         let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
@@ -369,7 +586,8 @@ mod tests {
             merged,
             Merged {
                 added: 1,
-                already: 1
+                already: 1,
+                zero_km: 0
             }
         );
         let (merged, _) = import(&store, &b, TZ).unwrap();
@@ -377,7 +595,8 @@ mod tests {
             merged,
             Merged {
                 added: 0,
-                already: 2
+                already: 2,
+                zero_km: 0
             }
         );
 
@@ -387,15 +606,16 @@ mod tests {
         let direct = crate::trips::load(&b, TZ).unwrap();
         let trips = stored_trips(&store, TZ).unwrap();
         assert_eq!(&trips[1..], &direct[..]);
-        let text = std::fs::read_to_string(&store).unwrap();
-        assert!(!text.contains("Test Testesen") && !text.contains("AB 12 345"));
+        let bytes = std::fs::read(&store).unwrap();
+        let has = |s: &str| bytes.windows(s.len()).any(|w| w == s.as_bytes());
+        assert!(!has("Test Testesen") && !has("AB 12 345"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn no_stored_trips_names_trips_import() {
         let dir = temp_dir("store-none");
-        let err = stored_trips(&dir.join("trips.json"), TZ).unwrap_err();
+        let err = stored_trips(&dir.join(db::FILE_NAME), TZ).unwrap_err();
         assert!(err.to_string().contains("trips import"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -422,7 +642,7 @@ mod tests {
     #[test]
     fn a_failed_month_leaves_the_store_unchanged_for_that_month() {
         let dir = temp_dir("store-sync-fail");
-        let store = dir.join("trips.json");
+        let store = dir.join(db::FILE_NAME);
         let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
         let mut asked = Vec::new();
         let err = sync(
@@ -460,7 +680,7 @@ mod tests {
     #[test]
     fn a_bad_row_imports_nothing() {
         let dir = temp_dir("store-bad");
-        let store = dir.join("trips.json");
+        let store = dir.join(db::FILE_NAME);
         let export = dir.join("export.xlsx");
         let mut rows = ROWS;
         rows[2].1 = "03/08/2026 07:00:00 CEST";
@@ -473,7 +693,7 @@ mod tests {
     #[test]
     fn bytes_of_any_trips_file_import_and_bad_rows_are_named() {
         let dir = temp_dir("store-bytes");
-        let store = dir.join("trips.json");
+        let store = dir.join(db::FILE_NAME);
         let export = dir.join("export.xlsx");
         write_export(&export, &HEADER, &ROWS);
         let bytes = std::fs::read(&export).unwrap();
@@ -489,8 +709,8 @@ mod tests {
         assert_eq!((merged.added, merged.already), (0, 1));
         let stored = stored_trips(&store, TZ).unwrap();
         assert_eq!(stored[3].purpose, "Service Kunde A", "purpose is kept");
-        let text = std::fs::read_to_string(&store).unwrap();
-        assert_eq!(text.matches("\"purpose\"").count(), 1, "{text}");
+        let purposes = stored.iter().filter(|t| !t.purpose.is_empty()).count();
+        assert_eq!(purposes, 1, "only the CSV trip has a purpose");
 
         let bad_csv =
             "start,end\n2026-10-06 07:45,2026-10-06 09:05\n2026-10-07 09:00,2026-10-07 08:00\n";
@@ -526,8 +746,8 @@ mod tests {
     #[test]
     fn a_manual_trip_is_added_once_and_only_it_can_be_deleted() {
         let dir = temp_dir("store-manual");
-        let store = dir.join("trips.json");
-        // A file written before trips could be added by hand still loads.
+        let store = dir.join(db::FILE_NAME);
+        // An imported trip, then one added by hand.
         let (old, _) = import_bytes(
             &store,
             "trips.csv",
@@ -536,7 +756,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.added, 1);
-        assert!(!std::fs::read_to_string(&store).unwrap().contains("manual"));
+        assert!(manual_starts(&store).unwrap().is_empty());
 
         let mut manual = trip(22, 8, 0, 0.0).trip;
         manual.purpose = "Service Kunde B".into();
@@ -557,6 +777,10 @@ mod tests {
                 |t: &mut Trip| t.distance_km = Some(-1.0),
                 "km must be 0 or more",
             ),
+            (
+                |t: &mut Trip| t.distance_km = Some(0.0),
+                "a 0 km trip is not stored: the engine was only turned on",
+            ),
         ] {
             let mut bad = trip(23, 8, 0, 0.0).trip;
             change(&mut bad);
@@ -572,7 +796,8 @@ mod tests {
             store_now.merge(&[exported]),
             Merged {
                 added: 0,
-                already: 1
+                already: 1,
+                zero_km: 0
             }
         );
         let stored = TripStore::load(&store).unwrap();
@@ -595,6 +820,75 @@ mod tests {
             "no trip starting 2026-09-22 08:00 is stored"
         );
         assert_eq!(TripStore::load(&store).unwrap().trips.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn zero_km_trips_are_skipped_on_import_and_sync() {
+        let dir = temp_dir("store-zero");
+        let store = dir.join(db::FILE_NAME);
+        // Distance 0 without an odometer, and the export's odometer
+        // difference 0 (start 1000.0, end 1000.0).
+        let csv = "start,end,distance_km,from,to\n\
+                   2026-10-06 07:45,2026-10-06 09:05,98.0,Hjem,Kunde A\n\
+                   2026-10-06 12:00,2026-10-06 12:01,0,Kunde A,Kunde A\n";
+        let (merged, _) = import_bytes(&store, "trips.csv", csv.as_bytes(), TZ).unwrap();
+        assert_eq!(
+            merged,
+            Merged {
+                added: 1,
+                already: 0,
+                zero_km: 1
+            }
+        );
+        assert_eq!(merged.zero_km_text(), ", 1 skipped (0 km)");
+        let export = dir.join("export.xlsx");
+        let mut rows = ROWS;
+        rows[2].8 = rows[2].7;
+        write_export(&export, &HEADER, &rows);
+        let (merged, _) = import(&store, &export, TZ).unwrap();
+        assert_eq!((merged.added, merged.zero_km), (2, 1));
+
+        let mut zero = trip(21, 8, 0, 300.0);
+        zero.trip.distance_km = Some(0.0);
+        let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let synced = sync(&store, day("2026-09-21"), day("2026-09-21"), TZ, |_, _| {
+            Ok(vec![trip(21, 7, 0, 200.0), zero.clone()])
+        })
+        .unwrap();
+        assert_eq!((synced.merged.added, synced.merged.zero_km), (1, 1));
+        let stored = TripStore::load(&store).unwrap().trips;
+        assert_eq!(stored.len(), 4);
+        assert!(stored.iter().all(|t| t.distance_km != Some(0.0)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_month_reads_only_its_rows() {
+        let dir = temp_dir("store-month");
+        let store = dir.join(db::FILE_NAME);
+        let csv = "start,end,distance_km,from,to\n\
+                   2026-09-30 23:50,2026-10-01 00:20,10,A,B\n\
+                   2026-10-01 00:10,2026-10-01 00:30,10,B,C\n\
+                   2026-10-31 23:59,2026-11-01 00:20,10,C,D\n\
+                   2026-11-01 00:00,2026-11-01 00:20,10,D,E\n";
+        import_bytes(&store, "trips.csv", csv.as_bytes(), TZ).unwrap();
+        let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let october =
+            stored_trips_between(&store, TZ, day("2026-10-01"), day("2026-10-31")).unwrap();
+        let to: Vec<&str> = october.iter().map(|t| t.to.as_str()).collect();
+        assert_eq!(to, ["C", "D"]);
+        assert!(
+            stored_trips_between(&store, TZ, day("2027-01-01"), day("2027-01-31"))
+                .unwrap()
+                .is_empty()
+        );
+        let s = summary(&store, TZ).unwrap();
+        assert_eq!(s.count, 4);
+        assert_eq!(
+            (s.first, s.last_start),
+            (Some(day("2026-09-30")), Some(day("2026-11-01")))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

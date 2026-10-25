@@ -48,10 +48,26 @@ all trips for the year: the 20,000 km rate threshold is counted from
 2. Run `cargo run -- trips import export.xlsx`. It prints how many trips
    were added, how many were already imported, and the period covered.
 
-The trips are stored in `trips.json` beside the config. Overlapping exports
+The trips are stored in the database `vw-danlon.db` beside the config (with
+the local state and a copy of the calendar). Overlapping exports
 are merged: a trip with the same start time and start odometer is added
-once, so exporting a bit more than needed is safe. The driver's name and
-licence plate in the export are not stored.
+once, so exporting a bit more than needed is safe. Trips of 0 km (the
+engine only turned on) are skipped and counted as `skipped (0 km)`. The
+driver's name and licence plate in the export are not stored.
+
+A `trips.json` and `state.json` from an earlier version are moved into the
+database on the first run: once the data is stored and read back, the JSON
+files are deleted; if anything fails, they are left as they are and no
+database is created. A database that can't be read stops every command
+with its path and is never overwritten.
+
+`backup export <file>` writes the config, trips and state to one file for
+the app on another device (Settings → Data → Import backup). The calendar
+link and the device token are not in it.
+
+The calendar link is fetched for every command, and the copy is kept in
+the database: when fetching fails, the kept copy is used with a warning
+saying when it was fetched, and `--offline` uses it without fetching.
 
 The export often leaves out house numbers ("Lysbrohøjen, Lysbro"). An
 address without a house number matches a known address on the same street
@@ -73,7 +89,7 @@ Instead of exporting by hand, `trips sync` can fetch the same trips from
 your own Min Volkswagen account. This access is **unofficial**: Connected
 Cars, the service behind the app, offers official access only to business
 partners, so it may stop working at any time. The export above stays the
-fallback and keeps working; both feed the same `trips.json`. The sync only
+fallback and keeps working; both feed the same stored trips. The sync only
 reads; nothing is written to the account.
 
 Connect once:
@@ -164,7 +180,7 @@ In the Danløn app, per day:
   against the km shown. A `check: no trip from … to …` line means a trip is
   missing between two stops.
 
-Then tick the day off; it is stored in `state.json` beside the config:
+Then tick the day off; it is stored in the database beside the config:
 
 ```sh
 cargo run -- checklist mark 2026-11-18
@@ -174,7 +190,7 @@ cargo run -- checklist unmark 2026-11-18     # undo
 Days with nothing to enter (weekends, holidays, vacation, days off) and days that need
 their trips fixed first cannot be ticked; `mark` says why. `mark` takes
 `-t` like `report`. The checklist never contacts Danløn and writes nothing
-but `state.json`.
+but the tick in the database.
 
 ## Vacation
 
@@ -331,7 +347,7 @@ A day's worked time is computed in this order:
 
 Each day has one lunch window, taken from the first of:
 1. an override set with `lunch set <YYYY-MM-DD> <HH:MM> <minutes>` (removed
-   again with `lunch clear <YYYY-MM-DD>`), kept in `state.json` beside the
+   again with `lunch clear <YYYY-MM-DD>`), kept in the database beside the
    config file; 0 minutes means no lunch that day;
 2. a timed calendar event whose title contains `lunch.title` (default
    `Frokost`) as a whole word. It is not a work address and adds no planned
@@ -366,7 +382,7 @@ or starts within 2 hours, that day, and takes its title as the label
 (otherwise `Privat`). `--event <title>` links another appointment that day;
 `--no-event` links none. Only one timer runs at a time.
 
-Recorded intervals are kept in `state.json` and count exactly like private
+Recorded intervals are kept in the database and count exactly like private
 appointments: they are deducted from worked time, shown in the day's note
 (e.g. `Privat 10:02–11:14 · private`), and trips starting during them are
 private. A linked interval replaces the appointment's planned window, so

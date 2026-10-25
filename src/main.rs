@@ -22,6 +22,11 @@ struct Cli {
     /// Config file.
     #[arg(short, long, default_value = "config.toml", global = true)]
     config: PathBuf,
+    /// Use the calendar kept from the last fetch instead of fetching it.
+    /// Without this, a calendar link that can't be fetched falls back to
+    /// that copy with a warning.
+    #[arg(long, global = true)]
+    offline: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -70,7 +75,7 @@ enum Command {
         out: PathBuf,
     },
     /// What to enter in the Danløn app per day, with the days ticked off
-    /// (`checklist mark|unmark <YYYY-MM-DD>`, stored in state.json).
+    /// (`checklist mark|unmark <YYYY-MM-DD>`, stored in the database beside the config).
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Checklist {
         /// Month as YYYY-MM.
@@ -82,12 +87,12 @@ enum Command {
         #[command(subcommand)]
         action: Option<ChecklistAction>,
     },
-    /// Set or clear a day's lunch break (stored in state.json beside the config).
+    /// Set or clear a day's lunch break (stored in the database beside the config).
     Lunch {
         #[command(subcommand)]
         action: LunchAction,
     },
-    /// Time private time with a start/stop timer (stored in state.json).
+    /// Time private time with a start/stop timer (stored in the database beside the config).
     Private {
         #[command(subcommand)]
         action: PrivateAction,
@@ -97,7 +102,7 @@ enum Command {
         #[command(subcommand)]
         action: AccountAction,
     },
-    /// Imported and synced trips (stored in trips.json beside the config).
+    /// Imported and synced trips (stored in the database beside the config).
     Trips {
         #[command(subcommand)]
         action: TripsAction,
@@ -105,6 +110,18 @@ enum Command {
     /// Vacation from the calendar: earned, taken, planned and left per open
     /// holiday year, and each period with the year it draws from.
     Vacation,
+    /// A backup file of the config, trips and state, to move them to the app
+    /// on another device. The calendar link and device token are not in it.
+    Backup {
+        #[command(subcommand)]
+        action: BackupAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupAction {
+    /// Write the backup file.
+    Export { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -213,6 +230,12 @@ enum LunchAction {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load(&cli.config)?;
+    let mode = if cli.offline {
+        service::CalendarMode::Offline
+    } else {
+        service::CalendarMode::Fresh
+    };
+    let calendar = |cfg: &Config, month: Month| calendar(cfg, month, mode);
 
     match cli.command {
         Command::Norm { month } => {
@@ -222,7 +245,7 @@ fn main() -> Result<()> {
         }
         Command::Report { month, trips } => {
             let month = Month::parse(&month)?;
-            let trips = load_trips(&cfg, trips.as_deref())?;
+            let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
             let report = build_month(&cfg, month, &trips, &cal)?;
             print_days(&report, true);
@@ -242,7 +265,7 @@ fn main() -> Result<()> {
         }
         Command::Timesheet { month, trips, out } => {
             let month = Month::parse(&month)?;
-            let trips = load_trips(&cfg, trips.as_deref())?;
+            let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let report = build_month(&cfg, month, &trips, &calendar(&cfg, month)?)?;
             timesheet::write(&cfg, &report, create(&out)?)?;
             println!("Wrote {}", out.display());
@@ -253,7 +276,7 @@ fn main() -> Result<()> {
                 .as_ref()
                 .context("no [mileage] section in config")?;
             let month = Month::parse(&month)?;
-            let trips = load_trips(&cfg, trips.as_deref())?;
+            let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
             let m = service::compute_mileage(&cfg, mcfg, month, &trips, &cal)?;
             mileage::write_logbook(mcfg, &m, create(&out)?)?;
@@ -262,7 +285,7 @@ fn main() -> Result<()> {
         }
         Command::Export { month, trips, out } => {
             let month = Month::parse(&month)?;
-            let trips = load_trips(&cfg, trips.as_deref())?;
+            let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
             let report = build_month(&cfg, month, &trips, &cal)?;
             let mil = mileage_for(&cfg, month, &trips, &cal)?;
@@ -287,37 +310,69 @@ fn main() -> Result<()> {
             month,
             trips,
             action,
-        } => checklist(&cfg, month, trips, action)?,
+        } => checklist(&cfg, mode, month, trips, action)?,
         Command::Lunch { action } => lunch(&cfg, action)?,
-        Command::Private { action } => private(&cfg, action)?,
+        Command::Private { action } => private(&cfg, mode, action)?,
         Command::Account { action } => account(&cfg, action)?,
         Command::Trips { action } => match action {
             TripsAction::Import { file } => import_trips(&cfg, &file)?,
             TripsAction::Sync { from } => sync_trips(&cfg, from.as_deref())?,
         },
-        Command::Vacation => print_vacation(&cfg)?,
+        Command::Vacation => print_vacation(&cfg, mode)?,
+        Command::Backup {
+            action: BackupAction::Export { file },
+        } => {
+            let backup = vw_danlon::backup::Backup::export(&cli.config, &cfg.database)?;
+            std::fs::write(&file, backup.to_json()?)
+                .with_context(|| format!("writing {}", file.display()))?;
+            println!(
+                "Wrote {}: {} trips; the calendar link and device token are not in it",
+                file.display(),
+                backup.trips.trips.len()
+            );
+        }
     }
     Ok(())
 }
 
-/// The calendar from 1 January to the end of `month`, printing its warning.
-fn calendar(cfg: &Config, month: Month) -> Result<Vec<Occurrence>> {
-    let cal = service::calendar(cfg, month)?;
-    warn_calendar(cal.warning.as_deref());
+/// The calendar from 1 January to the end of `month`, printing its warnings.
+fn calendar(cfg: &Config, month: Month, mode: service::CalendarMode) -> Result<Vec<Occurrence>> {
+    let cal = service::calendar(cfg, month, mode)?;
+    warn_calendar(
+        cfg,
+        cal.warning.as_deref(),
+        cal.fetched_at,
+        cal.fetch_error.as_deref(),
+    );
     Ok(cal.occurrences)
 }
 
-fn warn_calendar(warning: Option<&str>) {
+fn warn_calendar(
+    cfg: &Config,
+    warning: Option<&str>,
+    fetched_at: Option<chrono::DateTime<chrono::Utc>>,
+    fetch_error: Option<&str>,
+) {
     if let Some(w) = warning {
         eprintln!("warning: {w}");
+    }
+    let fetched = fetched_at.map(|t| {
+        t.with_timezone(&cfg.timezone)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    });
+    if let (Some(e), Some(at)) = (fetch_error, &fetched) {
+        eprintln!("warning: the calendar can't be fetched ({e}); using the copy fetched {at}");
     }
 }
 
 fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
-    let (merged, period) = trip_store::import(&cfg.trip_store, file, cfg.timezone)?;
+    let (merged, period) = trip_store::import(&cfg.database, file, cfg.timezone)?;
     println!(
-        "{} added, {} already imported",
-        merged.added, merged.already
+        "{} added, {} already imported{}",
+        merged.added,
+        merged.already,
+        merged.zero_km_text()
     );
     if let Some((first, last)) = period {
         println!("Period: {first} – {last}");
@@ -329,8 +384,10 @@ fn sync_trips(cfg: &Config, from: Option<&str>) -> Result<()> {
     let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
     let s = service::sync_trips(cfg, from, today)?;
     println!(
-        "{} added, {} already present",
-        s.synced.merged.added, s.synced.merged.already
+        "{} added, {} already present{}",
+        s.synced.merged.added,
+        s.synced.merged.already,
+        s.synced.merged.zero_km_text()
     );
     if s.synced.without_position > 0 {
         println!(
@@ -343,7 +400,7 @@ fn sync_trips(cfg: &Config, from: Option<&str>) -> Result<()> {
 }
 
 fn account(cfg: &Config, action: AccountAction) -> Result<()> {
-    let state = state::State::load(&cfg.state_file)?;
+    let state = state::State::load(&cfg.database)?;
     let access = AccountAccess::new(cfg, &state);
     let (tokens, email) = (&access.tokens, access.email.clone());
     match action {
@@ -441,15 +498,16 @@ fn prompt_email(default: Option<&str>) -> Result<String> {
 
 fn checklist(
     cfg: &Config,
+    mode: service::CalendarMode,
     month: Option<String>,
     trips: Option<PathBuf>,
     action: Option<ChecklistAction>,
 ) -> Result<()> {
-    let path = &cfg.state_file;
+    let path = &cfg.database;
     match action {
         None => {
             let month = Month::parse(month.as_deref().unwrap_or_default())?;
-            let days = checklist_days(cfg, month, trips.as_deref())?;
+            let days = checklist_days(cfg, mode, month, trips.as_deref())?;
             let entered = state::State::load(path)?.entered;
             print!("{}", checklist::render(&days, &entered));
         }
@@ -459,7 +517,7 @@ fn checklist(
                 year: date.year(),
                 month: date.month(),
             };
-            let days = checklist_days(cfg, month, trips.as_deref())?;
+            let days = checklist_days(cfg, mode, month, trips.as_deref())?;
             if service::set_entered(cfg, &days, date, true)? {
                 println!("{date}: entered");
             } else {
@@ -481,11 +539,12 @@ fn checklist(
 /// The month's Danløn app registrations per day, printing the warnings.
 fn checklist_days(
     cfg: &Config,
+    mode: service::CalendarMode,
     month: Month,
     trips: Option<&Path>,
 ) -> Result<Vec<checklist::ChecklistDay>> {
-    let trips = load_trips(cfg, trips)?;
-    let cal = calendar(cfg, month)?;
+    let trips = load_trips(cfg, trips, month)?;
+    let cal = calendar(cfg, month, mode)?;
     let report = build_month(cfg, month, &trips, &cal)?;
     let mileage = mileage_for(cfg, month, &trips, &cal)?;
     if let Some(m) = &mileage {
@@ -522,8 +581,8 @@ fn lunch(cfg: &Config, action: LunchAction) -> Result<()> {
     Ok(())
 }
 
-fn private(cfg: &Config, action: PrivateAction) -> Result<()> {
-    let path = &cfg.state_file;
+fn private(cfg: &Config, mode: service::CalendarMode, action: PrivateAction) -> Result<()> {
+    let path = &cfg.database;
     let now = chrono::Utc::now().with_timezone(&cfg.timezone);
     match action {
         PrivateAction::Start {
@@ -543,7 +602,7 @@ fn private(cfg: &Config, action: PrivateAction) -> Result<()> {
                         year: now.year(),
                         month: now.month(),
                     };
-                    let cal = calendar(cfg, today)?;
+                    let cal = calendar(cfg, today, mode)?;
                     state::link_event(&service::timed_entries(cfg, &cal), now, &choice)?
                 }
             };
@@ -706,10 +765,15 @@ fn print_days(r: &MonthReport, with_trips: bool) {
 }
 
 /// The vacation overview of the open holiday years.
-fn print_vacation(cfg: &Config) -> Result<()> {
+fn print_vacation(cfg: &Config, mode: service::CalendarMode) -> Result<()> {
     let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-    let v = service::vacation(cfg, today)?;
-    warn_calendar(v.calendar_warning.as_deref());
+    let v = service::vacation(cfg, today, mode)?;
+    warn_calendar(
+        cfg,
+        v.calendar_warning.as_deref(),
+        v.calendar_fetched_at,
+        v.calendar_fetch_error.as_deref(),
+    );
     print!("{}", vacation::render(&v.rules, &v.overview));
     Ok(())
 }

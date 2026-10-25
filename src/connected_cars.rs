@@ -825,10 +825,10 @@ mod tests {
         use crate::trip_store;
         use crate::trips::tests::{HEADER, ROWS, temp_dir, write_export};
         let dir = temp_dir("sync-after-export");
-        let (store, export) = (dir.join("trips.json"), dir.join("export.xlsx"));
+        let (store, export) = (dir.join(crate::db::FILE_NAME), dir.join("export.xlsx"));
         write_export(&export, &HEADER, &ROWS);
         trip_store::import(&store, &export, Copenhagen).unwrap();
-        let before = std::fs::read_to_string(&store).unwrap();
+        let before = trip_store::TripStore::load(&store).unwrap();
 
         // The same three trips as the account answers them (UTC times).
         let body = r#"{"data":{"vehicle":{"trips":{"items":[
@@ -859,13 +859,14 @@ mod tests {
             trip_store::Synced {
                 merged: trip_store::Merged {
                     added: 0,
-                    already: 3
+                    already: 3,
+                    zero_km: 0
                 },
                 without_position: 1,
             },
             "each trip counted once although both July and August fetch it"
         );
-        assert_eq!(std::fs::read_to_string(&store).unwrap(), before);
+        assert_eq!(trip_store::TripStore::load(&store).unwrap(), before);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -7,13 +7,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 
 use crate::calendar::{self, Occurrence};
 use crate::checklist::{self, ChecklistDay};
 use crate::config::{Config, MileageConfig};
 use crate::connected_cars::{self, TokenStore, Vehicle};
+use crate::db;
 use crate::mileage::{self, MileageMonth, Status};
 use crate::month::{self, Month, MonthReport, TimedEntry};
 use crate::state::{self, EventChoice, Private, RunningTimer, State};
@@ -21,12 +22,29 @@ use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
 use crate::vacation::{self, Overview, Rules};
 
-/// Trips from `file`, else from the trip store.
-pub fn load_trips(cfg: &Config, file: Option<&Path>) -> Result<Vec<Trip>> {
+/// Trips from `file`, else the stored trips `month` needs: those from 1
+/// January through the month's end (the earlier months count towards the
+/// year's mileage).
+pub fn load_trips(cfg: &Config, file: Option<&Path>, month: Month) -> Result<Vec<Trip>> {
     if let Some(file) = file {
         return trips::load(file, cfg.timezone);
     }
-    trip_store::stored_trips(&cfg.trip_store, cfg.timezone)
+    let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
+    trip_store::stored_trips_between(&cfg.database, cfg.timezone, year_start, month.last_day())
+}
+
+/// Where the calendar comes from when it is a link (a calendar file is
+/// always read as it is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarMode {
+    /// Fetch it and keep the copy; when fetching fails, use the copy kept
+    /// from the last fetch.
+    Fresh,
+    /// Use the kept copy, fetching only when there is none (the app, which
+    /// refreshes it in the background with [`refresh_calendar`]).
+    Cached,
+    /// Use the kept copy; never fetch.
+    Offline,
 }
 
 /// Calendar occurrences, with the warning to show when the calendar has no
@@ -35,21 +53,30 @@ pub fn load_trips(cfg: &Config, file: Option<&Path>) -> Result<Vec<Trip>> {
 pub struct Calendar {
     pub occurrences: Vec<Occurrence>,
     pub warning: Option<String>,
+    /// When the calendar used was fetched; none for a calendar file.
+    pub fetched_at: Option<DateTime<Utc>>,
+    /// Why fetching failed, when the kept copy was used instead.
+    pub fetch_error: Option<String>,
 }
 
 /// Calendar occurrences from 1 January to the end of `month`; the earlier
 /// months are needed for the year's mileage total.
-pub fn calendar(cfg: &Config, month: Month) -> Result<Calendar> {
+pub fn calendar(cfg: &Config, month: Month, mode: CalendarMode) -> Result<Calendar> {
     let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
-    calendar_between(cfg, year_start, month.last_day())
+    calendar_between(cfg, year_start, month.last_day(), mode)
 }
 
 /// Calendar occurrences from `from` to `to`.
-pub fn calendar_between(cfg: &Config, from: NaiveDate, to: NaiveDate) -> Result<Calendar> {
+pub fn calendar_between(
+    cfg: &Config,
+    from: NaiveDate,
+    to: NaiveDate,
+    mode: CalendarMode,
+) -> Result<Calendar> {
     let Some(cal) = &cfg.calendar else {
         return Ok(Calendar::default());
     };
-    let text = calendar::fetch(&cal.source)?;
+    let (text, fetched_at, fetch_error) = calendar_text(cfg, &cal.source, mode)?;
     let mut warning = None;
     if let Some(expected) = &cal.name {
         match calendar::name(&text) {
@@ -67,7 +94,63 @@ pub fn calendar_between(cfg: &Config, from: NaiveDate, to: NaiveDate) -> Result<
     Ok(Calendar {
         occurrences: calendar::occurrences(&text, cfg.timezone, from, to)?,
         warning,
+        fetched_at,
+        fetch_error,
     })
+}
+
+fn is_link(source: &str) -> bool {
+    source.contains("://")
+}
+
+/// The calendar's text, when it was fetched, and why fetching failed when
+/// the kept copy is used instead.
+fn calendar_text(
+    cfg: &Config,
+    source: &str,
+    mode: CalendarMode,
+) -> Result<(String, Option<DateTime<Utc>>, Option<String>)> {
+    if !is_link(source) {
+        return Ok((calendar::fetch(source)?, None, None));
+    }
+    let kept = || db::cached_calendar(&cfg.database, source);
+    match mode {
+        CalendarMode::Offline => {
+            let (text, at) = kept()?
+                .context("no copy of the calendar is kept yet; run once without --offline")?;
+            Ok((text, Some(at), None))
+        }
+        CalendarMode::Cached => match kept()? {
+            Some((text, at)) => Ok((text, Some(at), None)),
+            None => fetch_and_keep(cfg, source).map(|(text, at, _)| (text, Some(at), None)),
+        },
+        CalendarMode::Fresh => match fetch_and_keep(cfg, source) {
+            Ok((text, at, _)) => Ok((text, Some(at), None)),
+            Err(e) => match kept()? {
+                Some((text, at)) => Ok((text, Some(at), Some(format!("{e:#}")))),
+                None => Err(e),
+            },
+        },
+    }
+}
+
+/// Fetches the calendar and keeps the copy; true when it changed.
+fn fetch_and_keep(cfg: &Config, source: &str) -> Result<(String, DateTime<Utc>, bool)> {
+    let text = calendar::fetch(source)?;
+    let at = Utc::now();
+    let changed = db::store_calendar(&cfg.database, source, &text, at)?;
+    Ok((text, at, changed))
+}
+
+/// Fetches the calendar link and keeps the copy, for the app's background
+/// and on-demand refresh: when it was fetched and whether it changed. None
+/// without a calendar link.
+pub fn refresh_calendar(cfg: &Config) -> Result<Option<(DateTime<Utc>, bool)>> {
+    let Some(cal) = cfg.calendar.as_ref().filter(|c| is_link(&c.source)) else {
+        return Ok(None);
+    };
+    let (_, at, changed) = fetch_and_keep(cfg, &cal.source)?;
+    Ok(Some((at, changed)))
 }
 
 /// The calendar's timed entries, classified with the configured private
@@ -95,7 +178,7 @@ pub fn build_month(
     trips: &[Trip],
     cal: &[Occurrence],
 ) -> Result<MonthReport> {
-    let state = State::load(&cfg.state_file)?;
+    let state = State::load(&cfg.database)?;
     Ok(month::build(
         cfg,
         month,
@@ -128,7 +211,7 @@ pub fn compute_mileage(
     trips: &[Trip],
     cal: &[Occurrence],
 ) -> Result<MileageMonth> {
-    let recorded = State::load(&cfg.state_file)?.private.intervals;
+    let recorded = State::load(&cfg.database)?.private.intervals;
     let mut entries = timed_entries(cfg, cal);
     entries.extend(month::recorded_entries(&recorded, cfg.timezone));
     mileage::compute(
@@ -184,7 +267,7 @@ pub fn checklist_view(
     let mileage = mileage_for(cfg, month, trips, cal)?;
     Ok(ChecklistView {
         days: checklist_days(cfg, &report, trips, mileage.as_ref(), cal),
-        entered: State::load(&cfg.state_file)?.entered,
+        entered: State::load(&cfg.database)?.entered,
     })
 }
 
@@ -199,16 +282,16 @@ pub fn set_entered(
 ) -> Result<bool> {
     if entered {
         check_tickable(days, date)?;
-        State::update(&cfg.state_file, |s| s.entered.insert(date))
+        State::update(&cfg.database, |s| s.entered.insert(date))
     } else {
-        State::update(&cfg.state_file, |s| s.entered.remove(&date))
+        State::update(&cfg.database, |s| s.entered.remove(&date))
     }
 }
 
 /// The private timer when it has been running so long at `now` that it was
 /// likely forgotten.
 pub fn forgotten_timer(cfg: &Config, now: NaiveDateTime) -> Result<Option<RunningTimer>> {
-    Ok(State::load(&cfg.state_file)?
+    Ok(State::load(&cfg.database)?
         .private
         .running
         .filter(|r| r.forgotten(now)))
@@ -221,12 +304,17 @@ pub const PRIVATE_DAYS_AHEAD: i64 = 14;
 /// The calendar for the Month screen: what [`calendar`] fetches, through
 /// [`PRIVATE_DAYS_AHEAD`] days after `today` for the coming private
 /// appointments.
-pub fn month_calendar(cfg: &Config, month: Month, today: NaiveDate) -> Result<Calendar> {
+pub fn month_calendar(
+    cfg: &Config,
+    month: Month,
+    today: NaiveDate,
+    mode: CalendarMode,
+) -> Result<Calendar> {
     let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
     let to = month
         .last_day()
         .max(today + Duration::days(PRIVATE_DAYS_AHEAD));
-    calendar_between(cfg, year_start, to)
+    calendar_between(cfg, year_start, to, mode)
 }
 
 /// A month as the Month and Day screens show it.
@@ -260,7 +348,7 @@ pub fn month_view(
     let today = now.date_naive();
     let private = private_time(
         &timed_entries(cfg, cal),
-        &State::load(&cfg.state_file)?.private,
+        &State::load(&cfg.database)?.private,
         today,
         today + Duration::days(PRIVATE_DAYS_AHEAD),
         now.naive_local(),
@@ -418,7 +506,7 @@ pub fn start_private(
     choice: &EventChoice,
 ) -> Result<RunningTimer> {
     let window = state::link_event(&timed_entries(cfg, cal), now, choice)?;
-    State::update(&cfg.state_file, |s| {
+    State::update(&cfg.database, |s| {
         s.private.start(now.naive_local(), None, window).cloned()
     })?
 }
@@ -432,10 +520,10 @@ pub fn change_private(
     start: NaiveTime,
     end: NaiveTime,
 ) -> Result<()> {
-    let mut s = State::load(&cfg.state_file)?;
+    let mut s = State::load(&cfg.database)?;
     s.private.edit(id, start, end)?;
     s.private.relabel(id, label)?;
-    s.save(&cfg.state_file)
+    s.save(&cfg.database)
 }
 
 /// A day's lunch break as the Day screen sets it.
@@ -454,7 +542,7 @@ pub enum LunchChoice {
 /// Sets `date`'s lunch override as `lunch set|clear` does; the text says
 /// what was done.
 pub fn set_lunch(cfg: &Config, date: NaiveDate, choice: LunchChoice) -> Result<String> {
-    let path = &cfg.state_file;
+    let path = &cfg.database;
     Ok(match choice {
         LunchChoice::Default => {
             if State::update(path, |s| s.lunch.remove(&date))?.is_some() {
@@ -533,19 +621,18 @@ pub fn add_manual_trip(cfg: &Config, date: NaiveDate, form: &ManualTripForm) -> 
         start_pos: None,
         end_pos: None,
     };
-    trip_store::add_manual(&cfg.trip_store, &trip)?;
+    trip_store::add_manual(&cfg.database, &trip)?;
     Ok(trip)
 }
 
 /// Deletes the trip added by hand that starts at `start`.
 pub fn delete_manual_trip(cfg: &Config, start: DateTime<Tz>) -> Result<()> {
-    trip_store::delete_manual(&cfg.trip_store, start.fixed_offset()).map(|_| ())
+    trip_store::delete_manual(&cfg.database, start.fixed_offset()).map(|_| ())
 }
 
 /// The start times of the trips added by hand, in the config's timezone.
 pub fn manual_trip_starts(cfg: &Config) -> Result<BTreeSet<DateTime<Tz>>> {
-    Ok(trip_store::TripStore::load(&cfg.trip_store)?
-        .manual_starts()
+    Ok(trip_store::manual_starts(&cfg.database)?
         .into_iter()
         .map(|t| t.with_timezone(&cfg.timezone))
         .collect())
@@ -579,15 +666,19 @@ pub struct VacationView {
     pub rules: Rules,
     pub overview: Overview,
     pub calendar_warning: Option<String>,
+    /// When the calendar was fetched, and why fetching failed (see
+    /// [`Calendar`]).
+    pub calendar_fetched_at: Option<DateTime<Utc>>,
+    pub calendar_fetch_error: Option<String>,
 }
 
 /// The vacation overview: the calendar from the oldest open holiday year's
 /// start to the newest one's use-by date.
-pub fn vacation(cfg: &Config, today: NaiveDate) -> Result<VacationView> {
+pub fn vacation(cfg: &Config, today: NaiveDate, mode: CalendarMode) -> Result<VacationView> {
     let open = vacation::open_years(today);
     let from = open[0].first_day();
     let to = open[open.len() - 1].use_by();
-    let cal = calendar_between(cfg, from, to)?;
+    let cal = calendar_between(cfg, from, to, mode)?;
     let mut days = Vec::new();
     let mut month = Month {
         year: from.year(),
@@ -608,6 +699,8 @@ pub fn vacation(cfg: &Config, today: NaiveDate) -> Result<VacationView> {
         rules,
         overview,
         calendar_warning: cal.warning,
+        calendar_fetched_at: cal.fetched_at,
+        calendar_fetch_error: cal.fetch_error,
     })
 }
 
@@ -678,7 +771,7 @@ impl AccountAccess<'_> {
 /// Records the connected account in the state file, keeping its last sync
 /// when the email is unchanged.
 pub fn remember_account(cfg: &Config, email: &str) -> Result<()> {
-    State::update(&cfg.state_file, |s| {
+    State::update(&cfg.database, |s| {
         let last_sync = s
             .account
             .take()
@@ -693,7 +786,7 @@ pub fn remember_account(cfg: &Config, email: &str) -> Result<()> {
 
 /// Forgets the connected account in the state file.
 pub fn forget_account(cfg: &Config) -> Result<()> {
-    State::update(&cfg.state_file, |s| s.account = None)
+    State::update(&cfg.database, |s| s.account = None)
 }
 
 /// What a trip sync did, over the days `from` through `to`.
@@ -707,7 +800,7 @@ pub struct SyncOutcome {
 /// Fetches trips from the account month by month into the trip store,
 /// from `from` (default: where the store ends) through `today`.
 pub fn sync_trips(cfg: &Config, from: Option<&str>, today: NaiveDate) -> Result<SyncOutcome> {
-    let state = State::load(&cfg.state_file)?;
+    let state = State::load(&cfg.database)?;
     let access = AccountAccess::new(cfg, &state);
     let token = access.token()?;
     sync_trips_with(cfg, &access, &token, from, today)
@@ -724,7 +817,7 @@ pub fn sync_trips_with(
 ) -> Result<SyncOutcome> {
     let from = match from {
         Some(f) => state::parse_date(f)?,
-        None => trip_store::sync_start(&cfg.trip_store, cfg.timezone, today)?,
+        None => trip_store::sync_start(&cfg.database, cfg.timezone, today)?,
     };
     if from > today {
         anyhow::bail!("--from {from} is after today");
@@ -735,13 +828,13 @@ pub fn sync_trips_with(
     })?;
     let vehicles = connected_cars::retry_429(&mut sleep, || session.vehicles())?;
     let vehicle = connected_cars::pick_vehicle(&vehicles, access.vehicle)?;
-    let synced = trip_store::sync(&cfg.trip_store, from, today, cfg.timezone, |first, last| {
+    let synced = trip_store::sync(&cfg.database, from, today, cfg.timezone, |first, last| {
         connected_cars::retry_429(&mut sleep, || {
             session.trips_on_days(&vehicle.id, first, last, cfg.timezone)
         })
     })?;
     let email = access.email.clone().unwrap_or_default();
-    State::update(&cfg.state_file, |s| {
+    State::update(&cfg.database, |s| {
         s.account
             .get_or_insert(state::Account {
                 email,
@@ -896,7 +989,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let cfg = Config::from_text("employee_number = \"1\"\n[danlon]\n", &path).unwrap();
-        State::update(&cfg.state_file, |s| {
+        State::update(&cfg.database, |s| {
             s.private
                 .start(at("2026-11-03 12:30"), Some("Bank".into()), None)?;
             s.private.stop(at("2026-11-03 13:00")).map(|_| ())
@@ -909,11 +1002,11 @@ mod tests {
         assert_eq!(err.to_string(), "end 12:00 is not after start 13:00");
         let err = change_private(&cfg, 1, " ", t("12:00"), t("12:40")).unwrap_err();
         assert_eq!(err.to_string(), "the label is empty");
-        let i = &State::load(&cfg.state_file).unwrap().private.intervals[0];
+        let i = &State::load(&cfg.database).unwrap().private.intervals[0];
         assert_eq!((i.label.as_str(), i.end), ("Bank", at("2026-11-03 13:00")));
 
         change_private(&cfg, 1, "Post", t("12:15"), t("12:40")).unwrap();
-        let i = &State::load(&cfg.state_file).unwrap().private.intervals[0];
+        let i = &State::load(&cfg.database).unwrap().private.intervals[0];
         assert_eq!(
             (i.label.as_str(), i.start, i.end),
             ("Post", at("2026-11-03 12:15"), at("2026-11-03 12:40"))
@@ -947,7 +1040,7 @@ mod tests {
         // Arrival only: the day has no departure yet.
         add_manual_trip(&cfg, date, &form("07:30", "08:00", "Hjem", "Kontorvej 1")).unwrap();
         let worked = || {
-            let trips = load_trips(&cfg, None).unwrap();
+            let trips = load_trips(&cfg, None, month).unwrap();
             let report = build_month(&cfg, month, &trips, &[]).unwrap();
             let d = report.days.iter().find(|d| d.date == date).unwrap();
             (d.worked_hours, d.lunch.source)
@@ -959,7 +1052,10 @@ mod tests {
         assert!(base > 7.0, "{base}");
         let starts = manual_trip_starts(&cfg).unwrap();
         assert_eq!(starts.len(), 2);
-        assert_eq!(load_trips(&cfg, None).unwrap()[0].distance_km, Some(12.5));
+        assert_eq!(
+            load_trips(&cfg, None, month).unwrap()[0].distance_km,
+            Some(12.5)
+        );
 
         let t = |s| state::parse_time(s).unwrap();
         assert_eq!(
@@ -1022,6 +1118,66 @@ mod tests {
 
         delete_manual_trip(&cfg, *starts.iter().next().unwrap()).unwrap();
         assert_eq!(manual_trip_starts(&cfg).unwrap().len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_calendar_link_falls_back_to_the_kept_copy() {
+        let dir = crate::trips::tests::temp_dir("svc-calendar-cache");
+        // Nothing listens on port 1: fetching fails at once.
+        let link = "http://127.0.0.1:1/calendar.ics";
+        let text = format!("employee_number = \"1\"\n[calendar]\nsource = \"{link}\"\n[danlon]\n");
+        let cfg = Config::from_text(&text, &dir.join("config.toml")).unwrap();
+        let month = Month::parse("2026-10").unwrap();
+        for mode in [
+            CalendarMode::Fresh,
+            CalendarMode::Cached,
+            CalendarMode::Offline,
+        ] {
+            assert!(
+                calendar(&cfg, month, mode).is_err(),
+                "{mode:?} without a copy"
+            );
+        }
+        let err = format!(
+            "{:#}",
+            calendar(&cfg, month, CalendarMode::Offline).unwrap_err()
+        );
+        assert!(err.contains("run once without --offline"), "{err}");
+
+        let ics = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/arbejdstid.ics"),
+        )
+        .unwrap();
+        let kept_at = DateTime::parse_from_rfc3339("2026-10-20T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        db::store_calendar(&cfg.database, link, &ics, kept_at).unwrap();
+
+        let fresh = calendar(&cfg, month, CalendarMode::Fresh).unwrap();
+        assert!(!fresh.occurrences.is_empty());
+        assert_eq!(fresh.fetched_at, Some(kept_at));
+        assert!(
+            fresh
+                .fetch_error
+                .as_deref()
+                .is_some_and(|e| e.contains("downloading calendar"))
+        );
+        for mode in [CalendarMode::Cached, CalendarMode::Offline] {
+            let c = calendar(&cfg, month, mode).unwrap();
+            assert_eq!(
+                (c.fetched_at, c.fetch_error),
+                (Some(kept_at), None),
+                "{mode:?}"
+            );
+            assert_eq!(c.occurrences.len(), fresh.occurrences.len());
+        }
+        // A failed refresh keeps the copy and its time.
+        assert!(refresh_calendar(&cfg).is_err());
+        assert_eq!(
+            db::cached_calendar(&cfg.database, link).unwrap(),
+            Some((ics, kept_at))
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use vw_danlon::backup::{self, Backup};
 use vw_danlon::config::Config;
 use vw_danlon::connected_cars;
+use vw_danlon::db;
 use vw_danlon::service::{self, AccountAccess, SyncOutcome};
 use vw_danlon::state::State;
-use vw_danlon::trip_store::TripStore;
+use vw_danlon::trip_store;
 
 use crate::secrets::{self, Secret, SecretStore};
 
@@ -99,7 +101,7 @@ impl fmt::Display for Problem {
                 f,
                 "No trips yet. Import the Min Volkswagen export or sync your account to see mileage."
             ),
-            Problem::BadTrips(e) => write!(f, "The trips file can't be read: {e}"),
+            Problem::BadTrips(e) => write!(f, "The stored data can't be read: {e}"),
         }
     }
 }
@@ -136,6 +138,8 @@ pub struct Setup {
     /// Whether a calendar link is kept in the secret store.
     pub link_in_store: bool,
     pub trips: Option<TripsSummary>,
+    /// When the trips and state were moved in from the JSON files.
+    pub migrated: Option<db::Migrated>,
     pub account: AccountStatus,
     pub problems: Vec<Problem>,
 }
@@ -166,6 +170,7 @@ impl Setup {
                     config_text: None,
                     link_in_store: false,
                     trips: None,
+                    migrated: None,
                     account: AccountStatus::NotSetUp,
                     problems: vec![Problem::NoDir(format!("{e:#}"))],
                 };
@@ -186,6 +191,7 @@ impl Setup {
             config_text: None,
             link_in_store: false,
             trips: None,
+            migrated: None,
             account: AccountStatus::NotSetUp,
             problems,
         };
@@ -223,20 +229,20 @@ impl Setup {
             if cfg.calendar.is_none() {
                 setup.problems.push(Problem::NoCalendar);
             }
-            match TripStore::load(&cfg.trip_store) {
+            match trip_store::summary(&cfg.database, cfg.timezone) {
                 Ok(t) => {
-                    let trips = t.trips(cfg.timezone);
-                    if trips.is_empty() {
+                    if t.count == 0 {
                         setup.problems.push(Problem::NoTrips);
                     }
                     setup.trips = Some(TripsSummary {
-                        count: trips.len(),
-                        first: trips.first().map(|t| t.start.date_naive()),
-                        last: trips.last().map(|t| t.end.date_naive()),
+                        count: t.count,
+                        first: t.first,
+                        last: t.last_end,
                     });
                 }
                 Err(e) => setup.problems.push(Problem::BadTrips(format!("{e:#}"))),
             }
+            setup.migrated = db::migrated(&cfg.database).ok().flatten();
             setup.account = account_status(cfg, store.as_ref());
         } else if link.is_none()
             && setup
@@ -263,7 +269,7 @@ impl Setup {
 }
 
 fn account_status(cfg: &Config, store: &dyn SecretStore) -> AccountStatus {
-    let state = match State::load(&cfg.state_file) {
+    let state = match State::load(&cfg.database) {
         Ok(s) => s,
         Err(e) => return AccountStatus::Unknown(format!("{e:#}")),
     };
@@ -301,12 +307,21 @@ fn write_app_settings(path: &Path, settings: &AppSettings) -> Result<()> {
 }
 
 /// `text` with `[calendar] source` set to `link`, when there is one: the
-/// app keeps the link in the secret store, not in the config file.
+/// app keeps the link in the secret store, not in the config file. Without
+/// a link, a `[calendar]` without a source (as a backup from another
+/// device has it) is left out, so the app asks for the link.
 fn with_calendar_link(text: &str, link: Option<&str>) -> Result<String> {
-    let Some(link) = link else {
-        return Ok(text.to_string());
-    };
     let mut doc: toml_edit::DocumentMut = text.parse()?;
+    let Some(link) = link else {
+        if doc
+            .get("calendar")
+            .and_then(|c| c.as_table_like())
+            .is_some_and(|c| !c.contains_key("source"))
+        {
+            doc.remove("calendar");
+        }
+        return Ok(doc.to_string());
+    };
     let cal = doc
         .entry("calendar")
         .or_insert(toml_edit::table())
@@ -463,7 +478,7 @@ pub fn add_mileage(setup: &Setup, form: &MileageForm) -> Result<()> {
 
 /// The account's email, or an error saying to connect it.
 fn account_email(cfg: &Config) -> Result<(State, String)> {
-    let state = State::load(&cfg.state_file)?;
+    let state = State::load(&cfg.database)?;
     let email = AccountAccess::new(cfg, &state)
         .email
         .context("no Min Volkswagen account is connected")?;
@@ -485,7 +500,7 @@ pub fn connect_account(
     let secret = Secret::DeviceToken(email.to_string());
     // Nothing is registered that cannot be kept.
     store.get(&secret)?;
-    let state = State::load(&cfg.state_file)?;
+    let state = State::load(&cfg.database)?;
     let access = AccountAccess::new(cfg, &state);
     let token = connected_cars::register_device(access.namespace, email, password)?;
     store
@@ -512,6 +527,101 @@ pub fn disconnect_account(cfg: &Config, store: &dyn SecretStore) -> Result<()> {
     let (_, email) = account_email(cfg)?;
     store.delete(&Secret::DeviceToken(email))?;
     service::forget_account(cfg)
+}
+
+/// Moves the data of the folder `from` the CLI used into the app's folder
+/// (see [`backup::import_folder`]: the folder's trips.json and state.json
+/// are deleted once the data is stored). A device token the CLI kept in a
+/// `token_file` is copied too and kept in the app's secret store. The text
+/// says what was done.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub fn import_old_data(setup: &Setup, from: &Path) -> Result<String> {
+    let done = backup::import_folder(from, &setup.dir)?;
+    let mut text = format!("Imported {} trips", done.trips);
+    if done.zero_km > 0 {
+        text.push_str(&format!(", {} skipped (0 km)", done.zero_km));
+    }
+    if !done.deleted.is_empty() {
+        let names: Vec<String> = done
+            .deleted
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect();
+        text.push_str(&format!(
+            "; deleted {} from {}",
+            names.join(" and "),
+            from.display()
+        ));
+    }
+    if let Some(note) = copy_token(setup, from)? {
+        text.push_str(&format!("; {note}"));
+    }
+    Ok(text)
+}
+
+/// Copies the CLI's `token_file` (relative to its folder) and keeps its
+/// device token in the app's secret store; what was done, if anything.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn copy_token(setup: &Setup, from: &Path) -> Result<Option<String>> {
+    let path = setup.config_path();
+    let text = std::fs::read_to_string(&path)?;
+    let Ok(cfg) = Config::from_text(&with_calendar_link(&text, None)?, &path) else {
+        return Ok(None);
+    };
+    let Some(file) = cfg
+        .connected_cars
+        .as_ref()
+        .and_then(|c| c.token_file.as_deref())
+    else {
+        return Ok(None);
+    };
+    let name = Path::new(file)
+        .file_name()
+        .context("token_file has no file name")?;
+    let source = from.join(name);
+    if !source.exists() {
+        return Ok(None);
+    }
+    std::fs::copy(&source, file).with_context(|| format!("copying {}", source.display()))?;
+    let state = State::load(&cfg.database)?;
+    let access = AccountAccess::new(&cfg, &state);
+    let (Some(email), Some(token)) = (access.email.clone(), access.token().ok()) else {
+        return Ok(None);
+    };
+    let store = setup.secret_store();
+    store
+        .set(&Secret::DeviceToken(email.clone()), &token)
+        .context("the device token can't be kept")?;
+    Ok(Some(format!(
+        "the device token for {email} is kept in {}",
+        store.describe()
+    )))
+}
+
+/// The backup of the app's data, as a file name and its text.
+pub fn export_backup(setup: &Setup) -> Result<(String, String)> {
+    let cfg = setup
+        .config
+        .as_ref()
+        .context("the config can't be used yet")?;
+    let backup = Backup::export(&setup.config_path(), &cfg.database)?;
+    let name = format!(
+        "vw-danlon-backup-{}.json",
+        crate::screens::now(cfg).format("%Y-%m-%d")
+    );
+    Ok((name, backup.to_json()?))
+}
+
+/// Replaces the app's config, trips and state with the backup in `bytes`
+/// (a file named `name`).
+pub fn import_backup(setup: &Setup, name: &str, bytes: &[u8]) -> Result<String> {
+    let backup = Backup::parse(name, bytes)?;
+    backup.restore(&setup.dir)?;
+    Ok(format!(
+        "Imported the backup of {}: {} trips. Enter the calendar link and connect the account again.",
+        backup.created.format("%-d %b %Y"),
+        backup.trips.trips.len()
+    ))
 }
 
 /// Writes `text` through a temp file and a rename.
@@ -708,11 +818,62 @@ pub mod tests {
             ..SettingsForm::default()
         };
         assert!(save(&s, &form).is_err());
-        assert_eq!(
-            std::fs::read_dir(&dir).unwrap().count(),
-            3,
-            "no file written"
+        // Only the database, created when the app first reads the data.
+        let files = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name() != db::FILE_NAME)
+            .count();
+        assert_eq!(files, 3, "no file written");
+    }
+
+    #[test]
+    fn old_data_and_a_backup_move_in() {
+        let app = file_dir("import-app");
+        let cli = scratch("import-cli");
+        let config = "employee_number = \"1\"\n[calendar]\nsource = \"https://cal.example/SECRET.ics\"\n\
+            [connected_cars]\nemail = \"a@example.com\"\ntoken_file = \"connected-cars-token\"\n[danlon]\n";
+        std::fs::write(cli.join("config.toml"), config).unwrap();
+        std::fs::write(
+            cli.join("connected-cars-token"),
+            r#"{"email": "a@example.com", "device_token": "dev-1"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cli.join("trips.json"),
+            r#"{"trips": [{"start": "2026-10-05T07:32:00+02:00", "end": "2026-10-05T08:05:00+02:00",
+                "start_odometer": null, "distance_km": 24.1, "from": "Hjem", "to": "Kontor",
+                "start_pos": null, "end_pos": null}]}"#,
+        )
+        .unwrap();
+
+        let setup = Setup::load(Ok(app.clone()));
+        let text = import_old_data(&setup, &cli).unwrap();
+        assert!(
+            text.starts_with(&format!(
+                "Imported 1 trips; deleted trips.json from {}; the device token for a@example.com is kept in",
+                cli.display()
+            )),
+            "{text}"
         );
+        let setup = Setup::load(Ok(app.clone()));
+        assert_eq!(setup.trips.as_ref().unwrap().count, 1);
+        assert!(matches!(setup.account, AccountStatus::Connected { .. }));
+        assert!(cli.join("config.toml").exists() && !cli.join("trips.json").exists());
+
+        // The backup has no calendar link: the phone asks for one.
+        let (_, json) = export_backup(&setup).unwrap();
+        assert!(!json.contains("SECRET") && !json.contains("dev-1"));
+        let phone = file_dir("import-phone");
+        let text =
+            import_backup(&Setup::load(Ok(phone.clone())), "b.json", json.as_bytes()).unwrap();
+        assert!(text.contains(": 1 trips."), "{text}");
+        let phone = Setup::load(Ok(phone));
+        assert!(
+            phone.problems.contains(&Problem::NoCalendar),
+            "{:?}",
+            phone.problems
+        );
+        assert_eq!(phone.trips.as_ref().unwrap().count, 1);
     }
 
     #[test]

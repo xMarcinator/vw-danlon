@@ -4,11 +4,13 @@
 //! data, the other modules the rules.
 
 pub mod address;
+pub mod backup;
 pub mod calendar;
 pub mod checklist;
 pub mod config;
 pub mod connected_cars;
 pub mod danlon;
+pub mod db;
 pub mod holidays;
 pub mod mileage;
 pub mod month;

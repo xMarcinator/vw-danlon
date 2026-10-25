@@ -18,7 +18,7 @@ fn date(d: NaiveDate) -> String {
 async fn load(cfg: Config) -> Result<VacationView, String> {
     tokio::task::spawn_blocking(move || {
         let today = super::now(&cfg).date_naive();
-        service::vacation(&cfg, today)
+        service::vacation(&cfg, today, service::CalendarMode::Cached)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -142,7 +142,9 @@ fn quoted(words: &[String]) -> String {
 
 #[component]
 pub fn VacationScreen(setup: Signal<Setup>) -> Element {
+    let cal_sync = use_context::<Signal<super::CalendarSync>>();
     let loaded = use_resource(move || {
+        let _ = cal_sync.read().version;
         let cfg = setup.read().config.clone();
         async move {
             match cfg {

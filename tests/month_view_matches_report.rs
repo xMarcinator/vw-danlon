@@ -106,8 +106,8 @@ fn month_view_matches_report_for_the_example_data() {
         .timezone
         .from_local_datetime(&NaiveDateTime::new(today, chrono::NaiveTime::MIN))
         .unwrap();
-    let trips = service::load_trips(&cfg, Some(&trips)).unwrap();
-    let cal = service::month_calendar(&cfg, month, today).unwrap();
+    let trips = service::load_trips(&cfg, Some(&trips), month).unwrap();
+    let cal = service::month_calendar(&cfg, month, today, service::CalendarMode::Fresh).unwrap();
     let view = service::month_view(&cfg, month, &trips, &cal.occurrences, now).unwrap();
 
     let got: Vec<_> = view

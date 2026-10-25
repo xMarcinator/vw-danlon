@@ -50,8 +50,8 @@ fn rate(v: f64) -> String {
 /// off the UI thread.
 async fn load(cfg: Config, month: Month) -> Result<(Vec<Trip>, Vec<Occurrence>), String> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let trips = service::load_trips(&cfg, None)?;
-        let cal = service::calendar(&cfg, month)?;
+        let trips = service::load_trips(&cfg, None, month)?;
+        let cal = service::calendar(&cfg, month, service::CalendarMode::Cached)?;
         Ok((trips, cal.occurrences))
     })
     .await
@@ -125,7 +125,9 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut month = use_signal(|| this_month(&setup.peek()));
     let mut message = use_signal(|| None::<Result<String, String>>);
     let mut printing = use_signal(|| false);
+    let cal_sync = use_context::<Signal<super::CalendarSync>>();
     let loaded = use_resource(move || {
+        let _ = cal_sync.read().version;
         let m = month();
         let cfg = setup.read().config.clone();
         async move {

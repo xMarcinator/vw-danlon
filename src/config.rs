@@ -37,12 +37,10 @@ pub struct Config {
     /// The Min Volkswagen account (Connected Cars) for `trips sync`.
     pub connected_cars: Option<ConnectedCarsConfig>,
     pub danlon: DanlonConfig,
-    /// The local state file (`state.json` beside the config file).
+    /// The database beside the config file: trips, local state and the
+    /// calendar cache (see [`crate::db`]).
     #[serde(skip)]
-    pub state_file: PathBuf,
-    /// The imported trips (`trips.json` beside the config file).
-    #[serde(skip)]
-    pub trip_store: PathBuf,
+    pub database: PathBuf,
     /// `[places]` resolved against the configured addresses.
     #[serde(skip)]
     pub known_places: Places,
@@ -467,7 +465,7 @@ impl Config {
     }
 
     /// The config in `text`, read as if from the file at `path`: relative
-    /// paths and the state and trip files are resolved beside it.
+    /// paths and the database are resolved beside it.
     pub fn from_text(text: &str, path: &Path) -> Result<Self> {
         let mut cfg =
             Config::parse(text).with_context(|| format!("parsing config {}", path.display()))?;
@@ -488,8 +486,7 @@ impl Config {
         {
             *file = config_dir.join(&*file).to_string_lossy().into_owned();
         }
-        cfg.state_file = config_dir.join("state.json");
-        cfg.trip_store = config_dir.join("trips.json");
+        cfg.database = config_dir.join(crate::db::FILE_NAME);
         cfg.validate()?;
         Ok(cfg)
     }

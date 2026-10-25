@@ -48,7 +48,7 @@ fn vacation_view_matches_the_vacation_command() {
     let out = cli(&dir, &["vacation"]);
     let cfg = Config::load(&dir.join("config.toml")).unwrap();
     let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-    let v = service::vacation(&cfg, today).unwrap();
+    let v = service::vacation(&cfg, today, service::CalendarMode::Fresh).unwrap();
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
         vw_danlon::vacation::render(&v.rules, &v.overview)
@@ -78,10 +78,10 @@ fn mileage_from_imported_trips_matches_logbook() {
     // The app imports the file's bytes into the store and reads the store.
     let cfg = Config::load(&dir.join("config.toml")).unwrap();
     let bytes = std::fs::read(&trips_csv).unwrap();
-    trip_store::import_bytes(&cfg.trip_store, "trips.csv", &bytes, cfg.timezone).unwrap();
-    let trips = service::load_trips(&cfg, None).unwrap();
+    trip_store::import_bytes(&cfg.database, "trips.csv", &bytes, cfg.timezone).unwrap();
     let month = Month::parse(month).unwrap();
-    let cal = service::calendar(&cfg, month).unwrap();
+    let trips = service::load_trips(&cfg, None, month).unwrap();
+    let cal = service::calendar(&cfg, month, service::CalendarMode::Fresh).unwrap();
     let m = service::mileage_for(&cfg, month, &trips, &cal.occurrences)
         .unwrap()
         .expect("the example config has [mileage]");

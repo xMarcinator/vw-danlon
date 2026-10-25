@@ -1,15 +1,15 @@
-//! Local state kept beside the config file: per-day lunch overrides, the
-//! private-time timer, the days ticked off in the Danløn app checklist and
-//! the connected Min Volkswagen account.
-//! One JSON document, written atomically.
+//! Local state kept in the database beside the config file (see
+//! [`crate::db`]): per-day lunch overrides, the private-time timer, the days
+//! ticked off in the Danløn app checklist and the connected Min Volkswagen
+//! account.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use chrono_tz::Tz;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::month::{EntryKind, TimedEntry};
@@ -265,50 +265,190 @@ impl Private {
 }
 
 impl State {
-    /// Reads the state file; a missing file is an empty state.
-    pub fn load(path: &Path) -> Result<Self> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(State::default()),
-            Err(e) => return Err(e).with_context(|| format!("reading state {}", path.display())),
-        };
-        serde_json::from_str(&text).with_context(|| {
-            format!(
-                "parsing state {} (fix or remove the file; it was not changed)",
-                path.display()
-            )
+    /// Reads the state from the database `db`.
+    pub fn load(db: &Path) -> Result<Self> {
+        let conn = crate::db::open(db)?;
+        Ok(read_rows(&conn)?)
+    }
+
+    /// Stores this state in the database `db`, replacing the stored one.
+    pub fn save(&self, db: &Path) -> Result<()> {
+        crate::db::write(db, |tx| Ok(write_rows(tx, self)?))
+    }
+
+    /// Loads the state, applies `change` and saves it, in one transaction.
+    /// A database that cannot be read is never overwritten.
+    pub fn update<T>(db: &Path, change: impl FnOnce(&mut State) -> T) -> Result<T> {
+        crate::db::write(db, |tx| {
+            let mut state = read_rows(tx)?;
+            let out = change(&mut state);
+            write_rows(tx, &state)?;
+            Ok(out)
         })
     }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        write_json(path, self).with_context(|| format!("writing state {}", path.display()))
-    }
-
-    /// Loads the state, applies `change` and saves it. A state file that
-    /// cannot be read is never overwritten.
-    pub fn update<T>(path: &Path, change: impl FnOnce(&mut State) -> T) -> Result<T> {
-        let mut state = State::load(path)?;
-        let out = change(&mut state);
-        state.save(path)?;
-        Ok(out)
-    }
 }
 
-/// Writes `value` as JSON atomically: a temp file in the same directory,
-/// then a rename over the old file.
-pub fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
-    let tmp = tmp_path(path);
-    let mut f = std::fs::File::create(&tmp)?;
-    serde_json::to_writer_pretty(&mut f, value)?;
-    f.write_all(b"\n")?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)
+/// The state in a JSON file an earlier version wrote; `None` when there is
+/// no file.
+pub(crate) fn read_json(path: &Path) -> Result<Option<State>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading state {}", path.display())),
+    };
+    serde_json::from_str(&text).map(Some).with_context(|| {
+        format!(
+            "parsing state {} (fix or remove the file; it was not changed)",
+            path.display()
+        )
+    })
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    path.with_file_name(name)
+fn window(
+    title: Option<String>,
+    start: Option<NaiveDateTime>,
+    end: Option<NaiveDateTime>,
+) -> Option<PlannedWindow> {
+    Some(PlannedWindow {
+        title: title?,
+        start: start?,
+        end: end?,
+    })
+}
+
+/// The state's rows in the database.
+pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
+    let mut lunch = BTreeMap::new();
+    let mut st = conn.prepare("SELECT day, start, minutes FROM lunch")?;
+    for r in st.query_map([], |r| {
+        Ok((
+            r.get::<_, NaiveDate>(0)?,
+            LunchOverride {
+                start: r.get(1)?,
+                minutes: r.get(2)?,
+            },
+        ))
+    })? {
+        let (day, l) = r?;
+        lunch.insert(day, l);
+    }
+    let entered = conn
+        .prepare("SELECT day FROM entered")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<BTreeSet<NaiveDate>>>()?;
+    let intervals = conn
+        .prepare(
+            "SELECT id, start, end, label, replaces_title, replaces_start, replaces_end \
+             FROM private_intervals ORDER BY id",
+        )?
+        .query_map([], |r| {
+            Ok(PrivateInterval {
+                id: r.get(0)?,
+                start: r.get(1)?,
+                end: r.get(2)?,
+                label: r.get(3)?,
+                replaces: window(r.get(4)?, r.get(5)?, r.get(6)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let running = conn
+        .query_row(
+            "SELECT start, label, replaces_title, replaces_start, replaces_end FROM private_running",
+            [],
+            |r| {
+                Ok(RunningTimer {
+                    start: r.get(0)?,
+                    label: r.get(1)?,
+                    replaces: window(r.get(2)?, r.get(3)?, r.get(4)?),
+                })
+            },
+        )
+        .optional()?;
+    let next_id = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'private_next_id'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_default();
+    let account = conn
+        .query_row("SELECT email, last_sync FROM account", [], |r| {
+            Ok(Account {
+                email: r.get(0)?,
+                last_sync: r.get(1)?,
+            })
+        })
+        .optional()?;
+    Ok(State {
+        lunch,
+        private: Private {
+            running,
+            intervals,
+            next_id,
+        },
+        entered,
+        account,
+    })
+}
+
+/// Replaces the state's rows in the database with `state`.
+pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "DELETE FROM lunch; DELETE FROM entered; DELETE FROM private_intervals; \
+         DELETE FROM private_running; DELETE FROM account; \
+         DELETE FROM meta WHERE key = 'private_next_id';",
+    )?;
+    let mut st = conn.prepare("INSERT INTO lunch (day, start, minutes) VALUES (?1, ?2, ?3)")?;
+    for (day, l) in &state.lunch {
+        st.execute(params![day, l.start, l.minutes])?;
+    }
+    let mut st = conn.prepare("INSERT INTO entered (day) VALUES (?1)")?;
+    for day in &state.entered {
+        st.execute([day])?;
+    }
+    let mut st = conn.prepare(
+        "INSERT INTO private_intervals (id, start, end, label, replaces_title, replaces_start, replaces_end) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for i in &state.private.intervals {
+        let w = i.replaces.as_ref();
+        st.execute(params![
+            i.id,
+            i.start,
+            i.end,
+            i.label,
+            w.map(|w| &w.title),
+            w.map(|w| w.start),
+            w.map(|w| w.end)
+        ])?;
+    }
+    if let Some(r) = &state.private.running {
+        let w = r.replaces.as_ref();
+        conn.execute(
+            "INSERT INTO private_running (one, start, label, replaces_title, replaces_start, replaces_end) \
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+            params![
+                r.start,
+                r.label,
+                w.map(|w| &w.title),
+                w.map(|w| w.start),
+                w.map(|w| w.end)
+            ],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('private_next_id', ?1)",
+        [state.private.next_id.to_string()],
+    )?;
+    if let Some(a) = &state.account {
+        conn.execute(
+            "INSERT INTO account (one, email, last_sync) VALUES (1, ?1, ?2)",
+            params![a.email, a.last_sync],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn parse_date(s: &str) -> Result<NaiveDate> {
@@ -329,7 +469,7 @@ pub fn parse_time(s: &str) -> Result<NaiveTime> {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
+    fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("vw-danlon-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -343,7 +483,7 @@ mod tests {
     #[test]
     fn overrides_round_trip_through_save_and_load() {
         let dir = temp_dir("state-roundtrip");
-        let path = dir.join("state.json");
+        let path = dir.join(crate::db::FILE_NAME);
         assert_eq!(State::load(&path).unwrap(), State::default());
 
         let set = |date: &str, start: &str, minutes| {
@@ -371,16 +511,15 @@ mod tests {
                 minutes: 30
             }
         );
-        assert!(!tmp_path(&path).exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn entered_days_round_trip() {
         let dir = temp_dir("state-entered");
-        let path = dir.join("state.json");
+        let path = dir.join(crate::db::FILE_NAME);
         // A state file from before the checklist has no ticks.
-        std::fs::write(&path, r#"{"lunch": {}}"#).unwrap();
+        std::fs::write(dir.join("state.json"), r#"{"lunch": {}}"#).unwrap();
         assert!(State::load(&path).unwrap().entered.is_empty());
 
         assert!(State::update(&path, |s| s.entered.insert(d("2026-11-18"))).unwrap());
@@ -391,21 +530,6 @@ mod tests {
             State::load(&path).unwrap().entered,
             BTreeSet::from([d("2026-11-19")])
         );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn corrupt_file_is_named_and_left_untouched() {
-        let dir = temp_dir("state-corrupt");
-        let path = dir.join("state.json");
-        std::fs::write(&path, "{ not json").unwrap();
-
-        let err = State::update(&path, |s| s.lunch.clear()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains(&path.display().to_string()),
-            "{err:#}"
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -505,7 +629,7 @@ mod tests {
     #[test]
     fn timer_start_stop_records_an_interval() {
         let dir = temp_dir("state-timer");
-        let path = dir.join("state.json");
+        let path = dir.join(crate::db::FILE_NAME);
         State::update(&path, |s| {
             s.private.start(at("2026-11-03 12:30"), None, None).cloned()
         })

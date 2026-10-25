@@ -5,6 +5,9 @@ state.json
 state.json.tmp
 trips.json
 trips.json.tmp
+vw-danlon.db
+vw-danlon.db.new
+vw-danlon.db-journal
 connected-cars-token
 connected-cars-token.tmp
 dist/

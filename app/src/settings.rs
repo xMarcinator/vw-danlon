@@ -27,9 +27,10 @@ enum Status {
 /// prints it.
 fn synced_text(s: &SyncOutcome) -> String {
     let mut text = format!(
-        "Synced: {} added, {} already present · {} – {}",
+        "Synced: {} added, {} already present{} · {} – {}",
         s.synced.merged.added,
         s.synced.merged.already,
+        s.synced.merged.zero_km_text(),
         s.from.format("%-d %b %Y"),
         s.to.format("%-d %b %Y")
     );
@@ -40,6 +41,39 @@ fn synced_text(s: &SyncOutcome) -> String {
         ));
     }
     text
+}
+
+/// A Data section job: what it did, as text.
+type DataJob = Box<dyn FnOnce(&Setup) -> anyhow::Result<String> + Send>;
+
+#[cfg(not(target_os = "android"))]
+const IMPORT_OLD: &str = "Import old data…";
+
+#[cfg(not(target_os = "android"))]
+const DATA_NOTE: &str = "Import old data: pick the folder you used with the command-line tool (config.toml, trips.json, state.json). Its settings, trips and state replace this app's; then trips.json and state.json are deleted there, config.toml stays. A backup holds settings, trips, ticks, lunch and private time — not the calendar link or account token, which you enter again on the other device. Importing a backup replaces this app's data.";
+#[cfg(target_os = "android")]
+const DATA_NOTE: &str = "Move your data from the computer: export a backup there, then import it here; it replaces the data on this phone. The calendar link and account token are not in the backup.";
+
+/// Keeps the backup where the user can take it: a file in Downloads on the
+/// desktop; the share sheet on Android.
+#[cfg(not(target_os = "android"))]
+fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .context("no Downloads folder")?;
+    let path = dir.join(name);
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    Ok(format!(
+        "Saved {}. The calendar link and account token are not in it.",
+        path.display()
+    ))
+}
+
+#[cfg(target_os = "android")]
+fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
+    crate::platform::share(name, "application/json", json, None)?;
+    Ok("Shared the backup. The calendar link and account token are not in it.".into())
 }
 
 /// Reads the data directory again after a change.
@@ -87,6 +121,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             .unwrap_or_default(),
     });
     let mut password = use_signal(String::new);
+    let mut data_status = use_signal(|| None::<Result<String, String>>);
 
     let s = setup.read();
     let store = s.secret_store().describe();
@@ -128,6 +163,14 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         AccountStatus::Unknown(e) => format!("Status unknown: {e}"),
     };
     let problems: Vec<String> = s.problems.iter().map(|p| p.to_string()).collect();
+    let mut stored = format!("Stored in {} · {trips}", vw_danlon::db::FILE_NAME);
+    if let Some(m) = &s.migrated {
+        stored.push_str(&format!(
+            " · moved from {} on {}",
+            m.files.join(" and "),
+            m.at.format("%-d %b %Y")
+        ));
+    }
     drop(s);
 
     let save = move |_| {
@@ -211,6 +254,55 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             busy.set(false);
         });
     };
+
+    // Runs a Data job off the UI thread, then reads the folder again.
+    let mut data_job = move |busy_text: &str, job: DataJob| {
+        busy.set(true);
+        data_status.set(Some(Ok(busy_text.to_string())));
+        let dir = setup.peek().dir.clone();
+        spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let setup = Setup::load(Ok(dir));
+                job(&setup)
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| format!("Not done: {e:#}")));
+            reload(setup);
+            data_status.set(Some(result));
+            busy.set(false);
+        });
+    };
+    let on_backup = move |picked: Result<Picked, String>| match picked {
+        Ok(p) => data_job(
+            "Importing the backup…",
+            Box::new(move |s| setup::import_backup(s, &p.name, &p.bytes)),
+        ),
+        Err(e) => data_status.set(Some(Err(e))),
+    };
+    #[cfg(not(target_os = "android"))]
+    let on_folder = move |folder: std::path::PathBuf| {
+        data_job(
+            "Importing…",
+            Box::new(move |s| setup::import_old_data(s, &folder)),
+        )
+    };
+    let export = move |_| {
+        let result =
+            setup::export_backup(&setup.peek()).and_then(|(name, json)| save_backup(&name, &json));
+        data_status.set(Some(result.map_err(|e| format!("Not exported: {e:#}"))));
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let folder_button = rsx! {
+        crate::import::FolderButton { label: IMPORT_OLD, class: "small-btn", on_picked: on_folder }
+    };
+    #[cfg(not(target_os = "android"))]
+    let folder_busy = rsx! {
+        button { class: "small-btn", disabled: true, "{IMPORT_OLD}" }
+    };
+    #[cfg(target_os = "android")]
+    let (folder_button, folder_busy) = (rsx! {}, rsx! {});
 
     let toggle_file = move |e: Event<FormData>| {
         let on = e.checked();
@@ -308,6 +400,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         PickButton {
                             label: "Import trips file",
                             class: "small-btn",
+                            accept: ".xlsx,.csv,.json",
                             on_picked,
                         }
                     } else {
@@ -391,6 +484,33 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 }
             }
             span { class: "sub", "Secrets are kept in {store}." }
+        }
+
+        section { class: "card", "aria-labelledby": "s-data",
+            h2 { id: "s-data", "Data" }
+            span { class: "sub", "{stored}" }
+            div { class: "box-actions",
+                if busy() {
+                    {folder_busy}
+                    button { class: "small-btn", disabled: true, "Export backup…" }
+                    button { class: "small-btn", disabled: true, "Import backup…" }
+                } else {
+                    {folder_button}
+                    button { class: "small-btn", disabled: !has_config, onclick: export, "Export backup…" }
+                    PickButton {
+                        label: "Import backup…",
+                        class: "small-btn",
+                        accept: ".json",
+                        on_picked: on_backup,
+                    }
+                }
+            }
+            match data_status() {
+                None => rsx! {},
+                Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
+                Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
+            }
+            span { class: "note", "{DATA_NOTE}" }
         }
 
         section { class: "card", "aria-labelledby": "s-theme",

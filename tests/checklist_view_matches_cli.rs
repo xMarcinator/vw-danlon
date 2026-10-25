@@ -42,8 +42,8 @@ fn cli(dir: &Path, args: &[&str]) -> Output {
 fn view(dir: &Path, trips: &Path) -> (Config, service::ChecklistView) {
     let cfg = Config::load(&dir.join("config.toml")).unwrap();
     let month = Month::parse("2026-10").unwrap();
-    let trips = service::load_trips(&cfg, Some(trips)).unwrap();
-    let cal = service::calendar(&cfg, month).unwrap();
+    let trips = service::load_trips(&cfg, Some(trips), month).unwrap();
+    let cal = service::calendar(&cfg, month, service::CalendarMode::Fresh).unwrap();
     let view = service::checklist_view(&cfg, month, &trips, &cal.occurrences).unwrap();
     (cfg, view)
 }

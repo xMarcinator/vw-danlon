@@ -79,8 +79,10 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let expanded = use_signal(|| false);
     let mut message = use_signal(|| None as Message);
     let mut adding = use_signal(|| false);
+    let cal_sync = use_context::<Signal<super::CalendarSync>>();
     let mut loaded = use_resource(move || {
         let m = month();
+        let _ = cal_sync.read().version;
         let cfg = setup.read().config.clone();
         async move {
             match cfg {
@@ -237,6 +239,11 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         cfg.lunch.start.format("%H:%M")
     );
 
+    let calendar_chip = match loaded.calendar_fetched_at {
+        Some(at) => format!("{calendar_name} · {}", super::calendar_age(at, now)),
+        None => calendar_name.to_string(),
+    };
+
     rsx! {
         MonthHeader { month, screen }
 
@@ -244,7 +251,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             span { class: "src-chip",
                 span { class: if has_calendar { "dot" } else { "dot warn" }, "aria-hidden": "true" }
                 if has_calendar {
-                    "{calendar_name} · loaded {hm(loaded.fetched_at)}"
+                    "{calendar_chip}"
                 } else {
                     "No calendar · norm from [work_week]"
                 }
@@ -264,9 +271,22 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     }
                 }
             }
+            if loaded.calendar_fetched_at.is_some() {
+                button {
+                    class: "src-chip",
+                    disabled: cal_sync.read().refreshing,
+                    onclick: move |_| { spawn(super::refresh_calendar(setup, cal_sync)); },
+                    if cal_sync.read().refreshing { "Refreshing…" } else { "Refresh calendar" }
+                }
+            }
         }
         if let Some(w) = &loaded.calendar_warning {
             div { class: "alert", role: "status", "{w}" }
+        }
+        if let (Some(e), Some(at)) = (&cal_sync.read().error, loaded.calendar_fetched_at) {
+            div { class: "alert", role: "status",
+                "The calendar can't be refreshed ({e}). Showing the copy {super::calendar_age(at, now)}."
+            }
         }
 
         PrivateCard {

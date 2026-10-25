@@ -80,7 +80,7 @@ pub fn render(a: DayArgs) -> Element {
     let Some(d) = view.report.days.iter().find(|d| d.date == date) else {
         return rsx! {};
     };
-    let private = match State::load(&cfg.state_file) {
+    let private = match State::load(&cfg.database) {
         Ok(s) => service::private_time(
             &service::timed_entries(cfg, &loaded.occurrences),
             &s.private,

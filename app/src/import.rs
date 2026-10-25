@@ -24,7 +24,7 @@ const UPLOAD_ICON: &str = "M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5M12 15V3M7 8
 pub async fn import(cfg: Config, picked: Picked) -> Result<String, String> {
     let name = picked.name.clone();
     tokio::task::spawn_blocking(move || {
-        trip_store::import_bytes(&cfg.trip_store, &picked.name, &picked.bytes, cfg.timezone)
+        trip_store::import_bytes(&cfg.database, &picked.name, &picked.bytes, cfg.timezone)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -39,27 +39,62 @@ pub async fn import(cfg: Config, picked: Picked) -> Result<String, String> {
             })
             .unwrap_or_default();
         format!(
-            "{name}: {} added, {} already imported{period}",
-            merged.added, merged.already
+            "{name}: {} added, {} already imported{}{period}",
+            merged.added,
+            merged.already,
+            merged.zero_km_text()
         )
     })
     .map_err(|e| format!("Not imported: {e:#}"))
 }
 
-/// A button that picks one trips file.
+/// A button that picks one file; `accept` lists its extensions (the
+/// desktop dialog's filter).
 #[component]
 pub fn PickButton(
     label: String,
     class: String,
+    accept: String,
     on_picked: EventHandler<Result<Picked, String>>,
 ) -> Element {
-    picker(label, class, on_picked)
+    picker(label, class, accept, on_picked)
+}
+
+#[cfg(not(target_os = "android"))]
+const FOLDER_ICON: &str =
+    "M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z";
+
+/// A button that picks a folder with the desktop's folder dialog.
+#[cfg(not(target_os = "android"))]
+#[component]
+pub fn FolderButton(
+    label: String,
+    class: String,
+    on_picked: EventHandler<std::path::PathBuf>,
+) -> Element {
+    rsx! {
+        label { class: "{class}",
+            input {
+                class: "visually-hidden",
+                r#type: "file",
+                directory: true,
+                onchange: move |e: Event<FormData>| {
+                    if let Some(folder) = e.files().into_iter().next() {
+                        on_picked.call(folder.path());
+                    }
+                },
+            }
+            Icon { d: FOLDER_ICON, size: 16 }
+            "{label}"
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
 fn picker(
     label: String,
     class: String,
+    accept: String,
     on_picked: EventHandler<Result<Picked, String>>,
 ) -> Element {
     rsx! {
@@ -67,7 +102,7 @@ fn picker(
             input {
                 class: "visually-hidden",
                 r#type: "file",
-                accept: ".xlsx,.csv,.json",
+                accept: "{accept}",
                 onchange: move |e: Event<FormData>| {
                     let Some(file) = e.files().into_iter().next() else {
                         return;
@@ -122,6 +157,7 @@ struct FromPage {
 fn picker(
     label: String,
     class: String,
+    _accept: String,
     on_picked: EventHandler<Result<Picked, String>>,
 ) -> Element {
     use base64::Engine;
