@@ -6,6 +6,7 @@ mod danlon_api;
 mod holidays;
 mod mileage;
 mod month;
+mod state;
 mod timesheet;
 mod trips;
 
@@ -85,6 +86,29 @@ enum Command {
     Danlon {
         #[command(subcommand)]
         action: DanlonAction,
+    },
+    /// Set or clear a day's lunch break (stored in state.json beside the config).
+    Lunch {
+        #[command(subcommand)]
+        action: LunchAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum LunchAction {
+    /// Use this lunch break on a day instead of the default or the calendar.
+    Set {
+        /// Day as YYYY-MM-DD.
+        date: String,
+        /// Lunch start as HH:MM.
+        start: String,
+        /// Lunch length in minutes; 0 means no lunch that day.
+        minutes: u32,
+    },
+    /// Remove a day's lunch override.
+    Clear {
+        /// Day as YYYY-MM-DD.
+        date: String,
     },
 }
 
@@ -184,6 +208,39 @@ fn main() -> Result<()> {
                     api.delete(&company, &ids)?;
                     println!("Deleted {} pay part(s)", ids.len());
                 }
+            }
+        }
+        Command::Lunch { action } => lunch(&cfg, action)?,
+    }
+    Ok(())
+}
+
+fn lunch(cfg: &Config, action: LunchAction) -> Result<()> {
+    let path = &cfg.state_file;
+    match action {
+        LunchAction::Set {
+            date,
+            start,
+            minutes,
+        } => {
+            let date = state::parse_date(&date)?;
+            let start = state::parse_time(&start)?;
+            state::State::update(path, |s| {
+                s.lunch
+                    .insert(date, state::LunchOverride { start, minutes })
+            })?;
+            if minutes == 0 {
+                println!("{date}: no lunch");
+            } else {
+                println!("{date}: lunch {} for {minutes} min", start.format("%H:%M"));
+            }
+        }
+        LunchAction::Clear { date } => {
+            let date = state::parse_date(&date)?;
+            if state::State::update(path, |s| s.lunch.remove(&date))?.is_some() {
+                println!("{date}: lunch override cleared");
+            } else {
+                println!("{date}: no lunch override");
             }
         }
     }

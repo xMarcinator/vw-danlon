@@ -1,3 +1,5 @@
 target/
 config.toml
 danlon-token
+state.json
+state.json.tmp

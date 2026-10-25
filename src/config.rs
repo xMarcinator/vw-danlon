@@ -24,6 +24,9 @@ pub struct Config {
     pub periods: PeriodConfig,
     pub mileage: Option<MileageConfig>,
     pub danlon: DanlonConfig,
+    /// The local state file (`state.json` beside the config file).
+    #[serde(skip)]
+    pub state_file: PathBuf,
 }
 
 fn default_timezone() -> chrono_tz::Tz {
@@ -295,10 +298,9 @@ impl Config {
             let base = path.parent().unwrap_or(Path::new("."));
             cal.source = base.join(&cal.source).to_string_lossy().into_owned();
         }
-        crate::danlon_api::resolve_token_file(
-            &mut cfg.danlon.api.refresh_token_file,
-            path.parent().unwrap_or(Path::new(".")),
-        );
+        let config_dir = path.parent().unwrap_or(Path::new("."));
+        crate::danlon_api::resolve_token_file(&mut cfg.danlon.api.refresh_token_file, config_dir);
+        cfg.state_file = config_dir.join("state.json");
         cfg.validate()?;
         Ok(cfg)
     }
