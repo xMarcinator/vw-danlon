@@ -69,7 +69,20 @@ the same name. The program stops if the link points at another calendar.
   - Edit a single occurrence, or add an event, for days at another address,
     e.g. a customer.
   - With `norm_from_calendar = true` the events set each day's norm.
-- **All-day events** are ferie and fridage. These days get norm 0.
+- **Private appointments** are timed events whose title contains a word
+  from `private_keywords` (default `Læge`, `Tandlæge`, `Fysioterapeut`) as a
+  whole word, in any case; "Lægemiddelfirma" is not "Læge". They are not
+  company time:
+  - not a work address, no planned hours, and no address needed;
+  - the time is left out of worked hours, while the norm stays, so the
+    appointment shows as hours to make up;
+  - the day's note shows it, e.g. `Læge 10:00–11:15 · private`;
+  - trips to or from its address, or starting during it, are private and
+    never in the mileage logbook or the Danløn export.
+
+  An empty `private_keywords` list switches this off.
+- **All-day events** are ferie and fridage. These days get norm 0, also when
+  the title is a private word.
 - `default_location` (optional) is used on days with no located entry.
 
 Share it: Settings → All settings → Calendars → (calendar) → *Share with
@@ -89,6 +102,13 @@ the calendar says you are elsewhere. If a colleague drives you from the
 office to a customer, the car only shows you arriving at and leaving the
 office, and that is your working time. A drive from one work address to
 another (office → customer) is working time too.
+
+A day's worked time is computed in this order:
+1. the periods at a work address, from the trips;
+2. minus private appointments (overlapping appointments count once; one
+   crossing midnight is split per date);
+3. minus the unpaid break (`periods.unpaid_break_minutes`);
+4. rounding (`periods.round_to_minutes`).
 
 Addresses are compared loosely:
 - case, punctuation and "Danmark" are ignored

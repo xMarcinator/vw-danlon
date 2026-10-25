@@ -312,12 +312,47 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
 }
 
 /// What a timed calendar entry is.
-#[derive(Debug, PartialEq, Eq)]
-enum EntryKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
     /// Planned working time at the entry's address.
     Work,
     /// A private appointment (e.g. the doctor): not company time.
     Private,
+}
+
+/// A timed calendar entry and what its title makes it.
+#[derive(Debug, Clone)]
+pub struct TimedEntry<'a> {
+    pub kind: EntryKind,
+    pub start: DateTime<Tz>,
+    pub end: DateTime<Tz>,
+    pub summary: &'a str,
+    pub location: &'a str,
+}
+
+/// The calendar's timed entries, classified by title (see [`classify`]).
+pub fn timed_entries<'a>(
+    calendar: &'a [Occurrence],
+    private_words: &[String],
+) -> Vec<TimedEntry<'a>> {
+    calendar
+        .iter()
+        .filter_map(|occ| match occ {
+            Occurrence::Timed {
+                start,
+                end,
+                summary,
+                location,
+            } => Some(TimedEntry {
+                kind: classify(summary, private_words),
+                start: *start,
+                end: *end,
+                summary,
+                location,
+            }),
+            Occurrence::AllDay { .. } => None,
+        })
+        .collect()
 }
 
 /// Classifies a timed calendar entry by its title. A configured word matches
