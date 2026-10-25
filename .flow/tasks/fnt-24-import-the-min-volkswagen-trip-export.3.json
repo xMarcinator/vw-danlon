@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T16:24:38.795298Z",
+  "depends_on": [
+    "fnt-24-import-the-min-volkswagen-trip-export.1"
+  ],
+  "id": "fnt-24-import-the-min-volkswagen-trip-export.3",
+  "priority": null,
+  "spec": "fnt-24-import-the-min-volkswagen-trip-export",
+  "spec_path": ".flow/tasks/fnt-24-import-the-min-volkswagen-trip-export.3.md",
+  "status": "todo",
+  "title": "Use stored trips by default; docs",
+  "updated_at": "2026-10-25T16:24:38.795298Z"
+}
