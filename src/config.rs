@@ -463,8 +463,14 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
+        Config::from_text(&text, path)
+    }
+
+    /// The config in `text`, read as if from the file at `path`: relative
+    /// paths and the state and trip files are resolved beside it.
+    pub fn from_text(text: &str, path: &Path) -> Result<Self> {
         let mut cfg =
-            Config::parse(&text).with_context(|| format!("parsing config {}", path.display()))?;
+            Config::parse(text).with_context(|| format!("parsing config {}", path.display()))?;
         // Resolve a local calendar path relative to the config file.
         if let Some(cal) = &mut cfg.calendar
             && !cal.source.contains("://")

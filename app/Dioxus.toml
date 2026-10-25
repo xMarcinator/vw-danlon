@@ -1,0 +1,6 @@
+[application]
+name = "vw-danlon"
+
+[bundle]
+identifier = "dk.vwdanlon.app"
+publisher = "vw-danlon"
