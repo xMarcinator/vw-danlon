@@ -1,5 +1,5 @@
 ---
-satisfies: [R2, R3, R5, R6, R8]
+satisfies: [R3, R5, R6, R8, R9]
 ---
 # fnt-22-danlon-app-checklist.1 Checklist model: Komme/gå and Kørsel registrations per day
 
@@ -16,11 +16,12 @@ Pure function from a month report (day records with periods, private time, lunch
 - Unit tests with the month.rs test helpers.
 
 ## Acceptance
-- [ ] Test: Kørsel shows "Hjem → Kunde A" with 74,0 km (calendar title as name); an unnamed address falls back to the address
+- [ ] Test: stops use calendar titles and configured home/workplace names; an unnamed address falls back to the address
 - [ ] Test: 19 Nov gives two entries: 07:58 to 10:00 (no break, 2h 02m) and 11:15 to 16:00 (break 30m, 4h 15m); Læge is not registered
 - [ ] Test: 4 Nov lunch errand gives 07:41 to 15:55, break 45m, 7h 29m
 - [ ] Test: for every day, the entries' spans minus their breaks add up to the day's worked hours
-- [ ] Test: business trip gives Kørsel with km, route, purpose
+- [ ] Test: 18 Nov gives one Kørsel: Purpose Kunde A, Hjem → Kunde A, return on, 148,0 km
+- [ ] Test: Kontoret → Kunde C → Kontoret gives Kontoret → Kunde C, return on; a non-returning day lists all stops with return off
 - [ ] Test: weekend/vacation → nothing to enter; arrival without departure → fix first
 - [ ] `cargo test` passes
 
@@ -31,6 +32,7 @@ TBD
 - Commits:
 - Tests:
 - PRs:
+
 
 
 

@@ -9,6 +9,7 @@
 > user: "In most cases im interested in the clock for coming and going. The addresses are named in the system so named them here  don't let me copy just list the name and Il match it in the app. It also plans the route using Google maps so the miles need to be shown but don't need a explicit button. Please move copying the address and mileage in a action menu"
 > user: "Also these are the inputs for the time logging." (screenshots: Danløn app Komme/gå form with Day, Type, Time "08:00 to 16:00" entered on a keypad, Break "30m", Description, Total time)
 > user: "I Want private time to disrupt the work to disrupt the entry but break time is just break time."
+> user: (screenshot) Danløn app Mileage form: Day, License plate (prefilled), Purpose, Description, Route Information with ordered destinations and "Add destination", map, Distance (km), and a return/inverted-route toggle.
 
 ## Goal & Context
 
@@ -35,13 +36,14 @@ The user is an employee and reports hours and driving themselves in Danløn's ow
 ## Acceptance Criteria
 
 - **R1 (superseded 2026-10-25 by R7):** ~~One Komme/gå per work period~~. The Danløn app takes one time range with a break per registration.
-- **R2:** Each business trip appears as a Kørsel registration with km, route (from → to) and purpose. No error surface beyond the mileage rules.
+- **R2 (superseded 2026-10-25 by R9):** ~~One Kørsel registration per business trip~~.
 - **R3:** Days without anything to enter are shown as such, and a flagged day shows "fix first" with the reason; neither can be ticked. Errors: `checklist mark` on such a day is refused naming the reason.
 - **R4:** Ticking a day records it in the local state file and the checklist shows progress (days and trips entered); unticking removes it. Errors: a corrupt state file stops with its path, as in FNT-18.
 - **R5:** The checklist makes no network call and writes nothing but the local state file. No error surface.
 - **R6:** Places are shown by the names used in the Danløn app: a calendar entry's title for its address, and configurable names for home and the fixed workplace (default "Hjem" and "Kontoret"); km is shown for checking. Errors: an address with no name falls back to the address itself. [paraphrase]
 - **R7 (superseded 2026-10-25 by R8):** ~~One Komme/gå per day with private time in the break~~.
 - **R8:** Private time splits the day into separate Komme/gå entries and is never registered; each entry is Time = start to end of that stretch, Break = only the lunch that falls inside it (the lunch deduction, or a lunch-window gap such as an errand), Description = the calendar entry's name. Other unworked gaps also split the day. [inferred for other gaps] The entries' hours add up to the day's worked hours (19 Nov: 07:58 to 10:00 no break 2h 02m + 11:15 to 16:00 break 30m 4h 15m; 4 Nov: one entry 07:41 to 15:55, break 45m, 7h 29m). Errors: no departure → "fix first" (R3). [paraphrase]
+- **R9:** Each day with business trips gives one Kørsel registration matching the Danløn app form: Purpose = the visited calendar entries' names, Route = the ordered stops by name (consecutive duplicates removed), Return trip on when the day's business driving ends where it started (then the route lists only the way out), Distance = the day's business km for checking. E.g. 18 Nov: Purpose "Kunde A", Hjem → Kunde A, return on, 148,0 km. Errors: a day whose business trips do not chain (a gap between one trip's end and the next start) lists the stops in time order and flags the gap. [paraphrase; return rule inferred]
 
 ## Early proof point
 
@@ -69,11 +71,12 @@ cargo run -- checklist 2026-11 -t examples/trips.csv
 | Req | Description | Task(s) | Gap justification |
 | --- | --- | --- | --- |
 | R1 | (superseded 2026-10-25 by R7): ~~One Komme/gå per work period~~. The Danløn app takes one time range with a break per registration. | — | Uncovered |
-| R2 | Each business trip appears as a Kørsel registration with km, route (from → to) and purpose. No error surface beyond the mileage rules. | fnt-22-danlon-app-checklist.1 | — |
+| R2 | (superseded 2026-10-25 by R9): ~~One Kørsel registration per business trip~~. | — | Uncovered |
 | R3 | Days without anything to enter are shown as such, and a flagged day shows "fix first" with the reason; neither can be ticked. Errors: `checklist mark` on such a day is refused naming the reason. | fnt-22-danlon-app-checklist.1, fnt-22-danlon-app-checklist.2 | — |
 | R4 | Ticking a day records it in the local state file and the checklist shows progress (days and trips entered); unticking removes it. Errors: a corrupt state file stops with its path, as in FNT-18. | fnt-22-danlon-app-checklist.2 | — |
 | R5 | The checklist makes no network call and writes nothing but the local state file. No error surface. | fnt-22-danlon-app-checklist.1, fnt-22-danlon-app-checklist.2 | — |
 | R6 | Places are shown by the names used in the Danløn app: a calendar entry's title for its address, and configurable names for home and the fixed workplace (default "Hjem" and "Kontoret"); km is shown for checking. Errors: an address with no name falls back to the address itself. | fnt-22-danlon-app-checklist.1 | — |
 | R7 | (superseded 2026-10-25 by R8): ~~One Komme/gå per day with private time in the break~~. | — | Uncovered |
 | R8 | Private time splits the day into separate Komme/gå entries and is never registered; each entry is Time = start to end of that stretch, Break = only the lunch that falls inside it (the lunch deduction, or a lunch-window gap such as an errand), Description = the calendar entry's name. Other unworked gaps also split the day. [inferred for other gaps] The entries' hours add up to the day's worked hours (19 Nov: 07:58 to 10:00 no break 2h 02m + 11:15 to 16:00 break 30m 4h 15m; 4 Nov: one entry 07:41 to 15:55, break 45m, 7h 29m). Errors: no departure → "fix first" (R3). | fnt-22-danlon-app-checklist.1 | — |
+| R9 | Each day with business trips gives one Kørsel registration matching the Danløn app form: Purpose = the visited calendar entries' names, Route = the ordered stops by name (consecutive duplicates removed), Return trip on when the day's business driving ends where it started (then the route lists only the way out), Distance = the day's business km for checking. E.g. 18 Nov: Purpose "Kunde A", Hjem → Kunde A, return on, 148,0 km. Errors: a day whose business trips do not chain (a gap between one trip's end and the next start) lists the stops in time order and flags the gap. | fnt-22-danlon-app-checklist.1 | — |
 
