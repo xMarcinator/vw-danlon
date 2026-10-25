@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T20:42:32.849468Z",
+  "depends_on": [
+    "fnt-26-home-working-month-to-date-and-mileage.1"
+  ],
+  "id": "fnt-26-home-working-month-to-date-and-mileage.2",
+  "priority": null,
+  "spec": "fnt-26-home-working-month-to-date-and-mileage",
+  "spec_path": ".flow/tasks/fnt-26-home-working-month-to-date-and-mileage.2.md",
+  "status": "todo",
+  "title": "Month to date, today marker, no flags without work events, home working",
+  "updated_at": "2026-10-25T20:42:32.849468Z"
+}

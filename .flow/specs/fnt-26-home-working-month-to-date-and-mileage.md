@@ -11,6 +11,10 @@
 > user: "The drives between home and work are not counted as working hours but counts as milage but work to a client (a non work or home address) in the calendar it counts as work hours and counts as milage."
 > user: "for the milage report please ignore or mark any that are not counted under Danish milage regulations. Perhaps those rules could be configurable."
 > user: "could sqllite with pagination not be used to improve load times of the pages?"
+> user (selected): errands — "Don't count hours for normal trips only for drives to clients." / 60-day rule "On by default" / storage "SQLite anyway"
+> user: "Always follow skats rules since they are the law."
+> user: "please start the tracking automatically when the time has hit. ... add a grace period of an hour and if I in that grace period ... didn't start it please [use the calendar time] when it had ended. Also allow me to [modify] the private time [if] the fallback time was used."
+> user: "Change always allow modifieng the private times."
 
 ## Goal & Context
 
@@ -21,21 +25,24 @@ Four gaps found using the app on real data: home working cannot be recorded; mon
 
 - Home working comes from two sources: a calendar work event whose title contains a home-working word (default "Hjemmearbejde", "Hjemme") or whose location matches home, and a "Working from home" start/stop timer stored in the state file like the private-time timer (FNT-23). Calendar home working counts the event's planned window as worked; the timer counts the measured time. Both minus lunch and private time; no trips are needed. [paraphrase]
 - Month totals (norm, worked, difference) count days up to and including today; later days show their planned norm only. Today is marked. [paraphrase]
-- Trip classification gets explicit, configurable mileage rules with Danish defaults (tax-free kørselsgodtgørelse, LL § 9 B) [paraphrase]:
-  - client visit: to/from a calendar work event at an address that is neither home nor the fixed workplace → business, and its time is work hours (unchanged);
-  - commute: home ↔ fixed workplace → driving, not reimbursable, not work hours (default off; configurable);
-  - work errand: a trip starting at the workplace (or at a client/errand stop) during working hours, and the chain of trips after it until arriving home or at work → business, and work hours until leaving the last errand stop [inferred];
-  - 60-day rule: the same client/errand address stops counting after 60 working days within 12 months [inferred];
-  - everything else → private.
+- Trip classification follows Skat's rules for tax-free kørselsgodtgørelse (LL § 9 B, skat.dk; researched 2026-10-25). They are the law, so they are not switchable; only rates per year and the vehicle are config:
+  - client visit (calendar work event at an address that is neither home nor the fixed workplace): reimbursable, and its time is work hours. Work ↔ client always counts; home ↔ client counts for 60 working days per address within a rolling 12 months (several trips a day = one day; only trips that start or end at home count toward it; the count resets only after 60 consecutive working days at other workplaces; per employer);
+  - commute (home ↔ fixed workplace): driving, never reimbursable, not work hours;
+  - errands on the way home (work → shops → home) and all other private driving: not reimbursable, not work hours; after a client visit, at most the direct client → home km is reimbursable and detour km are private;
+  - between workplaces during the day: reimbursable (the user can tick Business when the tool cannot see it).
+- Kørselsfradrag/befordringsfradrag (LL § 9 C) is separate: (round-trip km − 24) per commuting day × rate (2026: 3,17 kr/km 25–120 km, 1,59 kr/km above; yderkommune 3,51); none on home-working, holiday or sick days; never for the same km as godtgørelse. Shown for information only (the user enters it in TastSelv, forskudsopgørelse felt 417 / årsopgørelse rubrik 51); nothing is sent to Skat — there is no citizen API, and godtgørelse already reaches Skat through Danløn → eIndkomst.
+- Private time from the calendar (FNT-17) starts automatically: when a private appointment's start time has passed and nothing is recorded, it shows as running ("started automatically at HH:MM"); the user can set an earlier real start or stop it. If the user does not touch it within a grace period (default 1 hour after the planned end), the planned calendar window is used as the recorded time and marked "calendar time". Computed when the app or CLI runs; no background service. [paraphrase]
+- Every private-time entry (recorded, started automatically, or calendar time) can be edited, relabelled or deleted at any time. [paraphrase]
 - A per-trip override (Business / Private) stored in the state file wins over the rules; the logbook marks overridden trips "Set by you".
 - The mileage logbook lists all driving with the rule that decided each trip, the reimbursable total, and the not-reimbursable km by reason; only reimbursable trips get an amount.
-- Speed: measured on the user's data, a month report takes ~710 ms, of which ~700 ms is fetching the Proton calendar over the network; reading 1042 stored trips takes a few ms. So the calendar is cached locally (ICS beside the config) and pages render from the cache at once, refreshing in the background (at most every few minutes, and on demand). A database is not needed for this data size. [inferred from measurement]
+- Storage: trips, state (ticks, lunch, private and home-working intervals, overrides) and the calendar cache move into a local SQLite database beside the config (user: "SQLite anyway"); screens query one month at a time (pagination by month/date range). The existing JSON files are migrated once on first start and kept as a backup. The CLI and app share it.
+- Speed: measured on the user's data, a month report takes ~710 ms, of which ~700 ms is fetching the Proton calendar over the network; reading 1042 stored trips takes a few ms. So the calendar is also cached (in the database) and pages render from the cache at once, refreshing in the background (at most every few minutes, and on demand). A database is not needed for this data size. [inferred from measurement]
 
 ## API Contracts
 
 - Config `[home_working]`: `keywords` (default ["Hjemmearbejde", "Hjemme"]), `at_home_address` (default true).
-- Config `[mileage.rules]`: `client_visits` (true), `work_errands` (true), `sixty_day_rule` (true), `commute` (false), `min_km` (0).
-- CLI: `home start|stop|list|edit|rm` (like `private`); `trip business|private|reset <start>`; `report`/`logbook` show to-date totals and rules; `logbook --all` lists all driving.
+- Config `[private]`: `auto_start` (true), `grace_minutes` (60). Config `[mileage]` rates per year stay as today; no rule switches.
+- CLI: `home start|stop|list|edit|rm` (like `private`); `trip business|private|reset <start>`; `report`/`logbook` show to-date totals and rules; `logbook --all` lists all driving; `fradrag <year>` shows the befordringsfradrag estimate.
 - App: "Working from home" card on Month, today marker, Reimbursable / All driving tabs on Mileage with a Business tick per trip, Settings sections "Working from home" and "Mileage rules".
 
 ## Edge Cases & Constraints
@@ -51,21 +58,24 @@ Four gaps found using the app on real data: home working cannot be recorded; mon
 - **R2:** A home-working timer can be started, stopped, listed, edited and deleted; recorded time counts as worked. Errors: as FNT-23 R1/R3.
 - **R3:** Month norm, worked and difference count only days up to today; today is marked; later days show planned norm only. Errors: none.
 - **R4:** Days without a work event and without home working are never flagged as needing a fix. Errors: none.
-- **R5:** Home ↔ workplace trips are driving but not reimbursable and not work hours by default; client-visit trips are work hours and reimbursable. Errors: none.
-- **R6:** Work errands (trips from work during working hours through each stop until home or work) are reimbursable and their time counts as work by default. [inferred] Errors: none.
-- **R7:** Mileage rules are configurable (client visits, work errands, 60-day rule, commute, minimum km), with Danish defaults. Errors: invalid values are refused naming the key.
-- **R8:** Any trip can be set to Business or Private, overriding the rules, and reset. Errors: unknown trip refused naming it.
-- **R9:** The logbook shows all driving with the deciding rule, reimbursable total, and not-reimbursable km by reason. Errors: none.
-- **R10:** Pages open from a local calendar cache without waiting for the network; the cache refreshes in the background and on demand. Errors: a failed refresh keeps the cache and shows its age.
+- **R5:** Home ↔ workplace trips are driving but never reimbursable and not work hours; client-visit trips are work hours and reimbursable, with the 60-day rule for home ↔ client. Errors: none.
+- **R6 (changed 2026-10-25 after the Skat research):** Errands on the way home and other private driving are not reimbursable and not work hours; after a client visit only the direct client → home km is reimbursable. Errors: none.
+- **R7:** The rules follow Skat (LL § 9 B) and cannot be switched off; only yearly rates are configurable. Errors: a missing rate for a year with business km is reported naming the year.
+- **R8:** Any trip can be set to Business or Private, overriding the rules (e.g. between workplaces), and reset. Errors: unknown trip refused naming it.
+- **R9:** The logbook shows all driving with the deciding rule, the reimbursable total, and not-reimbursable km by reason; it carries what Skat requires (name, address, purpose, date, destination with stops, km, rate, calculation, year-to-date km). Errors: none.
+- **R10:** Pages open from the calendar cache without waiting for the network; the cache refreshes in the background and on demand. Errors: a failed refresh keeps the cache and shows its age.
+- **R11:** Trips, state and the calendar cache are stored in SQLite and read per month; existing JSON files are migrated once and kept as backup; CLI and app give the same results as before. Errors: a damaged database stops with its path, nothing overwritten.
+- **R12:** A private calendar appointment whose start has passed without a recording is shown as started automatically; the user can set the real start or stop it; untouched until the grace period (default 60 min) after the planned end, the planned window is recorded and marked "calendar time". Errors: none.
+- **R13:** Every private-time entry can be edited, relabelled or deleted at any time, including calendar-time and automatically started ones. Errors: as FNT-23 R3.
+- **R14:** The befordringsfradrag estimate (LL § 9 C) is shown separately for information (0 kr below 24 km a day); nothing is sent to Skat. Errors: none.
 
 ## Boundaries
 
-- No database; the stored files stay JSON/TOML. [inferred from measurement]
-- No befordringsfradrag calculation (only a note that commute above 24 km a day may give a tax deduction). [inferred]
+- No reporting to Skat (no citizen API exists); no rule switches that break Skat's rules.
 
 ## Decision Context
 
-The user wants all driving visible but only reimbursable driving paid; Danish rules are the default and each rule can be switched. Per-trip overrides cover the cases rules cannot know.
+The user wants all driving visible but only reimbursable driving paid, strictly by Skat's rules. Per-trip overrides cover cases the rules cannot see. SQLite was the user's choice; the measured slowness is the calendar fetch, so the calendar cache is what makes pages fast.
 
 ## Quick commands
 
