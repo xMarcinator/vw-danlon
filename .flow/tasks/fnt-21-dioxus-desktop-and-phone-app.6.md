@@ -27,9 +27,17 @@ Close the gaps between the built screens and the mockups (user: "Fix the gaps an
 
 
 ## Done summary
-TBD
+Closed the mockup gaps. Day screen: the lunch break can be changed, set to no lunch or reset to the default (via service::set_lunch, which `lunch set|clear` now uses too), and a missing trip can be added by hand. Manual trips are stored in trips.json with `manual: true`, older files still load, a later import or sync with the same start minute is not added twice, and only manual trips can be deleted. Mileage screen: a print view of the kørselsregnskab with signature lines (Navn, Dato, Underskrift for employee and employer); the desktop prints it with the webview's print dialog, and Android shares it (and the CSV) through the share sheet as EXTRA_TEXT/EXTRA_HTML_TEXT. Danløn screen: "Open Danløn app" starts dk.danlon.app's launcher activity, falling back to market:// and then the https Play page; on the desktop it opens https://danlon.dk/. A refused private-time edit keeps the editor open with the typed values.
 
+Tests: trip_store::tests::a_manual_trip_is_added_once_and_only_it_can_be_deleted, service::tests::lunch_changes_and_manual_trips_reach_the_month, mileage tests (printable logbook). Live desktop check passed: add trip, lunch 45/none/default, matches `report`, delete trip, refused edit, print to PDF, open danlon.dk through a stub xdg-open. Android: clippy and `dx build` succeed, but nothing was run on a device (no device or emulator available). The Danløn package name dk.danlon.app comes from a Play Store search and has not been checked on a phone.
+Follow-ups: the lunch editor and trip form use <input type=time>, and WebKitGTK's typed entry is awkward.
+
+baseline: green (cargo test --workspace)
+stage: impl-review - skipped(config: REVIEW_MODE not set by conductor)
+Tier: not provided (model: claude-opus-5-5)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 58daac4e73d359a67680c2c14a90fd81418b522d
+- Tests: cargo test --workspace, cargo clippy --workspace --all-targets, cargo clippy -p vw-danlon-app -p vw-danlon --target aarch64-linux-android --no-default-features --features vw-danlon-app/mobile, dx build --platform android --target aarch64-linux-android, dx build --platform desktop
 - PRs:
