@@ -33,9 +33,16 @@ Classify all-day events as vacation / feriefridag / other day off, make the day-
 - [ ] `cargo test` passes
 
 ## Done summary
-TBD
+All-day calendar events are classified as Ferie / Feriefridag / other day off with a typed `OffReason` on `Day`; only working days (weekday with planned hours, or work_week hours without the calendar norm, not a public holiday) count. New `src/vacation.rs` computes samtidighedsferie per holiday year in exact hundredths (2,08/month, 0,07/day for a partial month, use by 31 Dec the following year, oldest-year-first drawing with splitting, forskudsferie flag, expiry warning, feriefridage per year) and a new `vacation` command prints it; `[vacation]` config with defaults (config.example.toml/README left to task .2). Checklist still shows vacation days as "nothing to enter: Ferie".
 
+Tests: vacation::tests (earned_from_employment_start, partial_month_earns_per_calendar_day, only_working_days_in_calendar_events_count incl. "no working days" note and forskud, periods_draw_from_the_oldest_year_first incl. expiry + missing-start text, a_period_splits_when_the_oldest_year_runs_out), month::tests::vacation_days_have_norm_0_and_reason_ferie, config::tests::vacation_defaults_and_employment_start.
+baseline: green (cargo test, 62 passed pre-edit)
+Follow-up: a work calendar event without LOCATION still adds a "kalenderpost uden adresse" note on vacation days (pre-existing behaviour; harmless for the checklist).
+
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 5ac2e2cda61297d395629921051b8b88b97d88e7
+- Tests: cargo test (69 passed), cargo clippy --all-targets -- -D warnings
 - PRs:
