@@ -1,0 +1,26 @@
+{
+  "branch_name": "fnt-22-danlon-app-checklist",
+  "created_at": "2026-10-25T15:43:26.804474Z",
+  "depends_on_epics": [
+    "fnt-23-private-time-timer"
+  ],
+  "id": "fnt-22-danlon-app-checklist",
+  "next_task": 1,
+  "plan_review_status": "unknown",
+  "plan_reviewed_at": null,
+  "spec_path": ".flow/specs/fnt-22-danlon-app-checklist.md",
+  "status": "open",
+  "title": "Danlon app checklist",
+  "tracker": {
+    "baseHashFlow": null,
+    "baseHashTracker": null,
+    "depRelations": [],
+    "id": null,
+    "identifier": "FNT-22",
+    "lastSyncedAt": null,
+    "mergeBaseFlow": null,
+    "mergeBaseTracker": null,
+    "url": null
+  },
+  "updated_at": "2026-10-25T16:19:04.610715Z"
+}

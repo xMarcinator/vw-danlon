@@ -42,12 +42,14 @@ flowchart LR
 
 - **R1:** The app builds and runs on Linux desktop and Android from one Rust code base using Dioxus. Errors: missing config, calendar or trips → the app opens on Settings with the problem named. [paraphrase]
 - **R2:** The app has light, dark and system themes. No error surface. [paraphrase]
-- **R3:** The app has the Month, Day, Vacation, Mileage logbook, Send to Danløn and Settings screens, laid out as in the mockup. No error surface beyond R1. [paraphrase]
+- **R3:** The app has the Month, Day, Vacation, Mileage logbook, Danløn app checklist and Settings screens, laid out as in the mockup. No error surface beyond R1. [paraphrase]
 - **R4:** For the same config, calendar and trips, the app shows the same hours, mileage, vacation and pay lines as the CLI, and the CLI's output is unchanged by the library split. No error surface beyond R1. [inferred]
-- **R5:** Sending to Danløn from the app shows the send plan (own and foreign waiting parts) and sends only after confirmation. Errors: Danløn unreachable or token refused → nothing is sent and the reason is shown. [inferred]
+- **R5 (superseded 2026-10-25 by R9):** ~~Send to Danløn from the app~~. The app never connects to Danløn.
 - **R6:** Secrets are kept in the platform's secret store. Errors: store unavailable → the app says so and does not fall back to a plain file. [inferred]
 - **R7:** The user can import a trips file on desktop and Android. Errors: an unreadable or malformed file is rejected with the first bad line named. [inferred]
 - **R8:** The layout follows the window width on every platform: wide shows the sidebar, narrow shows bottom tabs, with the same screens and features. No error surface. [paraphrase]
+- **R9:** The Danløn screen is the Danløn app checklist (FNT-22): per-day Komme/gå and Kørsel registrations, one Copy button per text or number field, times shown large, tick-off per day. No error surface beyond FNT-22.
+- **R10:** The Month screen has a private-time Start/Stop button with the running time, and recorded intervals can be relabelled, edited and deleted (FNT-23). Errors: as FNT-23 R1/R3, shown in the app.
 
 ## Early proof point
 
@@ -77,11 +79,11 @@ dx serve -p vw-danlon-app --platform desktop
 | --- | --- | --- | --- |
 | R1 | The app builds and runs on Linux desktop and Android from one Rust code base using Dioxus. Errors: missing config, calendar or trips → the app opens on Settings with the problem named. | fnt-21-dioxus-desktop-and-phone-app.2 | — |
 | R2 | The app has light, dark and system themes. No error surface. | fnt-21-dioxus-desktop-and-phone-app.2 | — |
-| R3 | The app has the Month, Day, Vacation, Mileage logbook, Send to Danløn and Settings screens, laid out as in the mockup. No error surface beyond R1. | fnt-21-dioxus-desktop-and-phone-app.3, fnt-21-dioxus-desktop-and-phone-app.4, fnt-21-dioxus-desktop-and-phone-app.5 | — |
+| R3 | The app has the Month, Day, Vacation, Mileage logbook, Danløn app checklist and Settings screens, laid out as in the mockup. No error surface beyond R1. | fnt-21-dioxus-desktop-and-phone-app.3, fnt-21-dioxus-desktop-and-phone-app.4, fnt-21-dioxus-desktop-and-phone-app.5 | — |
 | R4 | For the same config, calendar and trips, the app shows the same hours, mileage, vacation and pay lines as the CLI, and the CLI's output is unchanged by the library split. No error surface beyond R1. | fnt-21-dioxus-desktop-and-phone-app.1, fnt-21-dioxus-desktop-and-phone-app.3, fnt-21-dioxus-desktop-and-phone-app.4 | — |
-| R5 | Sending to Danløn from the app shows the send plan (own and foreign waiting parts) and sends only after confirmation. Errors: Danløn unreachable or token refused → nothing is sent and the reason is shown. | fnt-21-dioxus-desktop-and-phone-app.5 | — |
+| R5 | (superseded 2026-10-25 by R9): ~~Send to Danløn from the app~~. The app never connects to Danløn. | — | Uncovered |
 | R6 | Secrets are kept in the platform's secret store. Errors: store unavailable → the app says so and does not fall back to a plain file. | fnt-21-dioxus-desktop-and-phone-app.2 | — |
 | R7 | The user can import a trips file on desktop and Android. Errors: an unreadable or malformed file is rejected with the first bad line named. | fnt-21-dioxus-desktop-and-phone-app.4 | — |
 | R8 | The layout follows the window width on every platform: wide shows the sidebar, narrow shows bottom tabs, with the same screens and features. No error surface. | fnt-21-dioxus-desktop-and-phone-app.2, fnt-21-dioxus-desktop-and-phone-app.3 | — |
-
-
+| R9 | The Danløn screen is the Danløn app checklist (FNT-22): per-day Komme/gå and Kørsel registrations, one Copy button per text or number field, times shown large, tick-off per day. No error surface beyond FNT-22. | fnt-21-dioxus-desktop-and-phone-app.5 | — |
+| R10 | The Month screen has a private-time Start/Stop button with the running time, and recorded intervals can be relabelled, edited and deleted (FNT-23). Errors: as FNT-23 R1/R3, shown in the app. | fnt-21-dioxus-desktop-and-phone-app.3 | — |

@@ -1,5 +1,5 @@
 ---
-satisfies: [R3, R4, R8]
+satisfies: [R3, R4, R8, R10]
 ---
 # fnt-21-dioxus-desktop-and-phone-app.3 Month and Day screens
 
@@ -14,6 +14,7 @@ Month (KPIs, day table, flags) and Day (timeline, lunch, appointments, trips) sc
 Mockup boards Main, Day, PhoneMonth, PhoneDay.
 
 ## Acceptance
+- [ ] The private-time Start/Stop button shows the running time; recorded intervals can be relabelled, edited and deleted
 - [ ] Month shows the same norm/worked/difference per day as `report` for the example data
 - [ ] Day shows periods, lunch window and source, appointments and trips
 - [ ] Layout works at phone width
@@ -25,4 +26,5 @@ TBD
 - Commits:
 - Tests:
 - PRs:
+
 

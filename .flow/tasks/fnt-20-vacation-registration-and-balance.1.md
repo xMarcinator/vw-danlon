@@ -1,5 +1,5 @@
 ---
-satisfies: [R1, R2, R3]
+satisfies: [R1, R2, R5, R6]
 ---
 # fnt-20-vacation-registration-and-balance.1 Vacation days from calendar events, typed day-off reasons and balance
 
@@ -13,7 +13,7 @@ Classify all-day events as vacation / feriefridag / other day off, make the day-
 ### Approach
 - Extend FNT-17's classifier for `Occurrence::AllDay` (month.rs ~157); `Day.off_reason` becomes an enum with display text (holiday name, Ferie, Feriefridag, other title).
 - Working day = would have planned hours / work_week hours and is not a public holiday or weekend; holidays are inserted first into `off`, keep that order.
-- `vacation.rs`: pure balance calc over a year of occurrences (calendar loaded from 1 Sep), config keys with defaults (employment start optional, feriefridage per year, 2,08 per month).
+- `vacation.rs`: pure balance calc per holiday year (1 Sep – 31 Aug earning, use by 31 Dec the year after), 0,07 per calendar day for a partial month, oldest-year-first drawing, expiry warning; calendar loaded from the older open holiday year's start. Config keys with defaults (employment start optional, feriefridage per year 5, 2,08 per month).
 - New `Vacation` subcommand.
 
 ### Investigation targets
@@ -26,7 +26,9 @@ Classify all-day events as vacation / feriefridag / other day off, make the day-
 ## Acceptance
 - [ ] Test: Ferie event Fri–Mon counts 2 days; over a public holiday the holiday is not counted
 - [ ] Test: vacation day has norm 0 and reason Ferie
-- [ ] Test: balance with start 1 Sep after 3 months = 6,24 earned; negative balance flagged forskudsferie
+- [ ] Test: start 1 May 2026 → 2025/26 earns 8,32 usable until 31 Dec 2026; 2026/27 after Sep–Nov = 6,24
+- [ ] Test: start mid-month earns 0,07 per remaining calendar day for that month
+- [ ] Test: periods draw from the oldest year first; days drawn before earned flagged forskudsferie; unplanned days of a year past its use-by flagged expiring
 - [ ] `vacation` prints periods and balance; missing employment start stated
 - [ ] `cargo test` passes
 

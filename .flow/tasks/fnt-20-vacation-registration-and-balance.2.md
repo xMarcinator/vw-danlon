@@ -1,28 +1,18 @@
 ---
-satisfies: [R4]
+satisfies: []
 ---
-# fnt-20-vacation-registration-and-balance.2 Send vacation days to Danløn as code 60; docs
+# fnt-20-vacation-registration-and-balance.2 Vacation docs and config example
 
 ## Description
-Add a code 60 Afholdte feriedage line with the month's vacation days to the export and send; own waiting code-60 parts are replaced through FNT-19's plan, and foreign ones are compared and the difference shown.
+R4 (code 60 to Danløn) was dropped: the tool stays invisible to payroll. This task documents the vacation overview and its config keys instead.
 
 **Size:** S
-**Files:** `src/danlon.rs`, `src/main.rs`, `README.md`
-**Touches:** [src/danlon.rs, src/main.rs, README.md]
-
-### Approach
-- `danlon::lines` (danlon.rs:29) takes the month's vacation count; config `vacation_lonart` default `60`.
-- Comparison against foreign waiting code-60 units in the send plan output.
-- README: vacation section and monthly routine.
-
-### Investigation targets
-**Required:**
-- `src/danlon.rs:20-70, 160-210` — lines and tests
+**Files:** `README.md`, `config.example.toml`
+**Touches:** [README.md, config.example.toml]
 
 ## Acceptance
-- [ ] Test: month with 6 vacation days exports a `<employee>;60;6,00` line (file) and a code-60 part (API)
-- [ ] Foreign waiting code-60 units differing from the calendar are shown with both counts
-- [ ] README updated; `cargo test` passes
+- [ ] README explains vacation events, working-day counting and the `vacation` command
+- [ ] config.example.toml shows the vacation keys with defaults
 
 ## Done summary
 TBD

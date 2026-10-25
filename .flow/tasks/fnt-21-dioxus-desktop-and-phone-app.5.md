@@ -1,21 +1,22 @@
 ---
-satisfies: [R3, R5]
+satisfies: [R3, R9]
 ---
-# fnt-21-dioxus-desktop-and-phone-app.5 Send to Danløn screen
+# fnt-21-dioxus-desktop-and-phone-app.5 Danløn app checklist screen
 
 ## Description
-Show already-in-Danløn parts (own/foreign), the send plan and confirm before sending, using the library's plan/executor from FNT-19.
+The checklist from FNT-22 as a screen: per-day Komme/gå and Kørsel registrations, one Komme/gå per day with time, break and hours shown large, place names and km on Kørsel, copy actions in a ⋯ menu, tick-off per day, progress. Never connects to Danløn.
 
 **Size:** S
 **Files:** `app/src/screens/danlon.rs`
 **Touches:** [app/src/screens/danlon.rs]
 
-### Design context
-Mockup boards Danlon, PhoneDanlon.
+## Design context
+Mockup boards "Danløn app checklist" (desktop and phone).
 
 ## Acceptance
-- [ ] Plan matches `export --send` for the same data
-- [ ] Nothing is sent without confirmation; Danløn errors shown, nothing sent
+- [ ] Shows the same registrations and status as `checklist <month>`
+- [ ] Komme/gå shows time, break and hours large without Copy; Kørsel shows names and km; Copy description, from/to address and km sit in a ⋯ menu (desktop and Android)
+- [ ] Ticking a day is stored and shown as progress
 
 ## Done summary
 TBD
@@ -24,3 +25,5 @@ TBD
 - Commits:
 - Tests:
 - PRs:
+
+

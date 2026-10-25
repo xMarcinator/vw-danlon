@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T15:44:47.466290Z",
+  "depends_on": [
+    "fnt-23-private-time-timer.1"
+  ],
+  "id": "fnt-23-private-time-timer.2",
+  "priority": null,
+  "spec": "fnt-23-private-time-timer",
+  "spec_path": ".flow/tasks/fnt-23-private-time-timer.2.md",
+  "status": "todo",
+  "title": "Recorded private time counts like appointments; report flag; docs",
+  "updated_at": "2026-10-25T15:47:47.057116Z"
+}
