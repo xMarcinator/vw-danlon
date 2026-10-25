@@ -1,6 +1,7 @@
 //! The data screens and what they share: number formats, the month's data
 //! loaded off the UI thread, and the private-time list with its actions.
 
+pub mod danlon;
 pub mod day;
 pub mod mileage;
 pub mod month;

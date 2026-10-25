@@ -460,8 +460,7 @@ fn checklist(
                 month: date.month(),
             };
             let days = checklist_days(cfg, month, trips.as_deref())?;
-            service::check_tickable(&days, date)?;
-            if state::State::update(path, |s| s.entered.insert(date))? {
+            if service::set_entered(cfg, &days, date, true)? {
                 println!("{date}: entered");
             } else {
                 println!("{date}: already entered");
@@ -469,7 +468,7 @@ fn checklist(
         }
         Some(ChecklistAction::Unmark { date }) => {
             let date = state::parse_date(&date)?;
-            if state::State::update(path, |s| s.entered.remove(&date))? {
+            if service::set_entered(cfg, &[], date, false)? {
                 println!("{date}: tick removed");
             } else {
                 println!("{date}: not ticked");

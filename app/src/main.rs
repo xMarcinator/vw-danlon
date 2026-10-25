@@ -187,14 +187,14 @@ fn App() -> Element {
                     }
                     if current == Screen::Settings {
                         settings::Settings { setup, screen }
-                    } else if current == Screen::Danlon {
-                        Placeholder { screen: current }
                     } else if setup.read().config.is_none() {
                         NeedsSetup { screen }
                     } else if current == Screen::Month {
                         screens::month::MonthScreen { setup, screen }
                     } else if current == Screen::Vacation {
                         screens::vacation::VacationScreen { setup }
+                    } else if current == Screen::Danlon {
+                        screens::danlon::DanlonScreen { setup, screen }
                     } else {
                         screens::mileage::MileageScreen { setup, screen }
                     }
@@ -281,13 +281,5 @@ fn NeedsSetup(screen: Signal<Screen>) -> Element {
                 button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
             }
         }
-    }
-}
-
-/// Screens that later tasks fill in.
-#[component]
-fn Placeholder(screen: Screen) -> Element {
-    rsx! {
-        p { class: "placeholder", "The {screen.title()} screen comes in a later step." }
     }
 }

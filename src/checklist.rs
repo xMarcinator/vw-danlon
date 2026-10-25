@@ -51,7 +51,6 @@ impl ChecklistDay {
 /// its registrations; then the progress. `entered` are the ticked days.
 pub fn render(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> String {
     let mut out = String::new();
-    let (mut days_total, mut days_done, mut trips_total, mut trips_done, mut fix) = (0, 0, 0, 0, 0);
     for day in days {
         let ticked = entered.contains(&day.date);
         let status = match (&day.status, ticked) {
@@ -65,16 +64,9 @@ pub fn render(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> String {
             day.date,
             weekday_da(day.date.weekday())
         );
-        match &day.status {
-            Status::ToEnter => {}
-            Status::FixFirst(_) => {
-                fix += 1;
-                continue;
-            }
-            Status::NothingToEnter(_) => continue,
+        if day.status != Status::ToEnter {
+            continue;
         }
-        days_total += 1;
-        days_done += usize::from(ticked);
         for k in &day.komme_gaa {
             let _ = writeln!(
                 out,
@@ -85,8 +77,6 @@ pub fn render(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> String {
             );
         }
         if let Some(k) = &day.korsel {
-            trips_total += 1;
-            trips_done += usize::from(ticked);
             let _ = writeln!(
                 out,
                 "    Kørsel    Purpose: {} · {} · Add return trip: {} · {} km",
@@ -100,15 +90,48 @@ pub fn render(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> String {
             }
         }
     }
+    let p = progress(days, entered);
     let _ = write!(
         out,
-        "\nDays entered: {days_done} of {days_total} · Trips entered: {trips_done} of {trips_total}"
+        "\nDays entered: {} of {} · Trips entered: {} of {}",
+        p.days_done, p.days_total, p.trips_done, p.trips_total
     );
-    if fix > 0 {
-        let _ = write!(out, " · {fix} to fix first");
+    if p.fix_first > 0 {
+        let _ = write!(out, " · {} to fix first", p.fix_first);
     }
     out.push('\n');
     out
+}
+
+/// How far the month is entered: days to enter and their Kørsel
+/// registrations, ticked or not, and the days to fix first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Progress {
+    pub days_done: usize,
+    pub days_total: usize,
+    pub trips_done: usize,
+    pub trips_total: usize,
+    pub fix_first: usize,
+}
+
+pub fn progress(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> Progress {
+    let mut p = Progress::default();
+    for day in days {
+        let ticked = usize::from(entered.contains(&day.date));
+        match day.status {
+            Status::ToEnter => {
+                p.days_total += 1;
+                p.days_done += ticked;
+                if day.korsel.is_some() {
+                    p.trips_total += 1;
+                    p.trips_done += ticked;
+                }
+            }
+            Status::FixFirst(_) => p.fix_first += 1,
+            Status::NothingToEnter(_) => {}
+        }
+    }
+    p
 }
 
 /// One Komme/gå registration: Time = start to end, Break = `break_minutes`.
@@ -165,6 +188,8 @@ pub struct Korsel {
     pub km: f64,
     /// Where one trip ends and the next starts elsewhere (from, to).
     pub gaps: Vec<(String, String)>,
+    /// Each stop's name and address, in route order, once each.
+    pub addresses: Vec<(String, String)>,
 }
 
 impl Korsel {
@@ -299,15 +324,16 @@ struct Names<'a> {
 
 impl Names<'_> {
     /// The configured name of home or the workplace, else the title of the
-    /// day's work entry at that address, else the address itself.
-    fn name(&self, date: NaiveDate, address: &str, pos: Option<Position>) -> String {
+    /// day's work entry at that address, else the address itself; with the
+    /// configured or calendar address of the place.
+    fn name(&self, date: NaiveDate, address: &str, pos: Option<Position>) -> (String, String) {
         let at = |place: &str| self.places.at(address, pos, place);
         let home = self.cfg.mileage.as_ref().and_then(|m| m.home.as_deref());
-        if home.is_some_and(at) {
-            return self.cfg.checklist.home_name.clone();
+        if let Some(home) = home.filter(|h| at(h)) {
+            return (self.cfg.checklist.home_name.clone(), home.to_string());
         }
-        if self.cfg.workplace.as_deref().is_some_and(at) {
-            return self.cfg.checklist.workplace_name.clone();
+        if let Some(work) = self.cfg.workplace.as_deref().filter(|w| at(w)) {
+            return (self.cfg.checklist.workplace_name.clone(), work.to_string());
         }
         self.calendar
             .iter()
@@ -317,7 +343,10 @@ impl Names<'_> {
                     && !e.location.trim().is_empty()
                     && at(e.location)
             })
-            .map_or_else(|| address.to_string(), |e| e.summary.to_string())
+            .map_or_else(
+                || (address.to_string(), address.to_string()),
+                |e| (e.summary.to_string(), e.location.to_string()),
+            )
     }
 }
 
@@ -340,22 +369,27 @@ fn korsel(date: NaiveDate, entries: &[&Entry], trips: &[Trip], names: &Names) ->
     let mut purposes: Vec<&str> = Vec::new();
     let mut route: Vec<String> = Vec::new();
     let mut gaps = Vec::new();
+    let mut addresses: Vec<(String, String)> = Vec::new();
     let mut prev: Option<(&Entry, String)> = None;
     for (e, _) in &legs {
         let trip = trips
             .iter()
             .find(|t| t.start == e.start && t.from == e.from && t.to == e.to);
-        let from = names.name(date, &e.from, trip.and_then(|t| t.start_pos));
-        let to = names.name(date, &e.to, trip.and_then(|t| t.end_pos));
+        let from_stop = names.name(date, &e.from, trip.and_then(|t| t.start_pos));
+        let to_stop = names.name(date, &e.to, trip.and_then(|t| t.end_pos));
+        let (from, to) = (from_stop.0.clone(), to_stop.0.clone());
         if let Some((p, p_to)) = &prev
             && *p_to != from
             && !address::matches(&p.to, &e.from)
         {
             gaps.push((p_to.clone(), from.clone()));
         }
-        for stop in [&from, &to] {
-            if route.last() != Some(stop) {
-                route.push(stop.clone());
+        for stop in [from_stop, to_stop] {
+            if route.last() != Some(&stop.0) {
+                route.push(stop.0.clone());
+            }
+            if !addresses.iter().any(|(name, _)| *name == stop.0) {
+                addresses.push(stop);
             }
         }
         if !e.purpose.is_empty() && !purposes.contains(&e.purpose.as_str()) {
@@ -374,6 +408,7 @@ fn korsel(date: NaiveDate, entries: &[&Entry], trips: &[Trip], names: &Names) ->
         return_trip,
         km: legs.iter().map(|(_, km)| km).sum(),
         gaps,
+        addresses,
     })
 }
 
@@ -621,6 +656,17 @@ END:VEVENT
         assert!(nov18.return_trip);
         assert_eq!(nov18.km_text(), "148,0");
         assert!(nov18.gaps.is_empty());
+        // The addresses to copy: the configured home, the calendar entry's.
+        assert_eq!(
+            nov18.addresses,
+            vec![
+                ("Hjem".to_string(), HOME.to_string()),
+                (
+                    "Kunde A".to_string(),
+                    "Vestergade 12, 5000 Odense C".to_string()
+                ),
+            ]
+        );
 
         let nov20 = korsel(20);
         assert_eq!(nov20.route_text(), "Kontoret → Kunde C");
@@ -689,6 +735,16 @@ END:VEVENT
         assert_eq!(block(21), "2026-11-21  lør  nothing to enter (weekend)");
         assert!(block(25).starts_with("2026-11-25  ons  fix first: "));
         assert!(!text.contains("Description"));
+        assert_eq!(
+            progress(&days, &BTreeSet::from([d(18), d(19)])),
+            Progress {
+                days_done: 2,
+                days_total: 6,
+                trips_done: 1,
+                trips_total: 3,
+                fix_first: 2,
+            }
+        );
         assert!(
             text.ends_with("\nDays entered: 2 of 6 · Trips entered: 1 of 3 · 2 to fix first\n"),
             "{text}"

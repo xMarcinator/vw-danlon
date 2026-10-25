@@ -1559,3 +1559,279 @@ table.logbook tr.total td {
     padding: 12px 14px;
   }
 }
+
+/* Danløn app checklist. */
+.dl-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dl-progress h2 {
+  font-size: 15px;
+}
+
+.dl-tabs {
+  display: flex;
+  align-self: flex-start;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.dl-tabs button {
+  font: inherit;
+  font-size: 13px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: none;
+  background: var(--surf);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.dl-tabs button + button {
+  border-left: 1px solid var(--ctl);
+}
+
+.dl-tabs button[aria-selected="true"] {
+  background: var(--acc-soft);
+  color: var(--acc-text);
+  font-weight: 600;
+}
+
+.panel.dl-list {
+  overflow: visible;
+}
+
+.dl-days {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.dl-day {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) 150px;
+  gap: 10px 16px;
+  padding: 14px 16px;
+}
+
+.dl-day + .dl-day {
+  border-top: 1px solid var(--row);
+}
+
+.dl-day.warn {
+  background: var(--warn-bg);
+}
+
+.dl-day:first-child {
+  border-radius: 11px 11px 0 0;
+}
+
+.dl-day:last-child {
+  border-radius: 0 0 11px 11px;
+}
+
+.dl-day:only-child {
+  border-radius: 11px;
+}
+
+.dl-day.next {
+  box-shadow: inset 3px 0 0 var(--acc);
+}
+
+.dl-date {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.dl-date b {
+  font-size: 15px;
+}
+
+.dl-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dl-item {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+
+.dl-kind {
+  flex-shrink: 0;
+  min-width: 76px;
+  text-align: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dl-kind.kg {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.dl-kind.kr {
+  background: var(--acc-soft);
+  color: var(--acc-text);
+}
+
+.dl-time {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 17px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-route {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dl-detail {
+  flex-grow: 1;
+  color: var(--sub);
+}
+
+.dl-more {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+
+.dl-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 5;
+  min-width: 260px;
+  max-width: min(420px, 90vw);
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
+.dl-menu button {
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.dl-menu button:hover {
+  background: var(--chip);
+}
+
+.dl-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dl-note.warn,
+.dl-day.warn .dl-note,
+.dl-day.warn .dl-check {
+  color: var(--warn);
+}
+
+.dl-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  align-self: start;
+  min-height: 32px;
+  font-size: 13px;
+}
+
+.dl-check input {
+  accent-color: var(--acc);
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.dl-day.done .dl-check {
+  color: var(--acc-text);
+}
+
+.dl-day.off .dl-check {
+  color: var(--muted);
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 13px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+}
+
+@media (max-width: 719px) {
+  .dl-day {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 12px 14px;
+  }
+
+  .dl-date {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .dl-items {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .dl-check {
+    grid-column: 2;
+    grid-row: 1;
+    min-height: 44px;
+  }
+
+  .dl-more {
+    width: 44px;
+    height: 44px;
+  }
+
+  .dl-menu {
+    top: calc(100% + 4px);
+  }
+
+  .dl-menu button {
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  .toast {
+    bottom: 84px;
+  }
+}

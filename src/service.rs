@@ -3,7 +3,7 @@
 //! the vacation overview, and the Min Volkswagen account access and sync.
 //! Nothing here prints or prompts; warnings come back as values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -162,6 +162,47 @@ pub fn check_tickable(days: &[ChecklistDay], date: NaiveDate) -> Result<()> {
         anyhow::bail!("{date} cannot be ticked: {why}");
     }
     Ok(())
+}
+
+/// A month's checklist as the Danløn screen shows it.
+#[derive(Debug)]
+pub struct ChecklistView {
+    pub days: Vec<ChecklistDay>,
+    /// The ticked days, from the state file.
+    pub entered: BTreeSet<NaiveDate>,
+}
+
+/// The month's registrations and ticks, as `checklist <month>` prints them.
+/// `cal` runs from 1 January through the month (see [`calendar`]).
+pub fn checklist_view(
+    cfg: &Config,
+    month: Month,
+    trips: &[Trip],
+    cal: &[Occurrence],
+) -> Result<ChecklistView> {
+    let report = build_month(cfg, month, trips, cal)?;
+    let mileage = mileage_for(cfg, month, trips, cal)?;
+    Ok(ChecklistView {
+        days: checklist_days(cfg, &report, trips, mileage.as_ref(), cal),
+        entered: State::load(&cfg.state_file)?.entered,
+    })
+}
+
+/// Ticks `date` off as entered in the Danløn app, or removes its tick;
+/// a tick is refused on a day that cannot be ticked (see
+/// [`check_tickable`]). True when the state file changed.
+pub fn set_entered(
+    cfg: &Config,
+    days: &[ChecklistDay],
+    date: NaiveDate,
+    entered: bool,
+) -> Result<bool> {
+    if entered {
+        check_tickable(days, date)?;
+        State::update(&cfg.state_file, |s| s.entered.insert(date))
+    } else {
+        State::update(&cfg.state_file, |s| s.entered.remove(&date))
+    }
 }
 
 /// The private timer when it has been running so long at `now` that it was
