@@ -265,7 +265,7 @@ impl Default for ChecklistConfig {
 
 /// The Min Volkswagen account, read through the Connected Cars backend. The
 /// password is never stored; `account connect` keeps a device token in the
-/// operating system's keychain.
+/// operating system's keychain, or in `token_file` when there is none.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectedCarsConfig {
@@ -275,6 +275,9 @@ pub struct ConnectedCarsConfig {
     pub vehicle: Option<String>,
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Keep the device token in this file (relative to the config file,
+    /// readable only by you) instead of the keychain.
+    pub token_file: Option<String>,
 }
 
 fn default_namespace() -> String {
@@ -397,6 +400,14 @@ impl Config {
             cal.source = base.join(&cal.source).to_string_lossy().into_owned();
         }
         let config_dir = path.parent().unwrap_or(Path::new("."));
+        if let Some(file) = cfg
+            .connected_cars
+            .as_mut()
+            .and_then(|c| c.token_file.as_mut())
+            && Path::new(file.as_str()).is_relative()
+        {
+            *file = config_dir.join(&*file).to_string_lossy().into_owned();
+        }
         cfg.state_file = config_dir.join("state.json");
         cfg.trip_store = config_dir.join("trips.json");
         cfg.validate()?;

@@ -6,12 +6,13 @@
 //! system's keychain.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::trips::{ExportTrip, Position, Trip};
@@ -453,43 +454,117 @@ pub fn without_position(trips: &[ExportTrip]) -> usize {
         .count()
 }
 
+/// Where the device token is kept: the operating system's keychain, or,
+/// when configured with `token_file`, a file only the user can read (for
+/// machines without a keychain service).
+pub enum TokenStore {
+    Keychain,
+    File(PathBuf),
+}
+
+/// The token file's content: the token belongs to one account.
+#[derive(Serialize, Deserialize)]
+struct TokenFile {
+    email: String,
+    device_token: String,
+}
+
+impl TokenStore {
+    pub fn describe(&self) -> String {
+        match self {
+            TokenStore::Keychain => "the keychain".into(),
+            TokenStore::File(p) => p.display().to_string(),
+        }
+    }
+
+    /// The stored device token for `email`, if any.
+    pub fn get(&self, email: &str) -> Result<Option<String>> {
+        match self {
+            TokenStore::Keychain => match keychain_entry(email)?.get_password() {
+                Ok(t) => Ok(Some(t)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(keychain_error(e)),
+            },
+            TokenStore::File(p) => {
+                let text = match std::fs::read_to_string(p) {
+                    Ok(t) => t,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+                };
+                let f: TokenFile = serde_json::from_str(&text)
+                    .with_context(|| format!("parsing token file {}", p.display()))?;
+                Ok((f.email == email).then_some(f.device_token))
+            }
+        }
+    }
+
+    /// Fails unless the store can be read, so nothing is registered that
+    /// cannot be stored.
+    pub fn check(&self, email: &str) -> Result<()> {
+        self.get(email).map(|_| ())
+    }
+
+    pub fn set(&self, email: &str, token: &str) -> Result<()> {
+        match self {
+            TokenStore::Keychain => keychain_entry(email)?
+                .set_password(token)
+                .map_err(keychain_error),
+            TokenStore::File(p) => write_private(
+                p,
+                &TokenFile {
+                    email: email.into(),
+                    device_token: token.into(),
+                },
+            )
+            .with_context(|| format!("writing token file {}", p.display())),
+        }
+    }
+
+    /// Deletes the stored device token; false when there was none.
+    pub fn delete(&self, email: &str) -> Result<bool> {
+        match self {
+            TokenStore::Keychain => match keychain_entry(email)?.delete_credential() {
+                Ok(()) => Ok(true),
+                Err(keyring::Error::NoEntry) => Ok(false),
+                Err(e) => Err(keychain_error(e)),
+            },
+            TokenStore::File(p) => {
+                if self.get(email)?.is_none() {
+                    return Ok(false);
+                }
+                std::fs::remove_file(p).with_context(|| format!("deleting {}", p.display()))?;
+                Ok(true)
+            }
+        }
+    }
+}
+
 /// The keychain entry holding the device token for `email`.
 fn keychain_entry(email: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(KEYCHAIN_SERVICE, email).map_err(keychain_error)
 }
 
 fn keychain_error(e: keyring::Error) -> anyhow::Error {
-    anyhow!("no keychain available: {e}")
+    anyhow!(
+        "no keychain available: {e} (set connected_cars.token_file to keep the token in a file)"
+    )
 }
 
-/// The stored device token, if any.
-pub fn stored_token(email: &str) -> Result<Option<String>> {
-    match keychain_entry(email)?.get_password() {
-        Ok(t) => Ok(Some(t)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(keychain_error(e)),
-    }
-}
-
-/// Fails unless the keychain can be read, so nothing is registered that
-/// cannot be stored.
-pub fn check_keychain(email: &str) -> Result<()> {
-    stored_token(email).map(|_| ())
-}
-
-pub fn store_token(email: &str, token: &str) -> Result<()> {
-    keychain_entry(email)?
-        .set_password(token)
-        .map_err(keychain_error)
-}
-
-/// Deletes the stored device token; false when there was none.
-pub fn delete_token(email: &str) -> Result<bool> {
-    match keychain_entry(email)?.delete_credential() {
-        Ok(()) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(keychain_error(e)),
-    }
+/// Writes `value` as JSON readable only by the user (mode 0600 on Unix),
+/// through a temp file and a rename.
+fn write_private(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts.open(&tmp)?;
+    serde_json::to_writer_pretty(&mut f, value)?;
+    std::io::Write::write_all(&mut f, b"\n")?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -684,5 +759,33 @@ mod tests {
         let q = trips_query("123", from, to).unwrap();
         assert!(q.contains(r#"vehicle(id: 123) { trips(fromTime: "2026-09-30T22:00:00Z", toTime: "2026-10-31T23:00:00Z""#), "{q}");
         assert!(trips_query("1) { x", from, to).is_err());
+    }
+
+    #[test]
+    fn token_file_round_trip() {
+        let dir = std::env::temp_dir().join(format!("vwd-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = TokenStore::File(dir.join("token"));
+        assert_eq!(store.get("a@example.com").unwrap(), None);
+        store.set("a@example.com", "dev-123").unwrap();
+        assert_eq!(
+            store.get("a@example.com").unwrap().as_deref(),
+            Some("dev-123")
+        );
+        // Another account's token is not handed out.
+        assert_eq!(store.get("b@example.com").unwrap(), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("token"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(!store.delete("b@example.com").unwrap());
+        assert!(store.delete("a@example.com").unwrap());
+        assert_eq!(store.get("a@example.com").unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -90,3 +90,11 @@ decimal_comma = true
 header = false
 columns = ["employee", "lonart", "quantity"]   # code 39 allows no rate
 
+
+# Optional: sync trips from your Min Volkswagen account (`account connect`,
+# unofficial access). Only a device token is kept, in the system keychain, or
+# in `token_file` (readable only by you) on machines without one.
+# [connected_cars]
+# email = "you@example.com"
+# vehicle = "AB12345"                    # only if the account has several cars
+# token_file = "connected-cars-token"    # relative to this file; never committed

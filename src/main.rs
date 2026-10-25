@@ -106,7 +106,7 @@ enum Command {
         #[command(subcommand)]
         action: PrivateAction,
     },
-    /// The Min Volkswagen account for trip sync (device token in the keychain).
+    /// The Min Volkswagen account for trip sync (device token in the keychain or `token_file`).
     Account {
         #[command(subcommand)]
         action: AccountAction,
@@ -138,7 +138,7 @@ enum ChecklistAction {
 #[derive(Subcommand)]
 enum AccountAction {
     /// Log in once with email and password (asked here, never stored) and
-    /// keep a device token in the keychain.
+    /// keep a device token in the keychain (or `token_file`).
     Connect,
     /// Delete the stored device token.
     Disconnect,
@@ -332,6 +332,10 @@ fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
 fn account(cfg: &Config, action: AccountAction) -> Result<()> {
     let cc = cfg.connected_cars.as_ref();
     let namespace = cc.map_or("semler:minvolkswagen", |c| c.namespace.as_str());
+    let tokens = match cc.and_then(|c| c.token_file.as_deref()) {
+        Some(f) => connected_cars::TokenStore::File(f.into()),
+        None => connected_cars::TokenStore::Keychain,
+    };
     let state = state::State::load(&cfg.state_file)?;
     // The connected account, else the configured one.
     let email = state
@@ -342,12 +346,12 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
     match action {
         AccountAction::Connect => {
             let email = prompt_email(email.as_deref())?;
-            connected_cars::check_keychain(&email)?;
+            tokens.check(&email)?;
             let password = rpassword::prompt_password("Password (not shown, never stored): ")
                 .context("reading the password")?;
             let token = connected_cars::register_device(namespace, &email, &password)?;
             drop(password);
-            connected_cars::store_token(&email, &token)?;
+            tokens.set(&email, &token)?;
             state::State::update(&cfg.state_file, |s| {
                 let last_sync = s
                     .account
@@ -359,28 +363,36 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
                     last_sync,
                 });
             })?;
-            println!("Connected {email}; the device token is in the keychain");
+            println!(
+                "Connected {email}; the device token is in {}",
+                tokens.describe()
+            );
         }
         AccountAction::Disconnect => {
             let Some(email) = email else {
                 println!("Not connected");
                 return Ok(());
             };
-            let deleted = connected_cars::delete_token(&email)?;
+            let deleted = tokens.delete(&email)?;
             state::State::update(&cfg.state_file, |s| s.account = None)?;
             if deleted {
                 println!("Disconnected {email}; the device token is deleted");
             } else {
-                println!("Not connected ({email} has no device token in the keychain)");
+                println!(
+                    "Not connected ({email} has no device token in {})",
+                    tokens.describe()
+                );
             }
         }
         AccountAction::Status => {
             let connected = match &email {
-                Some(e) => connected_cars::stored_token(e)?.is_some(),
+                Some(e) => tokens.get(e)?.is_some(),
                 None => false,
             };
             match (&email, connected) {
-                (Some(e), true) => println!("Connected: {e} (device token in the keychain)"),
+                (Some(e), true) => {
+                    println!("Connected: {e} (device token in {})", tokens.describe())
+                }
                 _ => println!("Not connected: run `account connect`, or use `trips import`"),
             }
             let last = state.account.as_ref().and_then(|a| a.last_sync);
@@ -395,7 +407,7 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
         AccountAction::Check { from, to } => {
             let token = email
                 .as_deref()
-                .map(connected_cars::stored_token)
+                .map(|e| tokens.get(e))
                 .transpose()?
                 .flatten()
                 .context("no device token: run `account connect`, or use `trips import`")?;
