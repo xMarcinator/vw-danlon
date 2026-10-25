@@ -8,6 +8,7 @@
 > user: "Yes do it. But how does copying work."
 > user: "In most cases im interested in the clock for coming and going. The addresses are named in the system so named them here  don't let me copy just list the name and Il match it in the app. It also plans the route using Google maps so the miles need to be shown but don't need a explicit button. Please move copying the address and mileage in a action menu"
 > user: "Also these are the inputs for the time logging." (screenshots: Danløn app Komme/gå form with Day, Type, Time "08:00 to 16:00" entered on a keypad, Break "30m", Description, Total time)
+> user: "I Want private time to disrupt the work to disrupt the entry but break time is just break time."
 
 ## Goal & Context
 
@@ -17,7 +18,7 @@ The user is an employee and reports hours and driving themselves in Danløn's ow
 ## Architecture & Data Models
 
 - A pure checklist step turns a month's day records (FNT-17/18/23) and business trips into per-day registrations: Komme/gå (from, to, place) and Kørsel (km, route, purpose).
-- One Komme/gå per day: first arrival to last departure, with everything not worked inside it as the break (R7).
+- Komme/gå entries per day: private time splits the day; the break is only lunch (R8).
 - Ticks ("entered") are stored per date in the local state file (FNT-18). Nothing leaves the machine.
 
 ## API Contracts
@@ -39,7 +40,8 @@ The user is an employee and reports hours and driving themselves in Danløn's ow
 - **R4:** Ticking a day records it in the local state file and the checklist shows progress (days and trips entered); unticking removes it. Errors: a corrupt state file stops with its path, as in FNT-18.
 - **R5:** The checklist makes no network call and writes nothing but the local state file. No error surface.
 - **R6:** Places are shown by the names used in the Danløn app: a calendar entry's title for its address, and configurable names for home and the fixed workplace (default "Hjem" and "Kontoret"); km is shown for checking. Errors: an address with no name falls back to the address itself. [paraphrase]
-- **R7:** Each working day gives one Komme/gå registration matching the Danløn app form: Time = first arrival to last departure at work, Break = all time inside that is not worked (lunch deduction, private time, other gaps), Description = the day's calendar entry or private-time labels, and the resulting hours equal the day's worked hours (e.g. 19 Nov: 07:58 to 16:00, break 1h 45m, "Læge 10:00–11:15", 6h 17m; 4 Nov: 07:41 to 15:55, break 45m, 7h 29m). Errors: no departure → "fix first" (R3). [paraphrase]
+- **R7 (superseded 2026-10-25 by R8):** ~~One Komme/gå per day with private time in the break~~.
+- **R8:** Private time splits the day into separate Komme/gå entries and is never registered; each entry is Time = start to end of that stretch, Break = only the lunch that falls inside it (the lunch deduction, or a lunch-window gap such as an errand), Description = the calendar entry's name. Other unworked gaps also split the day. [inferred for other gaps] The entries' hours add up to the day's worked hours (19 Nov: 07:58 to 10:00 no break 2h 02m + 11:15 to 16:00 break 30m 4h 15m; 4 Nov: one entry 07:41 to 15:55, break 45m, 7h 29m). Errors: no departure → "fix first" (R3). [paraphrase]
 
 ## Early proof point
 
@@ -72,5 +74,6 @@ cargo run -- checklist 2026-11 -t examples/trips.csv
 | R4 | Ticking a day records it in the local state file and the checklist shows progress (days and trips entered); unticking removes it. Errors: a corrupt state file stops with its path, as in FNT-18. | fnt-22-danlon-app-checklist.2 | — |
 | R5 | The checklist makes no network call and writes nothing but the local state file. No error surface. | fnt-22-danlon-app-checklist.1, fnt-22-danlon-app-checklist.2 | — |
 | R6 | Places are shown by the names used in the Danløn app: a calendar entry's title for its address, and configurable names for home and the fixed workplace (default "Hjem" and "Kontoret"); km is shown for checking. Errors: an address with no name falls back to the address itself. | fnt-22-danlon-app-checklist.1 | — |
-| R7 | Each working day gives one Komme/gå registration matching the Danløn app form: Time = first arrival to last departure at work, Break = all time inside that is not worked (lunch deduction, private time, other gaps), Description = the day's calendar entry or private-time labels, and the resulting hours equal the day's worked hours (e.g. 19 Nov: 07:58 to 16:00, break 1h 45m, "Læge 10:00–11:15", 6h 17m; 4 Nov: 07:41 to 15:55, break 45m, 7h 29m). Errors: no departure → "fix first" (R3). | fnt-22-danlon-app-checklist.1 | — |
+| R7 | (superseded 2026-10-25 by R8): ~~One Komme/gå per day with private time in the break~~. | — | Uncovered |
+| R8 | Private time splits the day into separate Komme/gå entries and is never registered; each entry is Time = start to end of that stretch, Break = only the lunch that falls inside it (the lunch deduction, or a lunch-window gap such as an errand), Description = the calendar entry's name. Other unworked gaps also split the day. [inferred for other gaps] The entries' hours add up to the day's worked hours (19 Nov: 07:58 to 10:00 no break 2h 02m + 11:15 to 16:00 break 30m 4h 15m; 4 Nov: one entry 07:41 to 15:55, break 45m, 7h 29m). Errors: no departure → "fix first" (R3). | fnt-22-danlon-app-checklist.1 | — |
 
