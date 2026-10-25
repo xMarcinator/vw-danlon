@@ -8,6 +8,7 @@ mod mileage;
 mod month;
 mod state;
 mod timesheet;
+mod trip_store;
 mod trips;
 
 use std::collections::BTreeMap;
@@ -47,7 +48,8 @@ enum Command {
     /// Show work periods, norm and difference per day, and mileage.
     Report {
         month: String,
-        /// Trips file (.csv or .json), may contain the whole year.
+        /// Trips file (.csv, .json or a Min Volkswagen .xlsx export), may
+        /// contain the whole year.
         #[arg(short, long)]
         trips: PathBuf,
     },
@@ -98,6 +100,17 @@ enum Command {
         #[command(subcommand)]
         action: PrivateAction,
     },
+    /// Imported trips (stored in trips.json beside the config).
+    Trips {
+        #[command(subcommand)]
+        action: TripsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TripsAction {
+    /// Merge a Min Volkswagen trip export (.xlsx) into the stored trips.
+    Import { file: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -269,6 +282,21 @@ fn main() -> Result<()> {
         }
         Command::Lunch { action } => lunch(&cfg, action)?,
         Command::Private { action } => private(&cfg, action)?,
+        Command::Trips {
+            action: TripsAction::Import { file },
+        } => import_trips(&cfg, &file)?,
+    }
+    Ok(())
+}
+
+fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
+    let (merged, period) = trip_store::import(&cfg.trip_store, file, cfg.timezone)?;
+    println!(
+        "{} added, {} already imported",
+        merged.added, merged.already
+    );
+    if let Some((first, last)) = period {
+        println!("Period: {first} – {last}");
     }
     Ok(())
 }

@@ -3,3 +3,5 @@ config.toml
 danlon-token
 state.json
 state.json.tmp
+trips.json
+trips.json.tmp

@@ -254,18 +254,8 @@ impl State {
         })
     }
 
-    /// Writes the state file atomically: a temp file in the same directory,
-    /// then a rename over the old file.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let tmp = tmp_path(path);
-        let write = || -> std::io::Result<()> {
-            let mut f = std::fs::File::create(&tmp)?;
-            serde_json::to_writer_pretty(&mut f, self)?;
-            f.write_all(b"\n")?;
-            f.sync_all()?;
-            std::fs::rename(&tmp, path)
-        };
-        write().with_context(|| format!("writing state {}", path.display()))
+        write_json(path, self).with_context(|| format!("writing state {}", path.display()))
     }
 
     /// Loads the state, applies `change` and saves it. A state file that
@@ -276,6 +266,17 @@ impl State {
         state.save(path)?;
         Ok(out)
     }
+}
+
+/// Writes `value` as JSON atomically: a temp file in the same directory,
+/// then a rename over the old file.
+pub fn write_json(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+    let tmp = tmp_path(path);
+    let mut f = std::fs::File::create(&tmp)?;
+    serde_json::to_writer_pretty(&mut f, value)?;
+    f.write_all(b"\n")?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 fn tmp_path(path: &Path) -> PathBuf {

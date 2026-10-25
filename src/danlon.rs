@@ -161,6 +161,8 @@ mod tests {
             to: "Kunde A".into(),
             purpose: "Møde".into(),
             business: None,
+            start_pos: None,
+            end_pos: None,
         }];
         let m = Month::parse("2026-10").unwrap();
         let report = month::build(&cfg, m, &trips, &[], &Default::default(), &[]);

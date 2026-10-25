@@ -29,6 +29,9 @@ pub struct Config {
     /// The local state file (`state.json` beside the config file).
     #[serde(skip)]
     pub state_file: PathBuf,
+    /// The imported trips (`trips.json` beside the config file).
+    #[serde(skip)]
+    pub trip_store: PathBuf,
 }
 
 fn default_timezone() -> chrono_tz::Tz {
@@ -338,6 +341,7 @@ impl Config {
         let config_dir = path.parent().unwrap_or(Path::new("."));
         crate::danlon_api::resolve_token_file(&mut cfg.danlon.api.refresh_token_file, config_dir);
         cfg.state_file = config_dir.join("state.json");
+        cfg.trip_store = config_dir.join("trips.json");
         cfg.validate()?;
         Ok(cfg)
     }

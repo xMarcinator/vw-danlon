@@ -332,6 +332,8 @@ mod tests {
             to: to.into(),
             purpose: purpose.into(),
             business: None,
+            start_pos: None,
+            end_pos: None,
         }
     }
 

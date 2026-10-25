@@ -657,6 +657,8 @@ mod tests {
             to: String::new(),
             purpose: String::new(),
             business: None,
+            start_pos: None,
+            end_pos: None,
         }
     }
 
