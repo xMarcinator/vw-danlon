@@ -1,7 +1,8 @@
-//! Local state kept beside the config file: per-day lunch overrides and the
-//! private-time timer. One JSON document, written atomically.
+//! Local state kept beside the config file: per-day lunch overrides, the
+//! private-time timer and the days ticked off in the Danløn app checklist.
+//! One JSON document, written atomically.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,8 @@ pub struct State {
     pub lunch: BTreeMap<NaiveDate, LunchOverride>,
     /// The private-time timer and the intervals it recorded.
     pub private: Private,
+    /// Days ticked off as entered in the Danløn app.
+    pub entered: BTreeSet<NaiveDate>,
 }
 
 /// A day's lunch break. 0 minutes means no lunch that day.
@@ -346,6 +349,25 @@ mod tests {
             }
         );
         assert!(!tmp_path(&path).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn entered_days_round_trip() {
+        let dir = temp_dir("state-entered");
+        let path = dir.join("state.json");
+        // A state file from before the checklist has no ticks.
+        std::fs::write(&path, r#"{"lunch": {}}"#).unwrap();
+        assert!(State::load(&path).unwrap().entered.is_empty());
+
+        assert!(State::update(&path, |s| s.entered.insert(d("2026-11-18"))).unwrap());
+        assert!(!State::update(&path, |s| s.entered.insert(d("2026-11-18"))).unwrap());
+        State::update(&path, |s| s.entered.insert(d("2026-11-19"))).unwrap();
+        assert!(State::update(&path, |s| s.entered.remove(&d("2026-11-18"))).unwrap());
+        assert_eq!(
+            State::load(&path).unwrap().entered,
+            BTreeSet::from([d("2026-11-19")])
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

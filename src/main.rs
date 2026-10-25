@@ -1,6 +1,5 @@
 mod address;
 mod calendar;
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the checklist CLI"))]
 mod checklist;
 mod config;
 mod danlon;
@@ -83,6 +82,19 @@ enum Command {
         #[arg(short, long)]
         out: PathBuf,
     },
+    /// What to enter in the Danløn app per day, with the days ticked off
+    /// (`checklist mark|unmark <YYYY-MM-DD>`, stored in state.json).
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Checklist {
+        /// Month as YYYY-MM.
+        #[arg(required = true)]
+        month: Option<String>,
+        /// Trips file (default: the trips stored by `trips import`).
+        #[arg(short, long)]
+        trips: Option<PathBuf>,
+        #[command(subcommand)]
+        action: Option<ChecklistAction>,
+    },
     /// Set or clear a day's lunch break (stored in state.json beside the config).
     Lunch {
         #[command(subcommand)]
@@ -97,6 +109,23 @@ enum Command {
     Trips {
         #[command(subcommand)]
         action: TripsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChecklistAction {
+    /// Tick a day off as entered in the Danløn app.
+    Mark {
+        /// Day as YYYY-MM-DD.
+        date: String,
+        /// Trips file (default: the trips stored by `trips import`).
+        #[arg(short, long)]
+        trips: Option<PathBuf>,
+    },
+    /// Remove a day's tick.
+    Unmark {
+        /// Day as YYYY-MM-DD.
+        date: String,
     },
 }
 
@@ -239,6 +268,11 @@ fn main() -> Result<()> {
             danlon::write(&cfg, &report, &lines, create(&out)?)?;
             println!("Wrote {}", out.display());
         }
+        Command::Checklist {
+            month,
+            trips,
+            action,
+        } => checklist(&cfg, month, trips, action)?,
         Command::Lunch { action } => lunch(&cfg, action)?,
         Command::Private { action } => private(&cfg, action)?,
         Command::Trips {
@@ -266,6 +300,74 @@ fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
         println!("Period: {first} – {last}");
     }
     Ok(())
+}
+
+fn checklist(
+    cfg: &Config,
+    month: Option<String>,
+    trips: Option<PathBuf>,
+    action: Option<ChecklistAction>,
+) -> Result<()> {
+    let path = &cfg.state_file;
+    match action {
+        None => {
+            let month = Month::parse(month.as_deref().unwrap_or_default())?;
+            let days = checklist_days(cfg, month, trips.as_deref())?;
+            let entered = state::State::load(path)?.entered;
+            print!("{}", checklist::render(&days, &entered));
+        }
+        Some(ChecklistAction::Mark { date, trips }) => {
+            let date = state::parse_date(&date)?;
+            let month = Month {
+                year: date.year(),
+                month: date.month(),
+            };
+            let days = checklist_days(cfg, month, trips.as_deref())?;
+            let day = days
+                .iter()
+                .find(|d| d.date == date)
+                .with_context(|| format!("{date} is not in the checklist"))?;
+            if let Some(why) = day.tick_refusal() {
+                anyhow::bail!("{date} cannot be ticked: {why}");
+            }
+            if state::State::update(path, |s| s.entered.insert(date))? {
+                println!("{date}: entered");
+            } else {
+                println!("{date}: already entered");
+            }
+        }
+        Some(ChecklistAction::Unmark { date }) => {
+            let date = state::parse_date(&date)?;
+            if state::State::update(path, |s| s.entered.remove(&date))? {
+                println!("{date}: tick removed");
+            } else {
+                println!("{date}: not ticked");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The month's Danløn app registrations per day.
+fn checklist_days(
+    cfg: &Config,
+    month: Month,
+    trips: Option<&Path>,
+) -> Result<Vec<checklist::ChecklistDay>> {
+    let trips = load_trips(cfg, trips)?;
+    let cal = calendar(cfg, month)?;
+    let report = build_month(cfg, month, &trips, &cal)?;
+    let mileage = mileage_for(cfg, month, &trips, &cal)?;
+    if let Some(m) = &mileage {
+        warn_skipped(m);
+    }
+    Ok(checklist::build(
+        cfg,
+        &report,
+        &trips,
+        mileage.as_ref(),
+        &timed_entries(cfg, &cal),
+    ))
 }
 
 fn lunch(cfg: &Config, action: LunchAction) -> Result<()> {

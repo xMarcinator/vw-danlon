@@ -31,7 +31,6 @@ pub struct Config {
     pub lunch: LunchConfig,
     pub mileage: Option<MileageConfig>,
     #[serde(default)]
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the checklist CLI"))]
     pub checklist: ChecklistConfig,
     pub danlon: DanlonConfig,
     /// The local state file (`state.json` beside the config file).

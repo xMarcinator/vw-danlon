@@ -7,12 +7,16 @@
 //! becomes the entry's break, like the lunch deduction itself. Any other
 //! unworked gap splits the day too.
 
+use std::collections::BTreeSet;
+use std::fmt::Write;
+
 use chrono::{Datelike, NaiveDate, Weekday};
 
 use crate::address::{self, Places};
 use crate::config::Config;
 use crate::mileage::{Entry, MileageMonth};
 use crate::month::{Day, EntryKind, MonthReport, Span, TimedEntry};
+use crate::timesheet::weekday_da;
 use crate::trips::{Position, Trip};
 
 #[derive(Debug, Clone)]
@@ -30,6 +34,81 @@ pub enum Status {
     NothingToEnter(String),
     /// The day's trips need fixing first: the report's remark.
     FixFirst(String),
+}
+
+impl ChecklistDay {
+    /// Why the day cannot be ticked as entered, if it cannot.
+    pub fn tick_refusal(&self) -> Option<String> {
+        match &self.status {
+            Status::ToEnter => None,
+            Status::NothingToEnter(reason) => Some(format!("nothing to enter ({reason})")),
+            Status::FixFirst(reason) => Some(format!("fix first: {reason}")),
+        }
+    }
+}
+
+/// The checklist as text: each day with its status and, on days to enter,
+/// its registrations; then the progress. `entered` are the ticked days.
+pub fn render(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> String {
+    let mut out = String::new();
+    let (mut days_total, mut days_done, mut trips_total, mut trips_done, mut fix) = (0, 0, 0, 0, 0);
+    for day in days {
+        let ticked = entered.contains(&day.date);
+        let status = match (&day.status, ticked) {
+            (Status::ToEnter, false) => "[ ] to enter".to_string(),
+            (Status::ToEnter, true) => "[x] entered".to_string(),
+            _ => day.tick_refusal().unwrap_or_default(),
+        };
+        let _ = writeln!(
+            out,
+            "{}  {}  {status}",
+            day.date,
+            weekday_da(day.date.weekday())
+        );
+        match &day.status {
+            Status::ToEnter => {}
+            Status::FixFirst(_) => {
+                fix += 1;
+                continue;
+            }
+            Status::NothingToEnter(_) => continue,
+        }
+        days_total += 1;
+        days_done += usize::from(ticked);
+        for k in &day.komme_gaa {
+            let _ = writeln!(
+                out,
+                "    Komme/gå  {} · break {} · {}",
+                k.time_text(),
+                k.break_text(),
+                k.total_text()
+            );
+        }
+        if let Some(k) = &day.korsel {
+            trips_total += 1;
+            trips_done += usize::from(ticked);
+            let _ = writeln!(
+                out,
+                "    Kørsel    Purpose: {} · {} · Add return trip: {} · {} km",
+                k.purpose,
+                k.route_text(),
+                if k.return_trip { "on" } else { "off" },
+                k.km_text()
+            );
+            for (from, to) in &k.gaps {
+                let _ = writeln!(out, "              check: no trip from {from} to {to}");
+            }
+        }
+    }
+    let _ = write!(
+        out,
+        "\nDays entered: {days_done} of {days_total} · Trips entered: {trips_done} of {trips_total}"
+    );
+    if fix > 0 {
+        let _ = write!(out, " · {fix} to fix first");
+    }
+    out.push('\n');
+    out
 }
 
 /// One Komme/gå registration: Time = start to end, Break = `break_minutes`.
@@ -568,6 +647,51 @@ END:VEVENT
         assert_eq!(
             nov27.gaps,
             vec![("Kunde A".to_string(), "Kunde C".to_string())]
+        );
+    }
+
+    #[test]
+    fn only_days_to_enter_can_be_ticked() {
+        let (_, days) = november();
+        assert_eq!(day(&days, 18).tick_refusal(), None);
+        assert_eq!(
+            day(&days, 21).tick_refusal().as_deref(),
+            Some("nothing to enter (weekend)")
+        );
+        let fix = day(&days, 25).tick_refusal().unwrap();
+        assert!(
+            fix.starts_with("fix first: ") && fix.contains("uden registreret afgang"),
+            "{fix}"
+        );
+    }
+
+    #[test]
+    fn rendered_checklist_shows_registrations_and_progress() {
+        let (_, days) = november();
+        let d = |n| NaiveDate::from_ymd_opt(2026, 11, n).unwrap();
+        let text = render(&days, &BTreeSet::from([d(18), d(19)]));
+        let block = |n: u32| {
+            let start = text.find(&d(n).to_string()).unwrap();
+            let end = text[start + 1..]
+                .find("\n2026-")
+                .map_or(text.len(), |i| start + 1 + i);
+            text[start..end].to_string()
+        };
+        assert_eq!(
+            block(18),
+            "2026-11-18  ons  [x] entered\n    Komme/gå  08:30 to 15:30 · break 30m · 6h 30m\n    Kørsel    Purpose: Kunde A · Hjem → Kunde A · Add return trip: on · 148,0 km"
+        );
+        assert_eq!(
+            block(19),
+            "2026-11-19  tor  [x] entered\n    Komme/gå  07:58 to 10:00 · break none · 2h 02m\n    Komme/gå  11:15 to 16:00 · break 30m · 4h 15m"
+        );
+        assert!(block(20).starts_with("2026-11-20  fre  [ ] to enter\n"));
+        assert_eq!(block(21), "2026-11-21  lør  nothing to enter (weekend)");
+        assert!(block(25).starts_with("2026-11-25  ons  fix first: "));
+        assert!(!text.contains("Description"));
+        assert!(
+            text.ends_with("\nDays entered: 2 of 6 · Trips entered: 1 of 3 · 2 to fix first\n"),
+            "{text}"
         );
     }
 

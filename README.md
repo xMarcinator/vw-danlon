@@ -6,6 +6,8 @@ Turns your car trips (myVolkswagen) into:
   hours, norm and difference.
 - **Mileage logbook** (kørselsregnskab) for tax-free kørselsgodtgørelse.
 - **Pay lines** (lønart and quantity) for your own records.
+- **Danløn app checklist**: per day, the Komme/gå and Kørsel registrations
+  to type into the Danløn app, with a tick-off.
 
 The tool runs only on your machine and never talks to Danløn.
 
@@ -19,6 +21,7 @@ cp config.example.toml config.toml   # once, then edit
 
 cargo run -- trips import ~/Downloads/export.xlsx              # see "Trips from Min Volkswagen"
 cargo run -- report    2026-10                                 # check first
+cargo run -- checklist 2026-10                                 # see "Danløn app checklist"
 cargo run -- timesheet 2026-10 -o arbejdstid-2026-10.csv
 cargo run -- logbook   2026-10 -o korebog-2026-10.csv
 cargo run -- export    2026-10 -o danlon-2026-10.txt
@@ -60,6 +63,55 @@ radius_m = 150          # default
 ```
 
 A trip ending within `radius_m` of one counts as arriving there.
+
+## Danløn app checklist
+
+Hours and driving are registered by hand in the Danløn app (Komme/gå and
+Kørsel). `checklist` shows, per day, exactly what to type:
+
+```sh
+cargo run -- checklist 2026-11
+```
+
+```text
+2026-11-18  ons  [ ] to enter
+    Komme/gå  08:30 to 15:30 · break 30m · 6h 30m
+    Kørsel    Purpose: Kunde A · Hjem → Kunde A · Add return trip: on · 148,0 km
+2026-11-19  tor  [x] entered
+    Komme/gå  07:58 to 10:00 · break none · 2h 02m
+    Komme/gå  11:15 to 16:00 · break 30m · 4h 15m
+2026-11-21  lør  nothing to enter (weekend)
+2026-11-25  ons  fix first: ankomst til … uden registreret afgang
+
+Days entered: 1 of 18 · Trips entered: 0 of 3 · 1 to fix first
+```
+
+In the Danløn app, per day:
+
+- **Komme/gå**: one registration per line. Type the time range and the
+  break on the app's keypad; leave Description empty. Private time splits
+  the day into several lines and is never registered; the break is only
+  the lunch. Check the app's Total time against the last figure.
+- **Kørsel**: one registration per day. Purpose as shown, then the route
+  stops by the names the app knows (home and the workplace are named with
+  `[checklist] home_name`/`workplace_name`, default "Hjem" and "Kontoret";
+  customers by their calendar entry's title). Switch on **Add return trip**
+  at the bottom of the form when the line says `on`; the route then lists
+  only the way out. Leave Description empty, and check the app's distance
+  against the km shown. A `check: no trip from … to …` line means a trip is
+  missing between two stops.
+
+Then tick the day off; it is stored in `state.json` beside the config:
+
+```sh
+cargo run -- checklist mark 2026-11-18
+cargo run -- checklist unmark 2026-11-18     # undo
+```
+
+Days with nothing to enter (weekends, holidays, days off) and days that need
+their trips fixed first cannot be ticked; `mark` says why. `mark` takes
+`-t` like `report`. The checklist never contacts Danløn and writes nothing
+but `state.json`.
 
 ## Danish rules applied
 
