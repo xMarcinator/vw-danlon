@@ -69,6 +69,8 @@ Four gaps found using the app on real data: home working cannot be recorded; mon
 - **R13:** Every private-time entry can be edited, relabelled or deleted at any time, including calendar-time and automatically started ones. Errors: as FNT-23 R3.
 - **R14:** The befordringsfradrag estimate (LL § 9 C) is shown separately for information (0 kr below 24 km a day); nothing is sent to Skat. Errors: none.
 
+- **R15:** Trips of 0 km (engine only switched on) are skipped on import, sync and migration, and counted as "skipped (0 km)" in the summary (user: "please filter out trips that are 0 km. No need to import trips where engine was just turned on."). Errors: a manual 0 km trip is refused naming the reason.
+
 ## Boundaries
 
 - No reporting to Skat (no citizen API exists); no rule switches that break Skat's rules.
