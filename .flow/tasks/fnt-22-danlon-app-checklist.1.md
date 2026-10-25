@@ -1,5 +1,5 @@
 ---
-satisfies: [R3, R5, R6, R8, R9]
+satisfies: [R3, R5, R6, R8, R9, R10]
 ---
 # fnt-22-danlon-app-checklist.1 Checklist model: Komme/gå and Kørsel registrations per day
 
@@ -22,6 +22,8 @@ Pure function from a month report (day records with periods, private time, lunch
 - [ ] Test: for every day, the entries' spans minus their breaks add up to the day's worked hours
 - [ ] Test: 18 Nov gives one Kørsel: Purpose Kunde A, Hjem → Kunde A, return on, 148,0 km
 - [ ] Test: Kontoret → Kunde C → Kontoret gives Kontoret → Kunde C, return on; a non-returning day lists all stops with return off
+- [ ] Test: an unworked gap outside the lunch window (not private time) also splits the entry
+- [ ] Registrations carry no Description value (R10)
 - [ ] Test: weekend/vacation → nothing to enter; arrival without departure → fix first
 - [ ] `cargo test` passes
 
