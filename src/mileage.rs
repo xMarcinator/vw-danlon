@@ -13,7 +13,9 @@
 //!
 //! Private appointments (see [`crate::month::EntryKind::Private`]) are never
 //! business visits: a trip arriving at or departing from an appointment's
-//! address, or starting during one, is private.
+//! address, or starting during one, is private. Recorded private time (see
+//! [`crate::month::recorded_entries`]) counts as an appointment without an
+//! address.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -484,6 +486,28 @@ mod tests {
         let logbook = String::from_utf8(logbook).unwrap();
         assert!(!logbook.contains("Torvet") && !logbook.contains("Apotek"));
         assert!(logbook.contains("Kunde B"));
+    }
+
+    #[test]
+    fn trips_during_recorded_private_time_are_private() {
+        let at = |s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        let recorded = [crate::state::PrivateInterval {
+            id: 1,
+            start: at("2026-10-08 10:02"),
+            end: at("2026-10-08 11:14"),
+            label: "Privat".into(),
+            replaces: None,
+        }];
+        let cal = crate::month::recorded_entries(&recorded, chrono_tz::Europe::Copenhagen);
+        let trips = vec![
+            trip("2026-10-08 10:05", "Kontoret", "Kunde A", "Service", 10.0),
+            trip("2026-10-08 11:14", "Kunde A", "Kontoret", "Service", 10.0),
+        ];
+        let m = compute(&cfg(), WORK, Month::parse("2026-10").unwrap(), &trips, &cal).unwrap();
+        assert_eq!(m.skipped.len(), 1);
+        assert_eq!(m.skipped[0].1, Status::Private);
+        assert_eq!(m.skipped[0].0.start, trips[0].start);
+        assert_eq!(m.total_km(), 10.0);
     }
 
     #[test]

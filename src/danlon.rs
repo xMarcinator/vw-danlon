@@ -163,7 +163,7 @@ mod tests {
             business: None,
         }];
         let m = Month::parse("2026-10").unwrap();
-        let report = month::build(&cfg, m, &trips, &[], &Default::default());
+        let report = month::build(&cfg, m, &trips, &[], &Default::default(), &[]);
         let mil = mileage::compute(cfg.mileage.as_ref().unwrap(), None, m, &trips, &[]).unwrap();
         let mut buf = Vec::new();
         write(&cfg, &report, &lines(&cfg, &report, Some(&mil)), &mut buf).unwrap();
@@ -190,6 +190,7 @@ mod tests {
             &[],
             &[],
             &Default::default(),
+            &[],
         );
         let lines = [
             Line {

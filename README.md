@@ -105,8 +105,9 @@ another (office → customer) is working time too.
 
 A day's worked time is computed in this order:
 1. the periods at a work address, from the trips;
-2. minus private appointments (overlapping appointments count once; one
-   crossing midnight is split per date);
+2. minus private appointments and recorded private time (see below;
+   overlapping appointments count once; one crossing midnight is split per
+   date);
 3. minus the lunch break where it overlaps what is left (see below);
 4. rounding (`periods.round_to_minutes`).
 
@@ -130,6 +131,31 @@ and the working-time record show each day's window and its source
 The old `periods.unpaid_break_minutes` key is no longer accepted; use
 `[lunch]` instead.
 
+### Private time
+
+For private time that is not in the calendar or takes longer than planned
+(a doctor's visit with travel and waiting), press start when you leave and
+stop when you are back:
+
+```sh
+cargo run -- private start [label]   # links the current or next private event
+cargo run -- private stop
+cargo run -- private list 2026-11
+cargo run -- private edit <id> 12:25 14:10
+cargo run -- private rm <id>
+```
+
+`private start` links to the private calendar appointment that is running,
+or starts within 2 hours, that day, and takes its title as the label
+(otherwise `Privat`). `--event <title>` links another appointment that day;
+`--no-event` links none. Only one timer runs at a time.
+
+Recorded intervals are kept in `state.json` and count exactly like private
+appointments: they are deducted from worked time, shown in the day's note
+(e.g. `Privat 10:02–11:14 · private`), and trips starting during them are
+private. A linked interval replaces the appointment's planned window, so
+`Læge 13:00–14:00` measured as 12:30–14:10 deducts 1:40, once.
+
 Addresses are compared loosely:
 - case, punctuation and "Danmark" are ignored
 - the same street and number with the same (or a missing) postal code counts
@@ -143,6 +169,9 @@ check:
 - an arrival with no departure
 - driving on a day with no work address
 - a calendar entry with no address
+
+The report also flags a private timer still running past midnight or for more
+than 12 hours; stop it and fix the time with `private edit`.
 
 Public holidays are added automatically and always override the calendar.
 Store bededag counts only before 2024. Grundlovsdag, 24/12 and 31/12 can each

@@ -137,6 +137,17 @@ fn stamp(t: NaiveDateTime) -> String {
     t.format("%Y-%m-%d %H:%M").to_string()
 }
 
+/// How long a timer runs before the report flags it as forgotten.
+const FORGOTTEN_AFTER: Duration = Duration::hours(12);
+
+impl RunningTimer {
+    /// Whether the timer has run past midnight or longer than
+    /// [`FORGOTTEN_AFTER`] at `now`; the report flags it for fixing.
+    pub fn forgotten(&self, now: NaiveDateTime) -> bool {
+        now.date() > self.start.date() || now - self.start > FORGOTTEN_AFTER
+    }
+}
+
 impl Private {
     /// Starts the timer at `now`. The label defaults to the linked event's
     /// title, then [`DEFAULT_LABEL`].
@@ -532,6 +543,22 @@ mod tests {
         assert_eq!(p.intervals.iter().map(|i| i.id).collect::<Vec<_>>(), [2]);
         p.start(at("2026-11-07 10:00"), None, None).unwrap();
         assert_eq!(p.stop(at("2026-11-07 11:00")).unwrap().id, 3);
+    }
+
+    #[test]
+    fn forgotten_timer() {
+        let r = RunningTimer {
+            start: at("2026-11-03 08:00"),
+            label: DEFAULT_LABEL.into(),
+            replaces: None,
+        };
+        for (now, forgotten) in [
+            ("2026-11-03 20:00", false),
+            ("2026-11-03 20:01", true),
+            ("2026-11-04 00:00", true),
+        ] {
+            assert_eq!(r.forgotten(at(now)), forgotten, "{now}");
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ use chrono::{Datelike, NaiveDate};
 use clap::{Parser, Subcommand};
 
 use calendar::Occurrence;
-use config::Config;
+use config::{Config, MileageConfig};
 use mileage::MileageMonth;
 use month::{Month, MonthReport};
 use trips::Trip;
@@ -170,7 +170,14 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Norm { month } => {
             let month = Month::parse(&month)?;
-            let report = month::build(&cfg, month, &[], &calendar(&cfg, month)?, &BTreeMap::new());
+            let report = month::build(
+                &cfg,
+                month,
+                &[],
+                &calendar(&cfg, month)?,
+                &BTreeMap::new(),
+                &[],
+            );
             print_days(&report, false);
         }
         Command::Report { month, trips } => {
@@ -181,6 +188,18 @@ fn main() -> Result<()> {
             print_days(&report, true);
             if let Some(m) = mileage_for(&cfg, month, &trips, &cal)? {
                 print_mileage(&m);
+            }
+            let now = chrono::Utc::now()
+                .with_timezone(&cfg.timezone)
+                .naive_local();
+            if let Some(r) = state::State::load(&cfg.state_file)?.private.running
+                && r.forgotten(now)
+            {
+                println!(
+                    "\ncheck: private timer running since {} ({}); stop it and fix the time with `private edit`",
+                    r.start.format("%Y-%m-%d %H:%M"),
+                    r.label
+                );
             }
         }
         Command::Timesheet { month, trips, out } => {
@@ -198,8 +217,7 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = trips::load(&trips, cfg.timezone)?;
             let cal = calendar(&cfg, month)?;
-            let entries = timed_entries(&cfg, &cal);
-            let m = mileage::compute(mcfg, cfg.workplace.as_deref(), month, &trips, &entries)?;
+            let m = compute_mileage(&cfg, mcfg, month, &trips, &cal)?;
             mileage::write_logbook(mcfg, &m, create(&out)?)?;
             print_mileage(&m);
             println!("Wrote {}", out.display());
@@ -558,22 +576,42 @@ fn mileage_for(
 ) -> Result<Option<MileageMonth>> {
     cfg.mileage
         .as_ref()
-        .map(|m| {
-            let entries = timed_entries(cfg, cal);
-            mileage::compute(m, cfg.workplace.as_deref(), month, trips, &entries)
-        })
+        .map(|m| compute_mileage(cfg, m, month, trips, cal))
         .transpose()
 }
 
-/// The month's days, with the lunch overrides from the state file.
+/// The month's mileage; trips starting during recorded private time are
+/// private, like those during a private appointment.
+fn compute_mileage(
+    cfg: &Config,
+    mcfg: &MileageConfig,
+    month: Month,
+    trips: &[Trip],
+    cal: &[Occurrence],
+) -> Result<MileageMonth> {
+    let recorded = state::State::load(&cfg.state_file)?.private.intervals;
+    let mut entries = timed_entries(cfg, cal);
+    entries.extend(month::recorded_entries(&recorded, cfg.timezone));
+    mileage::compute(mcfg, cfg.workplace.as_deref(), month, trips, &entries)
+}
+
+/// The month's days, with the lunch overrides and recorded private time
+/// from the state file.
 fn build_month(
     cfg: &Config,
     month: Month,
     trips: &[Trip],
     cal: &[Occurrence],
 ) -> Result<MonthReport> {
-    let overrides = state::State::load(&cfg.state_file)?.lunch;
-    Ok(month::build(cfg, month, trips, cal, &overrides))
+    let state = state::State::load(&cfg.state_file)?;
+    Ok(month::build(
+        cfg,
+        month,
+        trips,
+        cal,
+        &state.lunch,
+        &state.private.intervals,
+    ))
 }
 
 /// The calendar's timed entries, classified with the configured private

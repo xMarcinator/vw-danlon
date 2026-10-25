@@ -12,7 +12,7 @@ use chrono_tz::Tz;
 
 use crate::calendar::Occurrence;
 use crate::config::Config;
-use crate::state::LunchOverride;
+use crate::state::{LunchOverride, PrivateInterval};
 use crate::trips::Trip;
 use crate::{address, holidays};
 
@@ -75,7 +75,8 @@ pub struct Day {
     pub off_reason: Option<String>,
     /// Work addresses for the day (calendar locations or the default).
     pub work_locations: Vec<String>,
-    /// Private appointments (not company time), already left out of `segments`.
+    /// Private appointments and recorded private time (not company time),
+    /// already left out of `segments`.
     pub appointments: Vec<Span>,
     /// Periods at a work address, minus private appointments.
     pub segments: Vec<Span>,
@@ -172,13 +173,16 @@ impl MonthReport {
 }
 
 /// The month's days. `lunch_overrides` (from the state file) beat a lunch
-/// calendar event, which beats the `[lunch]` default.
+/// calendar event, which beats the `[lunch]` default. `recorded` private
+/// time counts like a private appointment; one linked to an appointment
+/// replaces that appointment's planned window.
 pub fn build(
     cfg: &Config,
     month: Month,
     trips: &[Trip],
     calendar: &[Occurrence],
     lunch_overrides: &BTreeMap<NaiveDate, LunchOverride>,
+    recorded: &[PrivateInterval],
 ) -> MonthReport {
     let tz = cfg.timezone;
 
@@ -230,6 +234,18 @@ pub fn build(
             } => {
                 match classify(summary, private_words, &cfg.lunch.title) {
                     EntryKind::Private => {
+                        let measured =
+                            recorded
+                                .iter()
+                                .filter_map(|i| i.replaces.as_ref())
+                                .any(|w| {
+                                    w.title == *summary
+                                        && w.start == start.naive_local()
+                                        && w.end == end.naive_local()
+                                });
+                        if measured {
+                            continue;
+                        }
                         for span in split_at_midnight(*start, *end, tz) {
                             appointments
                                 .entry(span.0.date_naive())
@@ -264,6 +280,18 @@ pub fn build(
                 }
             }
         }
+    }
+
+    for (span, label) in recorded_spans(recorded, tz) {
+        for span in split_at_midnight(span.0, span.1, tz) {
+            appointments
+                .entry(span.0.date_naive())
+                .or_default()
+                .push((span, label));
+        }
+    }
+    for day in appointments.values_mut() {
+        day.sort_by_key(|(span, _)| *span);
     }
 
     // Trips are assigned to the local date they start on.
@@ -433,6 +461,30 @@ pub fn timed_entries<'a>(
             }),
             Occurrence::AllDay { .. } => None,
         })
+        .collect()
+}
+
+/// Recorded private time as private entries without an address, e.g. for
+/// classifying the trips that start during it.
+pub fn recorded_entries(recorded: &[PrivateInterval], tz: Tz) -> Vec<TimedEntry<'_>> {
+    recorded_spans(recorded, tz)
+        .into_iter()
+        .map(|((start, end), label)| TimedEntry {
+            kind: EntryKind::Private,
+            start,
+            end,
+            summary: label,
+            location: "",
+        })
+        .collect()
+}
+
+/// Recorded intervals in `tz`, with their labels.
+fn recorded_spans(recorded: &[PrivateInterval], tz: Tz) -> Vec<(Span, &str)> {
+    let local = |t| tz.from_local_datetime(&t).earliest();
+    recorded
+        .iter()
+        .filter_map(|i| Some(((local(i.start)?, local(i.end)?), i.label.as_str())))
         .collect()
 }
 
@@ -617,6 +669,7 @@ mod tests {
             &[],
             &[],
             &BTreeMap::new(),
+            &[],
         );
         // 22 weekdays, no holidays, 7.4 h each.
         assert!((r.norm_total() - 22.0 * 7.4).abs() < 1e-9);
@@ -632,6 +685,7 @@ mod tests {
             &[],
             &[],
             &BTreeMap::new(),
+            &[],
         );
         assert!((r.norm_total() - 20.0 * 7.4).abs() < 1e-9);
     }
@@ -650,6 +704,7 @@ mod tests {
             &trips,
             &[],
             &BTreeMap::new(),
+            &[],
         );
         let mon = &r.days[4];
         assert_eq!(mon.worked_hours, 9.0); // 07:30–17:00 minus 30 min
@@ -689,7 +744,7 @@ END:VEVENT
 ";
         let m = Month::parse("2026-10").unwrap();
         let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
-        let r = build(&cfg, m, &[], &occ, &BTreeMap::new());
+        let r = build(&cfg, m, &[], &occ, &BTreeMap::new(), &[]);
         // Mon–Thu 08:00–16:00 from 5 Oct minus the default lunch = 7,5 h: weeks of
         // 5, 12, 26 Oct = 12 days; 19–22 Oct are ferie.
         assert_eq!(r.norm_total(), 12.0 * 7.5);
@@ -782,7 +837,7 @@ END:VEVENT
                 "Bauhaus",
             ),
         ];
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
 
         let tue = &r.days[5];
         assert_eq!(tue.periods_text(), "08:40–11:30, 12:05–14:30");
@@ -806,7 +861,7 @@ END:VEVENT
 
         // With travel time, Tuesday runs from leaving home to arriving home.
         cfg.periods.count_travel_time = true;
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
         assert_eq!(r.days[5].periods_text(), "07:30–11:40, 11:55–15:40");
     }
 
@@ -848,7 +903,7 @@ END:VEVENT
             located_trip(&cfg, "2026-10-07 07:40", "2026-10-07 08:00", home, office),
             located_trip(&cfg, "2026-10-07 16:30", "2026-10-07 16:50", office, home),
         ];
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
         assert_eq!(r.days[5].periods_text(), "08:00–15:00");
         assert_eq!(r.days[6].periods_text(), "08:00–16:30");
         assert_eq!(r.days[6].note, None);
@@ -915,7 +970,7 @@ END:VEVENT
             located_trip(&cfg, "2026-10-08 07:40", "2026-10-08 08:00", home, office),
             located_trip(&cfg, "2026-10-08 16:00", "2026-10-08 16:20", office, home),
         ];
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
 
         // Monday: 07:58–16:00 minus Læge 10:00–11:15; norm stays 8 h.
         let mon = &r.days[4];
@@ -959,9 +1014,73 @@ END:VEVENT
 
         // An empty word list disables the feature.
         cfg.calendar.as_mut().unwrap().private_keywords.clear();
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
         assert_eq!(r.days[4].worked_hours, 482.0 / 60.0);
         assert!(r.days[4].appointments.is_empty());
+    }
+
+    #[test]
+    fn recorded_private_time_counts_like_an_appointment() {
+        let mut cfg = cfg("[calendar]\nsource = \"\"");
+        cfg.lunch.minutes = 0;
+        let ics = "BEGIN:VEVENT
+UID:w
+SUMMARY:Kontor
+LOCATION:Kontorvej 1\\, 8000 Aarhus C
+DTSTART;TZID=Europe/Copenhagen:20261102T080000
+DTEND;TZID=Europe/Copenhagen:20261102T160000
+RRULE:FREQ=DAILY;COUNT=2
+END:VEVENT
+BEGIN:VEVENT
+UID:l
+SUMMARY:Læge
+DTSTART;TZID=Europe/Copenhagen:20261103T130000
+DTEND;TZID=Europe/Copenhagen:20261103T140000
+END:VEVENT
+";
+        let m = Month::parse("2026-11").unwrap();
+        let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
+        let (home, office) = ("Hjem", "Kontorvej 1, 8000 Aarhus");
+        let mut trips = Vec::new();
+        for day in ["02", "03"] {
+            let at = |t: &str| format!("2026-11-{day} {t}");
+            trips.push(located_trip(&cfg, &at("07:40"), &at("08:00"), home, office));
+            trips.push(located_trip(&cfg, &at("16:00"), &at("16:20"), office, home));
+        }
+        let at = |s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        let recorded = [
+            PrivateInterval {
+                id: 1,
+                start: at("2026-11-02 10:02"),
+                end: at("2026-11-02 11:14"),
+                label: "Læge".into(),
+                replaces: None,
+            },
+            PrivateInterval {
+                id: 2,
+                start: at("2026-11-03 12:30"),
+                end: at("2026-11-03 14:10"),
+                label: "Læge".into(),
+                replaces: Some(crate::state::PlannedWindow {
+                    title: "Læge".into(),
+                    start: at("2026-11-03 13:00"),
+                    end: at("2026-11-03 14:00"),
+                }),
+            },
+        ];
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &recorded);
+
+        // Recorded 10:02–11:14 is deducted and noted like a calendar Læge.
+        let mon = &r.days[1];
+        assert_eq!(mon.periods_text(), "08:00–10:02, 11:14–16:00");
+        assert_eq!(mon.worked_hours, (480.0 - 72.0) / 60.0);
+        assert_eq!(mon.remark(), "Læge 10:02–11:14 · private");
+
+        // The linked 12:30–14:10 replaces the planned 13:00–14:00: 1:40 once.
+        let tue = &r.days[2];
+        assert_eq!(tue.periods_text(), "08:00–12:30, 14:10–16:00");
+        assert_eq!(tue.worked_hours, (480.0 - 100.0) / 60.0);
+        assert_eq!(tue.remark(), "Læge 12:30–14:10 · private");
     }
 
     #[test]
@@ -1041,7 +1160,7 @@ END:VEVENT
                 },
             ),
         ]);
-        let r = build(&cfg, m, &trips, &occ, &overrides);
+        let r = build(&cfg, m, &trips, &occ, &overrides, &[]);
         let day = |i: usize| (r.days[i].worked_hours * 60.0).round() as i64;
 
         // Normal day 07:52–16:05 (493 min): 30 min deducted.
