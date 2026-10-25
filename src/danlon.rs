@@ -166,7 +166,15 @@ mod tests {
         }];
         let m = Month::parse("2026-10").unwrap();
         let report = month::build(&cfg, m, &trips, &[], &Default::default(), &[]);
-        let mil = mileage::compute(cfg.mileage.as_ref().unwrap(), None, m, &trips, &[]).unwrap();
+        let mil = mileage::compute(
+            cfg.mileage.as_ref().unwrap(),
+            None,
+            &cfg.known_places,
+            m,
+            &trips,
+            &[],
+        )
+        .unwrap();
         let mut buf = Vec::new();
         write(&cfg, &report, &lines(&cfg, &report, Some(&mil)), &mut buf).unwrap();
         assert_eq!(

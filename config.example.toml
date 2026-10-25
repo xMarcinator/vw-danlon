@@ -6,6 +6,14 @@ timezone = "Europe/Copenhagen"
 # where the calendar says you are elsewhere (e.g. a colleague drives you on).
 workplace = "Kontorvej 1, 8000 Aarhus C"
 
+# Optional coordinates ("lat, lon", e.g. copied from a map) of home and the
+# workplace. A trip ending within radius_m metres of one counts as arriving
+# there, whatever address the trip export shows. `home` needs mileage.home.
+# [places]
+# workplace = "56.1572, 10.2107"
+# home = "56.1890, 10.1820"
+# radius_m = 150
+
 # Fallback norm hours per weekday, used when the calendar does not set the
 # norm (calendar.norm_from_calendar = false or no [calendar]).
 [work_week]

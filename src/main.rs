@@ -620,7 +620,14 @@ fn compute_mileage(
     let recorded = state::State::load(&cfg.state_file)?.private.intervals;
     let mut entries = timed_entries(cfg, cal);
     entries.extend(month::recorded_entries(&recorded, cfg.timezone));
-    mileage::compute(mcfg, cfg.workplace.as_deref(), month, trips, &entries)
+    mileage::compute(
+        mcfg,
+        cfg.workplace.as_deref(),
+        &cfg.known_places,
+        month,
+        trips,
+        &entries,
+    )
 }
 
 /// The month's days, with the lunch overrides and recorded private time

@@ -4,6 +4,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{NaiveTime, Weekday};
 use serde::Deserialize;
 
+use crate::address::Places;
+use crate::trips::Position;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -20,6 +23,8 @@ pub struct Config {
     /// work (e.g. when a colleague drives you on to the day's address), and
     /// home ↔ workplace trips are commuting, never mileage allowance.
     pub workplace: Option<String>,
+    /// Coordinates of home and the workplace (see [`PlacesConfig`]).
+    pub places: Option<PlacesConfig>,
     #[serde(default)]
     pub periods: PeriodConfig,
     #[serde(default)]
@@ -32,6 +37,9 @@ pub struct Config {
     /// The imported trips (`trips.json` beside the config file).
     #[serde(skip)]
     pub trip_store: PathBuf,
+    /// `[places]` resolved against the configured addresses.
+    #[serde(skip)]
+    pub known_places: Places,
 }
 
 fn default_timezone() -> chrono_tz::Tz {
@@ -187,6 +195,38 @@ impl Default for LunchConfig {
             minutes: default_lunch_minutes(),
             title: default_lunch_title(),
         }
+    }
+}
+
+/// Coordinates ("56.1694, 9.5432", as copied from a map) of home and the
+/// workplace. A trip ending within `radius_m` of one counts as arriving
+/// there, whatever address the trip export shows.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacesConfig {
+    pub home: Option<String>,
+    pub workplace: Option<String>,
+    #[serde(default = "default_radius")]
+    pub radius_m: f64,
+}
+
+fn default_radius() -> f64 {
+    150.0
+}
+
+/// A "lat, lon" coordinate pair.
+fn parse_position(key: &str, s: &str) -> Result<Position> {
+    let parsed = s.split_once(',').and_then(|(lat, lon)| {
+        Some(Position {
+            lat: lat.trim().parse().ok()?,
+            lon: lon.trim().parse().ok()?,
+        })
+    });
+    match parsed {
+        Some(p) if (-90.0..=90.0).contains(&p.lat) && (-180.0..=180.0).contains(&p.lon) => Ok(p),
+        _ => bail!(
+            "{key} = {s:?} is not a coordinate; expected \"lat, lon\", e.g. \"56.1694, 9.5432\""
+        ),
     }
 }
 
@@ -357,7 +397,41 @@ impl Config {
                 "periods.unpaid_break_minutes is no longer supported; set the lunch break in [lunch] (start, minutes, title)"
             );
         }
-        Ok(toml::from_str(text)?)
+        let mut cfg: Config = toml::from_str(text)?;
+        cfg.known_places = cfg.resolve_places()?;
+        Ok(cfg)
+    }
+
+    /// The `[places]` coordinates paired with the addresses they belong to.
+    fn resolve_places(&self) -> Result<Places> {
+        let Some(p) = &self.places else {
+            return Ok(Places::default());
+        };
+        if p.radius_m.is_nan() || p.radius_m <= 0.0 {
+            bail!("places.radius_m must be a positive number of metres");
+        }
+        let home = self.mileage.as_ref().and_then(|m| m.home.as_ref());
+        let mut known = Vec::new();
+        for (key, coord, address, needs) in [
+            ("places.home", &p.home, home, "mileage.home"),
+            (
+                "places.workplace",
+                &p.workplace,
+                self.workplace.as_ref(),
+                "workplace",
+            ),
+        ] {
+            let Some(coord) = coord else { continue };
+            let pos = parse_position(key, coord)?;
+            let Some(address) = address else {
+                bail!("{key} requires {needs} to be set");
+            };
+            known.push((address.clone(), pos));
+        }
+        Ok(Places {
+            known,
+            radius_m: p.radius_m,
+        })
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -393,5 +467,33 @@ mod tests {
         let err =
             Config::parse(&format!("{base}[periods]\nunpaid_break_minutes = 30\n")).unwrap_err();
         assert!(err.to_string().contains("[lunch]"), "{err}");
+    }
+
+    #[test]
+    fn places_coordinates() {
+        let base =
+            "employee_number = \"1\"\nworkplace = \"Kontorvej 1, 8000 Aarhus C\"\n[danlon]\n";
+        let cfg = Config::parse(&format!(
+            "{base}[places]\nworkplace = \"56.1694, 9.5432\"\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.known_places.radius_m, 150.0);
+        assert_eq!(
+            cfg.known_places.known,
+            [(
+                "Kontorvej 1, 8000 Aarhus C".to_string(),
+                Position {
+                    lat: 56.1694,
+                    lon: 9.5432
+                }
+            )]
+        );
+
+        for bad in ["\"56.1694\"", "\"95, 9.5\"", "\"nord, øst\""] {
+            let err = Config::parse(&format!("{base}[places]\nworkplace = {bad}\n")).unwrap_err();
+            assert!(err.to_string().contains("places.workplace"), "{err}");
+        }
+        let err = Config::parse(&format!("{base}[places]\nhome = \"56.1, 9.5\"\n")).unwrap_err();
+        assert!(err.to_string().contains("mileage.home"), "{err}");
     }
 }

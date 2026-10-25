@@ -10,11 +10,12 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone};
 use chrono_tz::Tz;
 
+use crate::address::{self, Places};
 use crate::calendar::Occurrence;
 use crate::config::Config;
+use crate::holidays;
 use crate::state::{LunchOverride, PrivateInterval};
 use crate::trips::Trip;
-use crate::{address, holidays};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Month {
@@ -373,7 +374,12 @@ pub fn build(
                     .then(|| "kørsel, men ingen arbejdsadresse i kalenderen".to_string());
                 (Vec::new(), note)
             } else {
-                work_segments(day_trips, &match_locations, cfg.periods.count_travel_time)
+                work_segments(
+                    day_trips,
+                    &match_locations,
+                    &cfg.known_places,
+                    cfg.periods.count_travel_time,
+                )
             };
             if note.is_none()
                 && let Some(summary) = missing_location.get(&date)
@@ -556,10 +562,12 @@ fn subtract(spans: &[Span], windows: &[Span]) -> Vec<Span> {
 /// Periods at a work address: from a trip arriving at one of `locations`
 /// until a trip departing from that address. A drive from one work address
 /// to another is working time; with `count_travel` the drives to and from
-/// work are included too.
+/// work are included too. `places` locates home and the workplace by
+/// coordinates too.
 fn work_segments(
     trips: &[&Trip],
     locations: &[String],
+    places: &Places,
     count_travel: bool,
 ) -> (Vec<Span>, Option<String>) {
     let mut segments: Vec<Span> = Vec::new();
@@ -567,7 +575,7 @@ fn work_segments(
     for t in trips {
         let mut left_work = false;
         if let Some((since, loc)) = at
-            && address::matches(&t.from, loc)
+            && places.at(&t.from, t.start_pos, loc)
         {
             let until = if count_travel { t.end } else { t.start };
             segments.push((since, until));
@@ -575,7 +583,7 @@ fn work_segments(
             left_work = true;
         }
         if at.is_none()
-            && let Some(loc) = locations.iter().find(|l| address::matches(&t.to, l))
+            && let Some(loc) = locations.iter().find(|l| places.at(&t.to, t.end_pos, l))
         {
             let since = if count_travel || left_work {
                 t.start
