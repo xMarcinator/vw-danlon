@@ -1,5 +1,5 @@
 ---
-satisfies: [R3, R4]
+satisfies: [R3, R4, R8]
 ---
 # fnt-21-dioxus-desktop-and-phone-app.3 Month and Day screens
 
@@ -25,3 +25,4 @@ TBD
 - Commits:
 - Tests:
 - PRs:
+

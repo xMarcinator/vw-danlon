@@ -11,6 +11,6 @@
   "spec": "fnt-21-dioxus-desktop-and-phone-app",
   "spec_path": ".flow/tasks/fnt-21-dioxus-desktop-and-phone-app.2.md",
   "status": "todo",
-  "title": "Dioxus app shell: desktop and Android, theme, navigation, secrets, Settings",
-  "updated_at": "2026-10-25T14:01:37.543444Z"
+  "title": "Dioxus app shell: responsive layout, theme, secrets, Settings",
+  "updated_at": "2026-10-25T14:06:00.992257Z"
 }

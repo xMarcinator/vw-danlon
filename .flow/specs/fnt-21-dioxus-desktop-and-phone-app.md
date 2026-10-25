@@ -1,4 +1,4 @@
-# fnt-21-dioxus-desktop-and-phone-app Dioxus desktop and phone app
+# fnt-21-dioxus-desktop-and-phone-app Dioxus app, responsive for desktop and Android
 
 ## Conversation Evidence
 
@@ -8,21 +8,22 @@
 
 ## Goal & Context
 
-A graphical app over vw-danlon for desktop and Android, with light and dark mode, written in Rust using Dioxus. It follows the mockup at https://claude.ai/artifact/K5zwEk1uPeNuifnnaZjZ2W, which uses the design system of https://claude.ai/artifact/UeddNBPX2SVMhcmm5AFWXV.
+One graphical app over vw-danlon that runs on desktop and Android with a responsive layout, with light and dark mode, written in Rust using Dioxus. It follows the mockup at https://claude.ai/artifact/K5zwEk1uPeNuifnnaZjZ2W, which uses the design system of https://claude.ai/artifact/UeddNBPX2SVMhcmm5AFWXV.
 <!-- Source: 55% user / 20% [paraphrase] / 25% [inferred] -->
 
 ## Architecture & Data Models
 
 - The working-time, mileage, calendar, vacation, state and Danløn logic moves into a library crate used by both the CLI and the app; the CLI keeps its behaviour byte for byte.
-- A Cargo workspace holds the library, the CLI and the Dioxus app. Desktop uses a sidebar, Android a bottom tab bar, as in the mockup.
+- A Cargo workspace holds the library, the CLI and the Dioxus app. There is one app and one set of screens; the layout follows the window width, not the platform: wide shows the sidebar, narrow shows bottom tabs, as in the mockup's desktop and phone boards. Only packaging, the secret store and the file picker differ per platform.
 - The Danløn send flow is split into a pure plan (FNT-19) and an executor, so the app confirms in a dialog where the CLI prompts on stdin.
 
 ```mermaid
 flowchart LR
   L[vw-danlon library] --> CLI[CLI binary]
   L --> APP[Dioxus app]
-  APP --> D[Desktop: sidebar]
-  APP --> A[Android: bottom tabs]
+  APP --> W[Wide: sidebar]
+  APP --> N[Narrow: bottom tabs]
+  APP --> P[Platform shims: secrets, file picker, packaging]
   APP --> K[Secret store]
 ```
 
@@ -46,6 +47,7 @@ flowchart LR
 - **R5:** Sending to Danløn from the app shows the send plan (own and foreign waiting parts) and sends only after confirmation. Errors: Danløn unreachable or token refused → nothing is sent and the reason is shown. [inferred]
 - **R6:** Secrets are kept in the platform's secret store. Errors: store unavailable → the app says so and does not fall back to a plain file. [inferred]
 - **R7:** The user can import a trips file on desktop and Android. Errors: an unreadable or malformed file is rejected with the first bad line named. [inferred]
+- **R8:** The layout follows the window width on every platform: wide shows the sidebar, narrow shows bottom tabs, with the same screens and features. No error surface. [paraphrase]
 
 ## Early proof point
 
@@ -80,4 +82,6 @@ dx serve -p vw-danlon-app --platform desktop
 | R5 | Sending to Danløn from the app shows the send plan (own and foreign waiting parts) and sends only after confirmation. Errors: Danløn unreachable or token refused → nothing is sent and the reason is shown. | fnt-21-dioxus-desktop-and-phone-app.5 | — |
 | R6 | Secrets are kept in the platform's secret store. Errors: store unavailable → the app says so and does not fall back to a plain file. | fnt-21-dioxus-desktop-and-phone-app.2 | — |
 | R7 | The user can import a trips file on desktop and Android. Errors: an unreadable or malformed file is rejected with the first bad line named. | fnt-21-dioxus-desktop-and-phone-app.4 | — |
+| R8 | The layout follows the window width on every platform: wide shows the sidebar, narrow shows bottom tabs, with the same screens and features. No error surface. | fnt-21-dioxus-desktop-and-phone-app.2, fnt-21-dioxus-desktop-and-phone-app.3 | — |
+
 

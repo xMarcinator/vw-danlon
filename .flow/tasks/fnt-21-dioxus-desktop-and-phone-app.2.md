@@ -1,10 +1,10 @@
 ---
-satisfies: [R1, R2, R6]
+satisfies: [R1, R2, R6, R8]
 ---
-# fnt-21-dioxus-desktop-and-phone-app.2 Dioxus app shell: desktop and Android, theme, navigation, secrets, Settings
+# fnt-21-dioxus-desktop-and-phone-app.2 Dioxus app shell: responsive layout, theme, secrets, Settings
 
 ## Description
-Create the Dioxus app crate building for Linux desktop and Android, with light/dark/system theme from the design-system tokens, sidebar (desktop) and bottom tabs (narrow/Android), and a Settings screen that stores secrets in the platform secret store.
+Create the Dioxus app crate building for Linux desktop and Android, with light/dark/system theme from the design-system tokens, one responsive layout (sidebar when wide, bottom tabs when narrow, on any platform), and a Settings screen that stores secrets in the platform secret store.
 
 **Size:** M
 **Files:** `app/Cargo.toml`, `app/src/**`, `app/assets/**`, `Dioxus.toml`
@@ -26,6 +26,7 @@ Check current Dioxus release docs for Android build (`dx build --platform androi
 - [ ] Theme switch light/dark/system works on desktop
 - [ ] Secrets saved and read back via the secret store; store failure shown, no file fallback
 - [ ] Missing config opens Settings with the problem named
+- [ ] Narrowing the desktop window switches sidebar to bottom tabs; Android shows bottom tabs
 
 ## Done summary
 TBD
@@ -34,3 +35,4 @@ TBD
 - Commits:
 - Tests:
 - PRs:
+
