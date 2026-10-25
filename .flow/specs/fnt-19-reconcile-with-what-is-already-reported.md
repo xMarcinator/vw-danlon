@@ -6,6 +6,10 @@
 > user (turn 11): "Yes, add sending the export to Danløn through its API. I'll get the refresh token from Danløn."
 > user (turn 22, selected): "Replace own lines (Recommended)"
 
+## Status: parked (2026-10-25)
+
+The user is an employee and the tool must stay invisible to payroll, so it never connects to Danløn. This spec only applies if the employer ever connects an integration themselves. Not in the delivery order.
+
 ## Goal & Context
 
 Before the tool sends pay lines it must know what is already waiting in Danløn for the employee, so nothing is sent twice. Re-sending a corrected month is the normal case: the tool replaces the lines it sent itself, and never changes lines someone else entered.
@@ -67,4 +71,5 @@ cargo run -- export 2026-10 -t examples/trips.csv -c config.example.toml --send
 | R2 | When this tool's own waiting parts exist for a code it sends again, it deletes them and creates the new ones after confirmation, and records the new ids. Errors: a delete that fails stops before creating anything; a create that fails after deletes reports the deleted ids and the lines not sent. | fnt-19-reconcile-with-what-is-already-reported.1, fnt-19-reconcile-with-what-is-already-reported.2 | — |
 | R3 | When foreign waiting parts exist for a code, the tool shows them and sends that code only on explicit confirmation; with `--yes` that code is refused. No error surface beyond R1. | fnt-19-reconcile-with-what-is-already-reported.1, fnt-19-reconcile-with-what-is-already-reported.2 | — |
 | R4 | Pay parts this tool did not create are never changed or deleted by it. No error surface. | fnt-19-reconcile-with-what-is-already-reported.1 | — |
+
 

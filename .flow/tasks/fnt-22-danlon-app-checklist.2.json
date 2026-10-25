@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T15:44:47.113893Z",
+  "depends_on": [
+    "fnt-22-danlon-app-checklist.1"
+  ],
+  "id": "fnt-22-danlon-app-checklist.2",
+  "priority": null,
+  "spec": "fnt-22-danlon-app-checklist",
+  "spec_path": ".flow/tasks/fnt-22-danlon-app-checklist.2.md",
+  "status": "todo",
+  "title": "checklist CLI with tick-off in the state file; docs",
+  "updated_at": "2026-10-25T15:44:47.113893Z"
+}

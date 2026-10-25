@@ -2,8 +2,7 @@
   "branch_name": "fnt-20-vacation-registration-and-balance",
   "created_at": "2026-10-25T13:46:01.370098Z",
   "depends_on_epics": [
-    "fnt-17-private-appointments-are-not-company",
-    "fnt-19-reconcile-with-what-is-already-reported"
+    "fnt-22-danlon-app-checklist"
   ],
   "id": "fnt-20-vacation-registration-and-balance",
   "next_task": 1,
@@ -23,5 +22,5 @@
     "mergeBaseTracker": null,
     "url": null
   },
-  "updated_at": "2026-10-25T14:02:01.179548Z"
+  "updated_at": "2026-10-25T15:45:50.013874Z"
 }

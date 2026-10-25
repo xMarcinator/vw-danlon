@@ -2,9 +2,6 @@
   "branch_name": "fnt-21-dioxus-desktop-and-phone-app",
   "created_at": "2026-10-25T13:46:01.720257Z",
   "depends_on_epics": [
-    "fnt-17-private-appointments-are-not-company",
-    "fnt-18-lunch-break-with-per-day-override",
-    "fnt-19-reconcile-with-what-is-already-reported",
     "fnt-20-vacation-registration-and-balance"
   ],
   "id": "fnt-21-dioxus-desktop-and-phone-app",
@@ -25,5 +22,5 @@
     "mergeBaseTracker": null,
     "url": null
   },
-  "updated_at": "2026-10-25T14:05:34.739405Z"
+  "updated_at": "2026-10-25T15:45:50.726947Z"
 }

@@ -33,7 +33,7 @@ The user registers vacation as all-day events in the work calendar, as today. Th
 - **R1:** An all-day calendar event whose title contains a vacation word is vacation, and only its working days count. Errors: an event with no working days counts 0 and is listed with that note.
 - **R2:** Vacation days are days off with norm 0 and the reason "Ferie" (or "Feriefridag"). No error surface beyond R1. [paraphrase]
 - **R3:** `vacation` shows earned, taken and planned days for the current ferieår and the balance after each period; feriefridage are counted separately. Errors: a balance below zero is flagged as forskudsferie; a missing employment start is stated. [inferred]
-- **R4:** The Danløn export includes code 60 with the month's vacation days; own waiting code-60 parts are replaced per FNT-19, and a difference against foreign waiting code-60 parts is shown with both counts. No error surface beyond FNT-19's. [inferred]
+- **R4 (dropped 2026-10-25):** ~~Danløn export with code 60~~. The tool stays invisible to payroll and sends nothing to Danløn; vacation days simply show as "nothing to enter" in the Danløn app checklist (FNT-22).
 
 ## Early proof point
 
@@ -66,5 +66,4 @@ cargo run -- -c config.example.toml vacation
 | R1 | An all-day calendar event whose title contains a vacation word is vacation, and only its working days count. Errors: an event with no working days counts 0 and is listed with that note. | fnt-20-vacation-registration-and-balance.1 | — |
 | R2 | Vacation days are days off with norm 0 and the reason "Ferie" (or "Feriefridag"). No error surface beyond R1. | fnt-20-vacation-registration-and-balance.1 | — |
 | R3 | `vacation` shows earned, taken and planned days for the current ferieår and the balance after each period; feriefridage are counted separately. Errors: a balance below zero is flagged as forskudsferie; a missing employment start is stated. | fnt-20-vacation-registration-and-balance.1 | — |
-| R4 | The Danløn export includes code 60 with the month's vacation days; own waiting code-60 parts are replaced per FNT-19, and a difference against foreign waiting code-60 parts is shown with both counts. No error surface beyond FNT-19's. | fnt-20-vacation-registration-and-balance.2 | — |
-
+| R4 | (dropped 2026-10-25): ~~Danløn export with code 60~~. The tool stays invisible to payroll and sends nothing to Danløn; vacation days simply show as "nothing to enter" in the Danløn app checklist (FNT-22). | — | Uncovered |
