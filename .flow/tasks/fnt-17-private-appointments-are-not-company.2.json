@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T14:01:34.673579Z",
+  "depends_on": [
+    "fnt-17-private-appointments-are-not-company.1"
+  ],
+  "id": "fnt-17-private-appointments-are-not-company.2",
+  "priority": null,
+  "spec": "fnt-17-private-appointments-are-not-company",
+  "spec_path": ".flow/tasks/fnt-17-private-appointments-are-not-company.2.md",
+  "status": "todo",
+  "title": "Mark trips to and from private appointments as private; docs",
+  "updated_at": "2026-10-25T14:01:34.673579Z"
+}

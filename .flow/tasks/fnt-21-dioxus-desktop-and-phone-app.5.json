@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T14:01:37.543520Z",
+  "depends_on": [
+    "fnt-21-dioxus-desktop-and-phone-app.2"
+  ],
+  "id": "fnt-21-dioxus-desktop-and-phone-app.5",
+  "priority": null,
+  "spec": "fnt-21-dioxus-desktop-and-phone-app",
+  "spec_path": ".flow/tasks/fnt-21-dioxus-desktop-and-phone-app.5.md",
+  "status": "todo",
+  "title": "Send to Danl\u00f8n screen",
+  "updated_at": "2026-10-25T14:01:37.543520Z"
+}

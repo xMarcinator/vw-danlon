@@ -1,0 +1,26 @@
+{
+  "branch_name": "fnt-18-lunch-break-with-per-day-override",
+  "created_at": "2026-10-25T13:46:00.687369Z",
+  "depends_on_epics": [
+    "fnt-17-private-appointments-are-not-company"
+  ],
+  "id": "fnt-18-lunch-break-with-per-day-override",
+  "next_task": 1,
+  "plan_review_status": "unknown",
+  "plan_reviewed_at": null,
+  "spec_path": ".flow/specs/fnt-18-lunch-break-with-per-day-override.md",
+  "status": "open",
+  "title": "Lunch break with per-day override",
+  "tracker": {
+    "baseHashFlow": null,
+    "baseHashTracker": null,
+    "depRelations": [],
+    "id": null,
+    "identifier": "FNT-18",
+    "lastSyncedAt": null,
+    "mergeBaseFlow": null,
+    "mergeBaseTracker": null,
+    "url": null
+  },
+  "updated_at": "2026-10-25T14:02:00.406365Z"
+}

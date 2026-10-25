@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T14:01:36.123918Z",
+  "depends_on": [
+    "fnt-19-reconcile-with-what-is-already-reported.1"
+  ],
+  "id": "fnt-19-reconcile-with-what-is-already-reported.2",
+  "priority": null,
+  "spec": "fnt-19-reconcile-with-what-is-already-reported",
+  "spec_path": ".flow/tasks/fnt-19-reconcile-with-what-is-already-reported.2.md",
+  "status": "todo",
+  "title": "Send flow: show waiting parts, replace own, confirm foreign; docs",
+  "updated_at": "2026-10-25T14:01:36.123918Z"
+}

@@ -1,0 +1,27 @@
+{
+  "branch_name": "fnt-20-vacation-registration-and-balance",
+  "created_at": "2026-10-25T13:46:01.370098Z",
+  "depends_on_epics": [
+    "fnt-17-private-appointments-are-not-company",
+    "fnt-19-reconcile-with-what-is-already-reported"
+  ],
+  "id": "fnt-20-vacation-registration-and-balance",
+  "next_task": 1,
+  "plan_review_status": "unknown",
+  "plan_reviewed_at": null,
+  "spec_path": ".flow/specs/fnt-20-vacation-registration-and-balance.md",
+  "status": "open",
+  "title": "Vacation registration and balance",
+  "tracker": {
+    "baseHashFlow": null,
+    "baseHashTracker": null,
+    "depRelations": [],
+    "id": null,
+    "identifier": "FNT-20",
+    "lastSyncedAt": null,
+    "mergeBaseFlow": null,
+    "mergeBaseTracker": null,
+    "url": null
+  },
+  "updated_at": "2026-10-25T14:02:01.179548Z"
+}

@@ -1,0 +1,26 @@
+{
+  "branch_name": "fnt-19-reconcile-with-what-is-already-reported",
+  "created_at": "2026-10-25T13:46:01.027999Z",
+  "depends_on_epics": [
+    "fnt-18-lunch-break-with-per-day-override"
+  ],
+  "id": "fnt-19-reconcile-with-what-is-already-reported",
+  "next_task": 1,
+  "plan_review_status": "unknown",
+  "plan_reviewed_at": null,
+  "spec_path": ".flow/specs/fnt-19-reconcile-with-what-is-already-reported.md",
+  "status": "open",
+  "title": "Reconcile with what is already reported in Danlon",
+  "tracker": {
+    "baseHashFlow": null,
+    "baseHashTracker": null,
+    "depRelations": [],
+    "id": null,
+    "identifier": "FNT-19",
+    "lastSyncedAt": null,
+    "mergeBaseFlow": null,
+    "mergeBaseTracker": null,
+    "url": null
+  },
+  "updated_at": "2026-10-25T14:02:00.800672Z"
+}

@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T14:01:35.406964Z",
+  "depends_on": [
+    "fnt-18-lunch-break-with-per-day-override.1"
+  ],
+  "id": "fnt-18-lunch-break-with-per-day-override.2",
+  "priority": null,
+  "spec": "fnt-18-lunch-break-with-per-day-override",
+  "spec_path": ".flow/tasks/fnt-18-lunch-break-with-per-day-override.2.md",
+  "status": "todo",
+  "title": "Lunch window resolution and overlap deduction",
+  "updated_at": "2026-10-25T14:01:35.406964Z"
+}

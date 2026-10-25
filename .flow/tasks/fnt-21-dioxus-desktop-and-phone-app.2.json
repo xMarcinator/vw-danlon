@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T14:01:37.543444Z",
+  "depends_on": [
+    "fnt-21-dioxus-desktop-and-phone-app.1"
+  ],
+  "id": "fnt-21-dioxus-desktop-and-phone-app.2",
+  "priority": null,
+  "spec": "fnt-21-dioxus-desktop-and-phone-app",
+  "spec_path": ".flow/tasks/fnt-21-dioxus-desktop-and-phone-app.2.md",
+  "status": "todo",
+  "title": "Dioxus app shell: desktop and Android, theme, navigation, secrets, Settings",
+  "updated_at": "2026-10-25T14:01:37.543444Z"
+}

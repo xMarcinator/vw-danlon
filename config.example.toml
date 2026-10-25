@@ -1,0 +1,77 @@
+# Your employee number in Danløn — must match exactly.
+employee_number = "1"
+timezone = "Europe/Copenhagen"
+
+# Fixed workplace. Arriving here always counts as being at work, also on days
+# where the calendar says you are elsewhere (e.g. a colleague drives you on).
+workplace = "Kontorvej 1, 8000 Aarhus C"
+
+# Fallback norm hours per weekday, used when the calendar does not set the
+# norm (calendar.norm_from_calendar = false or no [calendar]).
+[work_week]
+mon = 7.4
+tue = 7.4
+wed = 7.4
+thu = 7.4
+fri = 7.4
+
+[holidays]
+danish_public = true   # helligdage (Store bededag only before 2024)
+grundlovsdag = true
+christmas_eve = true
+new_years_eve = true
+
+# Proton Calendar: Settings → All settings → Calendars → (your calendar) →
+# "Share with anyone" → Create link (full view). Paste the link here.
+# Use a dedicated calendar, e.g. "Arbejdstid":
+#  - timed events for your working hours, each with the work ADDRESS in the
+#    location field (a repeating event for your normal week, single events
+#    for days at other addresses)
+#  - all-day events for ferie / fridage
+# Working time = from arriving at the event's address until leaving it.
+[calendar]
+source = "examples/arbejdstid.ics"   # or "https://calendar.proton.me/api/calendar/v1/url/…"
+name = "Arbejdstid"                   # refuse to run if the link points at another calendar
+norm_from_calendar = true
+days_off_keywords = []                # e.g. ["ferie", "fri"] to filter all-day events
+# default_location = "Kontorvej 1, 8000 Aarhus C"   # for days without a located entry
+
+[periods]
+unpaid_break_minutes = 0
+round_to_minutes = 0
+count_travel_time = false   # true: include the drive to/from the work address
+
+# Tax-free mileage allowance (skattefri kørselsgodtgørelse).
+[mileage]
+driver_name = "Dit Navn"
+registration_number = "AB12345"
+home = "Hjemvej 3, 8200 Aarhus N"   # with workplace: home ↔ workplace is commuting, never reimbursed
+
+# Rates from Skatterådet. VERIFY on skat.dk before use.
+[[mileage.rates]]
+year = 2026
+low = 3.94             # kr/km up to 20,000 km per year
+high = 2.28            # kr/km above
+threshold_km = 20000
+
+[danlon]
+# "none": Danløn reports its own Normtimer (160,33 for 37 h/week), which is
+#         what Skat expects for full-time monthly salaried employees.
+# "actual": also export actual worked hours on hours_lonart.
+hours = "none"
+# hours_lonart = "XXXX"
+# Lønart for skattefri kørselsgodtgørelse. 39 = Kilometerpenge: Danløn takes
+# only the km and applies its own rate. Check with `danlon info`.
+mileage_lonart = "39"
+# File layout — check against Danløn's file description before first import.
+delimiter = ";"
+decimal_comma = true
+header = false
+columns = ["employee", "lonart", "quantity"]   # code 39 allows no rate
+
+# Sending directly with `export --send` (Danløn GraphQL API). The refresh
+# token comes from DANLON_REFRESH_TOKEN, or from this file:
+[danlon.api]
+# refresh_token_file = "danlon-token"   # relative to this config file
+# company_id = ""    # default: the company the token belongs to
+# employee_id = ""   # default: the employee whose number is employee_number
