@@ -1,5 +1,5 @@
 ---
-satisfies: [R2, R4, R5]
+satisfies: [R2, R4, R5, R6]
 ---
 # fnt-23-private-time-timer.2 Recorded private time counts like appointments; report flag; docs
 
@@ -11,6 +11,7 @@ Feed recorded intervals into `month::build` alongside calendar private appointme
 **Touches:** [src/month.rs, src/mileage.rs, src/main.rs, README.md]
 
 ## Acceptance
+- [ ] Test: a linked 12:30–14:10 interval replaces the planned Læge 13:00–14:00 (deducted once, 1:40)
 - [ ] Test: a recorded 10:02–11:14 interval is deducted and noted like a calendar Læge event
 - [ ] Test: a trip starting inside a recorded interval is private
 - [ ] A timer running past midnight or >12 h is flagged in `report`
@@ -23,3 +24,4 @@ TBD
 - Commits:
 - Tests:
 - PRs:
+
