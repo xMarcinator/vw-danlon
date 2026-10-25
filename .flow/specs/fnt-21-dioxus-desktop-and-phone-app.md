@@ -13,9 +13,9 @@ One graphical app over vw-danlon that runs on desktop and Android with a respons
 
 ## Architecture & Data Models
 
-- The working-time, mileage, calendar, vacation, state and Danløn logic moves into a library crate used by both the CLI and the app; the CLI keeps its behaviour byte for byte.
+- The working-time, mileage, calendar, vacation, state, checklist, trip-store, account-sync and private-timer logic moves into a library crate used by both the CLI and the app; the CLI keeps its behaviour byte for byte.
 - A Cargo workspace holds the library, the CLI and the Dioxus app. There is one app and one set of screens; the layout follows the window width, not the platform: wide shows the sidebar, narrow shows bottom tabs, as in the mockup's desktop and phone boards. Only packaging, the secret store and the file picker differ per platform.
-- The Danløn send flow is split into a pure plan (FNT-19) and an executor, so the app confirms in a dialog where the CLI prompts on stdin.
+- (2026-10-25) There is no Danløn send flow any more (FNT-22 removed the API); the app never connects to Danløn.
 
 ```mermaid
 flowchart LR
@@ -29,14 +29,13 @@ flowchart LR
 
 ## API Contracts
 
-- Screens: Month, Day, Vacation, Mileage logbook, Send to Danløn, Settings, each showing the data the matching CLI command shows.
+- Screens: Month, Day, Vacation, Mileage logbook, Danløn app checklist, Settings, each showing the data the matching CLI command shows.
 - Theme: light, dark and system, using the design system's colour tokens and IBM Plex Sans.
 
 ## Edge Cases & Constraints
 
-- Secrets (calendar link, Danløn token): the OS keychain on desktop and Android Keystore-backed storage on Android; the CLI keeps reading its config file and environment. [inferred]
-- Trips reach the app by importing a CSV or JSON trips file (desktop file picker, Android document picker). [inferred]
-- Sending to Danløn always shows the plan and asks before sending.
+- Secrets (calendar link, Connected Cars device token): the OS keychain on desktop and Android Keystore-backed storage on Android; the CLI keeps reading its config file and environment. [inferred]
+- Trips reach the app by importing the Min Volkswagen .xlsx export (FNT-24; desktop file picker, Android document picker or share target) or by the account sync (FNT-25). [paraphrase]
 
 ## Acceptance Criteria
 
@@ -45,8 +44,8 @@ flowchart LR
 - **R3:** The app has the Month, Day, Vacation, Mileage logbook, Danløn app checklist and Settings screens, laid out as in the mockup. No error surface beyond R1. [paraphrase]
 - **R4:** For the same config, calendar and trips, the app shows the same hours, mileage, vacation and pay lines as the CLI, and the CLI's output is unchanged by the library split. No error surface beyond R1. [inferred]
 - **R5 (superseded 2026-10-25 by R9):** ~~Send to Danløn from the app~~. The app never connects to Danløn.
-- **R6:** Secrets are kept in the platform's secret store. Errors: store unavailable → the app says so and does not fall back to a plain file. [inferred]
-- **R7:** The user can import a trips file on desktop and Android. Errors: an unreadable or malformed file is rejected with the first bad line named. [inferred]
+- **R6:** Secrets are kept in the platform's secret store. Errors: store unavailable → the app says so; like the CLI's `token_file` (FNT-25), a file readable only by the user is used only when the user opts in. [inferred]
+- **R7:** The user can import the Min Volkswagen export (or a CSV/JSON trips file) on desktop and Android and run the account sync from Settings. Errors: an unreadable or malformed file is rejected with the first bad row named; sync errors as FNT-25. [inferred]
 - **R8:** The layout follows the window width on every platform: wide shows the sidebar, narrow shows bottom tabs, with the same screens and features. No error surface. [paraphrase]
 - **R9:** The Danløn screen is the Danløn app checklist (FNT-22): per-day Komme/gå and Kørsel registrations, one Copy button per text or number field, times shown large, tick-off per day. No error surface beyond FNT-22.
 - **R10 (superseded 2026-10-25 by R11):** ~~The Month screen has a private-time Start/Stop button~~
