@@ -32,6 +32,8 @@ pub struct Config {
     pub mileage: Option<MileageConfig>,
     #[serde(default)]
     pub checklist: ChecklistConfig,
+    /// The Min Volkswagen account (Connected Cars) for `trips sync`.
+    pub connected_cars: Option<ConnectedCarsConfig>,
     pub danlon: DanlonConfig,
     /// The local state file (`state.json` beside the config file).
     #[serde(skip)]
@@ -259,6 +261,24 @@ impl Default for ChecklistConfig {
             workplace_name: default_workplace_name(),
         }
     }
+}
+
+/// The Min Volkswagen account, read through the Connected Cars backend. The
+/// password is never stored; `account connect` keeps a device token in the
+/// operating system's keychain.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectedCarsConfig {
+    /// Account email, offered as the default by `account connect`.
+    pub email: Option<String>,
+    /// Licence plate or vehicle id; needed when the account has several cars.
+    pub vehicle: Option<String>,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+fn default_namespace() -> String {
+    "semler:minvolkswagen".into()
 }
 
 /// Tax-free mileage allowance (skattefri kørselsgodtgørelse).

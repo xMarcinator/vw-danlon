@@ -2,6 +2,7 @@ mod address;
 mod calendar;
 mod checklist;
 mod config;
+mod connected_cars;
 mod danlon;
 mod holidays;
 mod mileage;
@@ -105,6 +106,11 @@ enum Command {
         #[command(subcommand)]
         action: PrivateAction,
     },
+    /// The Min Volkswagen account for trip sync (device token in the keychain).
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Imported trips (stored in trips.json beside the config).
     Trips {
         #[command(subcommand)]
@@ -126,6 +132,26 @@ enum ChecklistAction {
     Unmark {
         /// Day as YYYY-MM-DD.
         date: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountAction {
+    /// Log in once with email and password (asked here, never stored) and
+    /// keep a device token in the keychain.
+    Connect,
+    /// Delete the stored device token.
+    Disconnect,
+    /// Show whether an account is connected and when trips were last synced.
+    Status,
+    /// Fetch the trips of a period without storing them, to check the access.
+    Check {
+        /// First day as YYYY-MM-DD (default: 30 days ago).
+        #[arg(long)]
+        from: Option<String>,
+        /// Last day as YYYY-MM-DD (default: today).
+        #[arg(long)]
+        to: Option<String>,
     },
 }
 
@@ -275,6 +301,7 @@ fn main() -> Result<()> {
         } => checklist(&cfg, month, trips, action)?,
         Command::Lunch { action } => lunch(&cfg, action)?,
         Command::Private { action } => private(&cfg, action)?,
+        Command::Account { action } => account(&cfg, action)?,
         Command::Trips {
             action: TripsAction::Import { file },
         } => import_trips(&cfg, &file)?,
@@ -300,6 +327,150 @@ fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
         println!("Period: {first} – {last}");
     }
     Ok(())
+}
+
+fn account(cfg: &Config, action: AccountAction) -> Result<()> {
+    let cc = cfg.connected_cars.as_ref();
+    let namespace = cc.map_or("semler:minvolkswagen", |c| c.namespace.as_str());
+    let state = state::State::load(&cfg.state_file)?;
+    // The connected account, else the configured one.
+    let email = state
+        .account
+        .as_ref()
+        .map(|a| a.email.clone())
+        .or_else(|| cc.and_then(|c| c.email.clone()));
+    match action {
+        AccountAction::Connect => {
+            let email = prompt_email(email.as_deref())?;
+            connected_cars::check_keychain(&email)?;
+            let password = rpassword::prompt_password("Password (not shown, never stored): ")
+                .context("reading the password")?;
+            let token = connected_cars::register_device(namespace, &email, &password)?;
+            drop(password);
+            connected_cars::store_token(&email, &token)?;
+            state::State::update(&cfg.state_file, |s| {
+                let last_sync = s
+                    .account
+                    .take()
+                    .filter(|a| a.email == email)
+                    .and_then(|a| a.last_sync);
+                s.account = Some(state::Account {
+                    email: email.clone(),
+                    last_sync,
+                });
+            })?;
+            println!("Connected {email}; the device token is in the keychain");
+        }
+        AccountAction::Disconnect => {
+            let Some(email) = email else {
+                println!("Not connected");
+                return Ok(());
+            };
+            let deleted = connected_cars::delete_token(&email)?;
+            state::State::update(&cfg.state_file, |s| s.account = None)?;
+            if deleted {
+                println!("Disconnected {email}; the device token is deleted");
+            } else {
+                println!("Not connected ({email} has no device token in the keychain)");
+            }
+        }
+        AccountAction::Status => {
+            let connected = match &email {
+                Some(e) => connected_cars::stored_token(e)?.is_some(),
+                None => false,
+            };
+            match (&email, connected) {
+                (Some(e), true) => println!("Connected: {e} (device token in the keychain)"),
+                _ => println!("Not connected: run `account connect`, or use `trips import`"),
+            }
+            let last = state.account.as_ref().and_then(|a| a.last_sync);
+            match last {
+                Some(t) => println!(
+                    "Last sync: {}",
+                    t.with_timezone(&cfg.timezone).format("%Y-%m-%d %H:%M")
+                ),
+                None => println!("Last sync: never"),
+            }
+        }
+        AccountAction::Check { from, to } => {
+            let token = email
+                .as_deref()
+                .map(connected_cars::stored_token)
+                .transpose()?
+                .flatten()
+                .context("no device token: run `account connect`, or use `trips import`")?;
+            let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
+            let to = to
+                .as_deref()
+                .map(state::parse_date)
+                .transpose()?
+                .unwrap_or(today);
+            let from = match from {
+                Some(f) => state::parse_date(&f)?,
+                None => to - chrono::Duration::days(30),
+            };
+            let session = connected_cars::Session::login(namespace, &token)?;
+            let vehicles = session.vehicles()?;
+            let vehicle =
+                connected_cars::pick_vehicle(&vehicles, cc.and_then(|c| c.vehicle.as_deref()))?;
+            let at = |d: NaiveDate| {
+                use chrono::TimeZone;
+                cfg.timezone
+                    .from_local_datetime(&d.and_time(chrono::NaiveTime::MIN))
+                    .earliest()
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .with_context(|| format!("{d} has no midnight in {}", cfg.timezone))
+            };
+            let trips = session.trips(
+                &vehicle.id,
+                at(from)?,
+                at(to + chrono::Duration::days(1))?,
+                cfg.timezone,
+            )?;
+            println!("Vehicle {} (id {})", vehicle.plate, vehicle.id);
+            println!("{} trips {from} – {to} (nothing stored)", trips.len());
+            let km: f64 = trips.iter().filter_map(|t| t.trip.distance_km).sum();
+            println!("{km:.1} km");
+            let missing = connected_cars::without_position(&trips);
+            if missing > 0 {
+                println!("{missing} trips without position: turn on position sharing in the app");
+            }
+            for t in trips.iter().rev().take(3) {
+                let t = &t.trip;
+                println!(
+                    "  {} – {}  {:>6} km  {} → {}",
+                    t.start.format("%Y-%m-%d %H:%M"),
+                    t.end.format("%H:%M"),
+                    t.distance_km.map_or("?".into(), |k| format!("{k:.1}")),
+                    t.from,
+                    t.to
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Asks for the account email; Enter keeps `default`.
+fn prompt_email(default: Option<&str>) -> Result<String> {
+    use std::io::Write;
+    match default {
+        Some(d) => print!("Email [{d}]: "),
+        None => print!("Email: "),
+    }
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading the email")?;
+    let email = match line.trim() {
+        "" => default.unwrap_or_default().to_string(),
+        e => e.to_string(),
+    };
+    if !email.contains('@') {
+        anyhow::bail!("an email address is needed");
+    }
+    Ok(email)
 }
 
 fn checklist(

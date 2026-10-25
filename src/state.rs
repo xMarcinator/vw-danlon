@@ -1,5 +1,6 @@
 //! Local state kept beside the config file: per-day lunch overrides, the
-//! private-time timer and the days ticked off in the Danløn app checklist.
+//! private-time timer, the days ticked off in the Danløn app checklist and
+//! the connected Min Volkswagen account.
 //! One JSON document, written atomically.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,17 @@ pub struct State {
     pub private: Private,
     /// Days ticked off as entered in the Danløn app.
     pub entered: BTreeSet<NaiveDate>,
+    /// The connected Min Volkswagen account. Its device token is in the
+    /// keychain, never here.
+    pub account: Option<Account>,
+}
+
+/// The account `account connect` registered, and when trips were last synced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Account {
+    pub email: String,
+    #[serde(default)]
+    pub last_sync: Option<DateTime<FixedOffset>>,
 }
 
 /// A day's lunch break. 0 minutes means no lunch that day.
