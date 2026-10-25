@@ -32,9 +32,13 @@ Read the Min Volkswagen .xlsx export into trips, keep a merged local trip store,
 
 
 ## Done summary
-TBD
+Min Volkswagen .xlsx exports are read into trips (`trips::read_export`, also via `-t export.xlsx`) and `trips import <file>` merges them into trips.json beside the config, keyed by start time + start odometer. Tests: trips::tests::{export_rows_become_trips, bad_exports_are_refused, zone_abbreviation_picks_the_repeated_hour}, trip_store::tests::{overlapping_exports_add_each_trip_once, a_bad_row_imports_nothing}. Manual check on the real export: 318 added, then 0 added / 318 already imported; report -t export.xlsx runs. Follow-up for .3: TripStore needs a `trips(tz)` reader; trips.json added to .gitignore.
 
+baseline: green (cargo test, 36 passed)
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: f89015d5802193603b7dfd17e4f85063592d1a9e
+- Tests: cargo test (41 passed), cargo clippy --all-targets (only pre-existing month.rs appointments warning)
 - PRs:
