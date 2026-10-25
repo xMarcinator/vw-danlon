@@ -45,6 +45,7 @@ flowchart LR
 - **R3:** A timed calendar event with the lunch title sets that day's lunch window unless an override exists; it is not a work address and adds no planned hours. No error surface beyond R2.
 - **R4:** The report and the working-time record show each day's lunch window and its source. No error surface beyond R1. [inferred]
 - **R5:** A config still using `periods.unpaid_break_minutes` fails to load with a message pointing to `[lunch]`. No error surface beyond that. [inferred]
+- **R6:** The day's norm is the planned calendar time minus the part of the day's lunch window inside it, so a normal 08:00–16:00 day has norm 7,50 and no difference. Errors: no planned time or a day off → norm 0; a lunch override of 0 minutes leaves the norm at the planned time; the work-week fallback (no calendar norm) is unchanged.
 
 ## Early proof point
 
@@ -75,4 +76,5 @@ cargo run -- -c config.example.toml report 2026-10 -t examples/trips.csv
 | R3 | A timed calendar event with the lunch title sets that day's lunch window unless an override exists; it is not a work address and adds no planned hours. No error surface beyond R2. | fnt-18-lunch-break-with-per-day-override.2 | — |
 | R4 | The report and the working-time record show each day's lunch window and its source. No error surface beyond R1. | fnt-18-lunch-break-with-per-day-override.2 | — |
 | R5 | A config still using `periods.unpaid_break_minutes` fails to load with a message pointing to `[lunch]`. No error surface beyond that. | fnt-18-lunch-break-with-per-day-override.2 | — |
+
 

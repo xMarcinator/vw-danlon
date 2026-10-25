@@ -280,13 +280,31 @@ pub fn build(
         .map(|date| {
             let off_reason = off.get(&date).cloned();
             let day_plan = planned.get(&date).map(Vec::as_slice).unwrap_or(&[]);
-            let planned_hours: f64 = day_plan
-                .iter()
-                .map(|(s, e)| (*e - *s).num_minutes() as f64 / 60.0)
-                .fold(0.0, |a, b| a + b);
+            let lunch = match (lunch_overrides.get(&date), lunch_events.get(&date)) {
+                (Some(o), _) => Lunch {
+                    window: window(date, o.start, o.minutes, tz),
+                    source: LunchSource::Override,
+                },
+                (None, Some(span)) => Lunch {
+                    window: Some(*span),
+                    source: LunchSource::Calendar,
+                },
+                (None, None) => Lunch {
+                    window: window(date, cfg.lunch.start, cfg.lunch.minutes, tz),
+                    source: LunchSource::Default,
+                },
+            };
+            // Planned time in the calendar includes the lunch break; the norm
+            // does not, so a normal day with lunch has no difference.
             let norm_hours = match (&off_reason, norm_from_calendar) {
                 (Some(_), _) => 0.0,
-                (None, true) => planned_hours,
+                (None, true) => {
+                    let lunch_window: Vec<Span> = lunch.window.into_iter().collect();
+                    subtract(day_plan, &lunch_window)
+                        .iter()
+                        .map(|(s, e)| (*e - *s).num_minutes() as f64 / 60.0)
+                        .fold(0.0, |a, b| a + b)
+                }
                 (None, false) => cfg.work_week.hours(date.weekday()),
             };
             // Planned time is not shown on days off.
@@ -350,20 +368,6 @@ pub fn build(
             let appointments: Vec<Span> = day_appointments.iter().map(|(span, _)| *span).collect();
             let segments = subtract(&segments, &appointments);
 
-            let lunch = match (lunch_overrides.get(&date), lunch_events.get(&date)) {
-                (Some(o), _) => Lunch {
-                    window: window(date, o.start, o.minutes, tz),
-                    source: LunchSource::Override,
-                },
-                (None, Some(span)) => Lunch {
-                    window: Some(*span),
-                    source: LunchSource::Calendar,
-                },
-                (None, None) => Lunch {
-                    window: window(date, cfg.lunch.start, cfg.lunch.minutes, tz),
-                    source: LunchSource::Default,
-                },
-            };
             let worked_hours = worked(&segments, lunch.window, cfg.periods.round_to_minutes);
             Day {
                 date,
@@ -686,11 +690,12 @@ END:VEVENT
         let m = Month::parse("2026-10").unwrap();
         let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
         let r = build(&cfg, m, &[], &occ, &BTreeMap::new());
-        // Mon–Thu 8 h from 5 Oct: weeks of 5, 12, 26 Oct = 12 days; 19–22 Oct are ferie.
-        assert_eq!(r.norm_total(), 12.0 * 8.0);
+        // Mon–Thu 08:00–16:00 from 5 Oct minus the default lunch = 7,5 h: weeks of
+        // 5, 12, 26 Oct = 12 days; 19–22 Oct are ferie.
+        assert_eq!(r.norm_total(), 12.0 * 7.5);
         assert_eq!(r.days[18].off_reason.as_deref(), Some("Efterårsferie"));
         // "Tandlæge" does not match the keywords, so the 26th stays a workday.
-        assert_eq!(r.days[25].norm_hours, 8.0);
+        assert_eq!(r.days[25].norm_hours, 7.5);
         // Fridays have no planned time.
         assert_eq!(r.days[8].norm_hours, 0.0);
     }
@@ -1052,13 +1057,19 @@ END:VEVENT
         // Frokost event sets the window; not a work address, no planned hours.
         assert_eq!(day(8), 480 - 30);
         assert_eq!(r.days[8].lunch_text(), "12:30–13:00 (calendar)");
-        assert_eq!(r.days[8].norm_hours, 8.0);
+        assert_eq!(r.days[8].norm_hours, 7.5);
         assert_eq!(r.days[8].work_locations, vec!["Kontorvej 1, 8000 Aarhus C"]);
         // Override beats the event; 0 minutes is no lunch.
         assert_eq!(day(11), 480 - 45);
         assert_eq!(r.days[11].lunch_text(), "11:00–11:45 (override)");
         assert_eq!(day(12), 480);
         assert_eq!(r.days[12].lunch_text(), "none (override)");
+
+        // The norm is the planned 08:00–16:00 minus the day's lunch, so a
+        // normal day with lunch has no difference.
+        assert_eq!(r.days[4].norm_hours, 7.5);
+        assert_eq!(r.days[11].norm_hours, 8.0 - 0.75);
+        assert_eq!(r.days[12].norm_hours, 8.0);
     }
 
     #[test]
