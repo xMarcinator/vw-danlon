@@ -1,9 +1,10 @@
-//! The Month and Day screens and what they share: number formats, the
-//! month's data loaded off the UI thread, and the private-time list with
-//! its actions.
+//! The data screens and what they share: number formats, the month's data
+//! loaded off the UI thread, and the private-time list with its actions.
 
 pub mod day;
+pub mod mileage;
 pub mod month;
+pub mod vacation;
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};

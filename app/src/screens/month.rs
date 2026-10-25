@@ -13,7 +13,7 @@ use super::{Action, PrivateList, apply, diff_class, hm, hours, kroner, signed};
 use crate::setup::Setup;
 use crate::{Icon, Screen};
 
-fn this_month(setup: &Setup) -> Month {
+pub(super) fn this_month(setup: &Setup) -> Month {
     let today = match &setup.config {
         Some(cfg) => super::now(cfg).date_naive(),
         None => chrono::Local::now().date_naive(),
@@ -24,7 +24,7 @@ fn this_month(setup: &Setup) -> Month {
     }
 }
 
-fn step(m: Month, by: i32) -> Month {
+pub(super) fn step(m: Month, by: i32) -> Month {
     let index = m.year * 12 + m.month as i32 - 1 + by;
     Month {
         year: index.div_euclid(12),
@@ -32,7 +32,7 @@ fn step(m: Month, by: i32) -> Month {
     }
 }
 
-fn month_title(m: Month) -> String {
+pub(super) fn month_title(m: Month) -> String {
     m.first_day().format("%B %Y").to_string()
 }
 

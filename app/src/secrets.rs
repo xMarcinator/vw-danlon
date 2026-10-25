@@ -35,11 +35,13 @@ impl Secret {
     }
 }
 
-pub trait SecretStore {
+pub trait SecretStore: Send {
     /// Where the secrets are kept, for the user.
     fn describe(&self) -> String;
     fn get(&self, secret: &Secret) -> Result<Option<String>>;
     fn set(&self, secret: &Secret, value: &str) -> Result<()>;
+    /// Deletes the secret; false when there was none.
+    fn delete(&self, secret: &Secret) -> Result<bool>;
 }
 
 /// The store for this platform, or `file` when the user opted in to it.
@@ -93,6 +95,14 @@ mod desktop {
         fn set(&self, secret: &Secret, value: &str) -> Result<()> {
             entry(secret)?.set_password(value).map_err(unavailable)
         }
+
+        fn delete(&self, secret: &Secret) -> Result<bool> {
+            match entry(secret)?.delete_credential() {
+                Ok(()) => Ok(true),
+                Err(keyring::Error::NoEntry) => Ok(false),
+                Err(e) => Err(unavailable(e)),
+            }
+        }
     }
 }
 
@@ -142,6 +152,14 @@ mod android {
         fn set(&self, secret: &Secret, value: &str) -> Result<()> {
             entry(secret)?.set_password(value).map_err(unavailable)
         }
+
+        fn delete(&self, secret: &Secret) -> Result<bool> {
+            match entry(secret)?.delete_credential() {
+                Ok(()) => Ok(true),
+                Err(keyring_core::Error::NoEntry) => Ok(false),
+                Err(e) => Err(unavailable(e)),
+            }
+        }
     }
 }
 
@@ -178,6 +196,15 @@ impl SecretStore for FileStore {
         let mut map = self.read()?;
         map.insert(secret.file_key(), value.into());
         self.write(&map)
+    }
+
+    fn delete(&self, secret: &Secret) -> Result<bool> {
+        let mut map = self.read()?;
+        if map.remove(&secret.file_key()).is_none() {
+            return Ok(false);
+        }
+        self.write(&map)?;
+        Ok(true)
     }
 }
 
@@ -217,6 +244,10 @@ mod tests {
                 .unwrap(),
             None
         );
+        assert!(store.delete(&token).unwrap());
+        assert!(!store.delete(&token).unwrap());
+        assert_eq!(store.get(&token).unwrap(), None);
+        assert_eq!(store.get(&link).unwrap().as_deref(), Some("https://cal/x"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

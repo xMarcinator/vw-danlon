@@ -29,6 +29,12 @@ pub struct StoredTrip {
     pub to: String,
     pub start_pos: Option<Position>,
     pub end_pos: Option<Position>,
+    /// From an imported CSV/JSON trips file; exports and the account have
+    /// none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub purpose: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business: Option<bool>,
 }
 
 impl StoredTrip {
@@ -49,6 +55,8 @@ impl From<&ExportTrip> for StoredTrip {
             to: t.to.clone(),
             start_pos: t.start_pos,
             end_pos: t.end_pos,
+            purpose: t.purpose.clone(),
+            business: t.business,
         }
     }
 }
@@ -60,15 +68,22 @@ pub struct Merged {
     pub already: usize,
 }
 
-/// Reads the whole export, then merges it into the store at `store`. A bad
-/// row fails before the store is touched, so nothing is imported. Returns
-/// the counts and the first and last trip day of the export.
-pub fn import(
-    store: &Path,
-    export: &Path,
-    tz: Tz,
-) -> Result<(Merged, Option<(NaiveDate, NaiveDate)>)> {
-    let imported = crate::trips::read_export(export, tz)?;
+/// What an import read and changed: the counts, and the first and last
+/// trip day of the file.
+pub type Imported = (Merged, Option<(NaiveDate, NaiveDate)>);
+
+/// Reads the whole file (a Min Volkswagen .xlsx export, or a CSV/JSON trips
+/// file), then merges it into the store at `store`. A bad row fails before
+/// the store is touched, so nothing is imported.
+pub fn import(store: &Path, file: &Path, tz: Tz) -> Result<Imported> {
+    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    import_bytes(store, &file.display().to_string(), &bytes, tz)
+}
+
+/// [`import`] of a file's bytes; `name` (its file name) picks the format by
+/// its extension and names the file in errors.
+pub fn import_bytes(store: &Path, name: &str, bytes: &[u8], tz: Tz) -> Result<Imported> {
+    let imported = read_trips_file(name, bytes, tz)?;
     let mut trips = TripStore::load(store)?;
     let merged = trips.merge(&imported);
     if merged.added > 0 {
@@ -79,6 +94,31 @@ pub fn import(
         .zip(imported.last())
         .map(|(f, l)| (f.trip.start.date_naive(), l.trip.start.date_naive()));
     Ok((merged, period))
+}
+
+fn read_trips_file(name: &str, bytes: &[u8], tz: Tz) -> Result<Vec<ExportTrip>> {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    let json = match ext.as_deref() {
+        Some("json") => true,
+        Some("csv") => false,
+        // An .xlsx file is a zip archive.
+        _ if ext.as_deref() == Some("xlsx") || bytes.starts_with(b"PK") => {
+            return crate::trips::read_export_bytes(bytes, name, tz);
+        }
+        _ => bail!("{name} is not a Min Volkswagen export (.xlsx) or a CSV/JSON trips file"),
+    };
+    let text = std::str::from_utf8(bytes).with_context(|| format!("{name} is not UTF-8 text"))?;
+    let trips = crate::trips::parse_text(text, json, tz).with_context(|| name.to_string())?;
+    Ok(trips
+        .into_iter()
+        .map(|trip| ExportTrip {
+            trip,
+            start_odometer: None,
+        })
+        .collect())
 }
 
 /// What a sync changed, over the whole period.
@@ -187,8 +227,8 @@ impl TripStore {
                 distance_km: t.distance_km,
                 from: t.from.clone(),
                 to: t.to.clone(),
-                purpose: String::new(),
-                business: None,
+                purpose: t.purpose.clone(),
+                business: t.business,
                 start_pos: t.start_pos,
                 end_pos: t.end_pos,
             })
@@ -348,6 +388,59 @@ mod tests {
         write_export(&export, &HEADER, &rows);
         assert!(import(&store, &export, TZ).is_err());
         assert!(!store.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bytes_of_any_trips_file_import_and_bad_rows_are_named() {
+        let dir = temp_dir("store-bytes");
+        let store = dir.join("trips.json");
+        let export = dir.join("export.xlsx");
+        write_export(&export, &HEADER, &ROWS);
+        let bytes = std::fs::read(&export).unwrap();
+        // The Android picker may give a name without an extension.
+        let (merged, _) = import_bytes(&store, "document:1234", &bytes, TZ).unwrap();
+        assert_eq!(merged.added, 3);
+
+        let csv = "start,end,distance_km,from,to,purpose,business\n\
+                   2026-10-06 07:45,2026-10-06 09:05,98.0,Hjem,Kunde A,Service Kunde A,\n";
+        let (merged, _) = import_bytes(&store, "trips.csv", csv.as_bytes(), TZ).unwrap();
+        assert_eq!((merged.added, merged.already), (1, 0));
+        let (merged, _) = import_bytes(&store, "trips.csv", csv.as_bytes(), TZ).unwrap();
+        assert_eq!((merged.added, merged.already), (0, 1));
+        let stored = stored_trips(&store, TZ).unwrap();
+        assert_eq!(stored[3].purpose, "Service Kunde A", "purpose is kept");
+        let text = std::fs::read_to_string(&store).unwrap();
+        assert_eq!(text.matches("\"purpose\"").count(), 1, "{text}");
+
+        let bad_csv =
+            "start,end\n2026-10-06 07:45,2026-10-06 09:05\n2026-10-07 09:00,2026-10-07 08:00\n";
+        let json = r#"[{"start": "2026-10-08 08:00", "end": "2026-10-08 08:30"}, {"start": "8 Oct", "end": "2026-10-08 09:00"}]"#;
+        for (name, bytes, want) in [
+            (
+                "bad.csv",
+                bad_csv.as_bytes(),
+                "bad.csv: row 3: trip ends before it starts",
+            ),
+            (
+                "bad.json",
+                json.as_bytes(),
+                "bad.json: trip 2: unrecognised time \"8 Oct\"",
+            ),
+            (
+                "notes.txt",
+                b"hello".as_slice(),
+                "notes.txt is not a Min Volkswagen export",
+            ),
+        ] {
+            let err = format!("{:#}", import_bytes(&store, name, bytes, TZ).unwrap_err());
+            assert!(err.starts_with(want), "{err}");
+        }
+        assert_eq!(
+            TripStore::load(&store).unwrap().trips.len(),
+            4,
+            "nothing added"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

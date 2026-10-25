@@ -5,6 +5,7 @@
 //! (`2026-10-05T07:42:00+02:00`) or local time without offset
 //! (`2026-10-05 07:42`), interpreted in the configured zone.
 
+use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -58,41 +59,62 @@ pub fn load(path: &Path, tz: Tz) -> Result<Vec<Trip>> {
     }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading trips {}", path.display()))?;
-    let raw: Vec<RawTrip> = match path.extension().and_then(|e| e.to_str()) {
-        Some("json") => serde_json::from_str(&text).context("parsing trips JSON")?,
-        _ => csv::Reader::from_reader(text.as_bytes())
+    parse_text(&text, is_json(path), tz)
+}
+
+fn is_json(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+}
+
+/// Trips from CSV or JSON text. A bad trip fails the whole text and is
+/// named: "row N" counts CSV lines with the header as row 1, "trip N"
+/// counts JSON entries from 1.
+pub fn parse_text(text: &str, json: bool, tz: Tz) -> Result<Vec<Trip>> {
+    let raw: Vec<(String, Result<RawTrip>)> = if json {
+        let raw: Vec<RawTrip> = serde_json::from_str(text).context("parsing trips JSON")?;
+        raw.into_iter()
+            .enumerate()
+            .map(|(i, r)| (format!("trip {}", i + 1), Ok(r)))
+            .collect()
+    } else {
+        csv::Reader::from_reader(text.as_bytes())
             .deserialize()
-            .collect::<Result<_, _>>()
-            .context("parsing trips CSV")?,
+            .enumerate()
+            .map(|(i, r)| (format!("row {}", i + 2), r.context("parsing trips CSV")))
+            .collect()
     };
     let mut trips = raw
         .into_iter()
-        .map(|r| {
-            let start = parse_time(&r.start, tz)?;
-            let end = parse_time(&r.end, tz)?;
-            if end < start {
-                return Err(anyhow!(
-                    "trip ends before it starts: {} → {}",
-                    r.start,
-                    r.end
-                ));
-            }
-            let text = |s: Option<String>| s.map(|s| s.trim().to_string()).unwrap_or_default();
-            Ok(Trip {
-                start,
-                end,
-                distance_km: r.distance_km,
-                from: text(r.from),
-                to: text(r.to),
-                purpose: text(r.purpose),
-                business: r.business,
-                start_pos: None,
-                end_pos: None,
-            })
-        })
+        .map(|(at, r)| r.and_then(|r| trip_of(r, tz)).context(at))
         .collect::<Result<Vec<_>>>()?;
     trips.sort_by_key(|t| t.start);
     Ok(trips)
+}
+
+fn trip_of(r: RawTrip, tz: Tz) -> Result<Trip> {
+    let start = parse_time(&r.start, tz)?;
+    let end = parse_time(&r.end, tz)?;
+    if end < start {
+        return Err(anyhow!(
+            "trip ends before it starts: {} → {}",
+            r.start,
+            r.end
+        ));
+    }
+    let text = |s: Option<String>| s.map(|s| s.trim().to_string()).unwrap_or_default();
+    Ok(Trip {
+        start,
+        end,
+        distance_km: r.distance_km,
+        from: text(r.from),
+        to: text(r.to),
+        purpose: text(r.purpose),
+        business: r.business,
+        start_pos: None,
+        end_pos: None,
+    })
 }
 
 pub fn parse_time(s: &str, tz: Tz) -> Result<DateTime<Tz>> {
@@ -146,17 +168,32 @@ const POS_END: &str = "Slutposition Google Maps Link";
 /// are skipped. Driver name, plate, trip type and note are not read. Any bad
 /// row fails the whole file.
 pub fn read_export(path: &Path, tz: Tz) -> Result<Vec<ExportTrip>> {
-    let mut book: Xlsx<_> =
+    let book: Xlsx<_> =
         open_workbook(path).with_context(|| format!("opening {}", path.display()))?;
+    export_trips(book, &path.display().to_string(), tz)
+}
+
+/// [`read_export`] of an export's bytes; `name` names it in errors.
+pub fn read_export_bytes(bytes: &[u8], name: &str, tz: Tz) -> Result<Vec<ExportTrip>> {
+    let book = Xlsx::new(Cursor::new(bytes)).with_context(|| format!("opening {name}"))?;
+    export_trips(book, name, tz)
+}
+
+fn export_trips<RS: Read + Seek>(
+    mut book: Xlsx<RS>,
+    name: &str,
+    tz: Tz,
+) -> Result<Vec<ExportTrip>> {
     let sheet = book
         .worksheet_range_at(0)
-        .ok_or_else(|| anyhow!("{} has no sheets", path.display()))?
-        .with_context(|| format!("reading {}", path.display()))?;
+        .ok_or_else(|| anyhow!("{name} has no sheets"))?
+        .with_context(|| format!("reading {name}"))?;
     let first_row = sheet.start().map_or(0, |(r, _)| r as usize);
     let rows: Vec<&[Data]> = sheet.rows().collect();
 
-    let name = |c: &Data| c.to_string().trim().to_lowercase();
-    let found = |row: &[Data], col: &str| row.iter().position(|c| name(c) == col.to_lowercase());
+    let cell_name = |c: &Data| c.to_string().trim().to_lowercase();
+    let found =
+        |row: &[Data], col: &str| row.iter().position(|c| cell_name(c) == col.to_lowercase());
     // The header is the row with the most of the required columns.
     let (header_at, header) = rows
         .iter()
@@ -174,8 +211,7 @@ pub fn read_export(path: &Path, tz: Tz) -> Result<Vec<ExportTrip>> {
         .collect();
     if !missing.is_empty() {
         bail!(
-            "{} is not a Min Volkswagen trip export: missing column(s) {}",
-            path.display(),
+            "{name} is not a Min Volkswagen trip export: missing column(s) {}",
             missing.join(", ")
         );
     }
@@ -220,7 +256,7 @@ pub fn read_export(path: &Path, tz: Tz) -> Result<Vec<ExportTrip>> {
                 start_odometer,
             })
         };
-        trips.push(read().with_context(|| format!("{} row {number}", path.display()))?);
+        trips.push(read().with_context(|| format!("{name} row {number}"))?);
     }
     trips.sort_by_key(|t| t.trip.start);
     Ok(trips)

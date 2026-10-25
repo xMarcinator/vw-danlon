@@ -146,7 +146,8 @@ enum AccountAction {
 
 #[derive(Subcommand)]
 enum TripsAction {
-    /// Merge a Min Volkswagen trip export (.xlsx) into the stored trips.
+    /// Merge a Min Volkswagen trip export (.xlsx), or a CSV/JSON trips file,
+    /// into the stored trips.
     Import { file: PathBuf },
     /// Fetch trips from the connected Min Volkswagen account (unofficial,
     /// read-only) and merge them into the stored trips, month by month.

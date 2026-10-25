@@ -5658,6 +5658,7 @@ version = "0.1.0"
 dependencies = [
  "android-native-keyring-store",
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "dioxus",

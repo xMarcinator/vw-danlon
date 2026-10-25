@@ -509,26 +509,37 @@ impl AccountAccess<'_> {
     pub fn connect(&self, cfg: &Config, email: &str, password: &str) -> Result<()> {
         let token = connected_cars::register_device(self.namespace, email, password)?;
         self.tokens.set(email, &token)?;
-        State::update(&cfg.state_file, |s| {
-            let last_sync = s
-                .account
-                .take()
-                .filter(|a| a.email == email)
-                .and_then(|a| a.last_sync);
-            s.account = Some(state::Account {
-                email: email.to_string(),
-                last_sync,
-            });
-        })
+        remember_account(cfg, email)
     }
 
     /// Deletes `email`'s device token and forgets the account; true when a
     /// token was deleted.
     pub fn disconnect(&self, cfg: &Config, email: &str) -> Result<bool> {
         let deleted = self.tokens.delete(email)?;
-        State::update(&cfg.state_file, |s| s.account = None)?;
+        forget_account(cfg)?;
         Ok(deleted)
     }
+}
+
+/// Records the connected account in the state file, keeping its last sync
+/// when the email is unchanged.
+pub fn remember_account(cfg: &Config, email: &str) -> Result<()> {
+    State::update(&cfg.state_file, |s| {
+        let last_sync = s
+            .account
+            .take()
+            .filter(|a| a.email == email)
+            .and_then(|a| a.last_sync);
+        s.account = Some(state::Account {
+            email: email.to_string(),
+            last_sync,
+        });
+    })
+}
+
+/// Forgets the connected account in the state file.
+pub fn forget_account(cfg: &Config) -> Result<()> {
+    State::update(&cfg.state_file, |s| s.account = None)
 }
 
 /// What a trip sync did, over the days `from` through `to`.
@@ -545,6 +556,18 @@ pub fn sync_trips(cfg: &Config, from: Option<&str>, today: NaiveDate) -> Result<
     let state = State::load(&cfg.state_file)?;
     let access = AccountAccess::new(cfg, &state);
     let token = access.token()?;
+    sync_trips_with(cfg, &access, &token, from, today)
+}
+
+/// [`sync_trips`] with a device token the caller keeps (the app's secret
+/// store).
+pub fn sync_trips_with(
+    cfg: &Config,
+    access: &AccountAccess,
+    token: &str,
+    from: Option<&str>,
+    today: NaiveDate,
+) -> Result<SyncOutcome> {
     let from = match from {
         Some(f) => state::parse_date(f)?,
         None => trip_store::sync_start(&cfg.trip_store, cfg.timezone, today)?,
@@ -554,7 +577,7 @@ pub fn sync_trips(cfg: &Config, from: Option<&str>, today: NaiveDate) -> Result<
     }
     let mut sleep = std::thread::sleep;
     let session = connected_cars::retry_429(&mut sleep, || {
-        connected_cars::Session::login(access.namespace, &token)
+        connected_cars::Session::login(access.namespace, token)
     })?;
     let vehicles = connected_cars::retry_429(&mut sleep, || session.vehicles())?;
     let vehicle = connected_cars::pick_vehicle(&vehicles, access.vehicle)?;

@@ -3,6 +3,7 @@
 
 use dioxus::prelude::*;
 
+mod import;
 mod screens;
 mod secrets;
 mod settings;
@@ -185,15 +186,17 @@ fn App() -> Element {
                         h1 { "{current.title()}" }
                     }
                     if current == Screen::Settings {
-                        settings::Settings { setup }
-                    } else if current == Screen::Month {
-                        if setup.read().config.is_some() {
-                            screens::month::MonthScreen { setup, screen }
-                        } else {
-                            NeedsSetup { screen }
-                        }
-                    } else {
+                        settings::Settings { setup, screen }
+                    } else if current == Screen::Danlon {
                         Placeholder { screen: current }
+                    } else if setup.read().config.is_none() {
+                        NeedsSetup { screen }
+                    } else if current == Screen::Month {
+                        screens::month::MonthScreen { setup, screen }
+                    } else if current == Screen::Vacation {
+                        screens::vacation::VacationScreen { setup }
+                    } else {
+                        screens::mileage::MileageScreen { setup, screen }
                     }
                 }
             }
@@ -267,7 +270,7 @@ fn Sidebar(screen: Signal<Screen>, setup: Signal<Setup>) -> Element {
     }
 }
 
-/// The Month screen without a usable config.
+/// A data screen without a usable config.
 #[component]
 fn NeedsSetup(screen: Signal<Screen>) -> Element {
     rsx! {

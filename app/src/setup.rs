@@ -6,8 +6,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use vw_danlon::config::Config;
+use vw_danlon::connected_cars;
+use vw_danlon::service::{self, AccountAccess, SyncOutcome};
 use vw_danlon::state::State;
 use vw_danlon::trip_store::TripStore;
 
@@ -360,10 +363,9 @@ pub fn save(setup: &Setup, form: &SettingsForm) -> Result<()> {
         Some(m) => {
             m.insert("home", toml_edit::value(home));
         }
-        None if !home.is_empty() => bail!(
-            "home is part of the mileage logbook: add a [mileage] section to {} first",
-            path.display()
-        ),
+        None if !home.is_empty() => {
+            bail!("home is part of the mileage logbook: set it up on the Mileage screen first")
+        }
         None => {}
     }
     let new = doc.to_string();
@@ -388,6 +390,128 @@ pub fn save(setup: &Setup, form: &SettingsForm) -> Result<()> {
         write_atomic(&path, &new)?;
     }
     Ok(())
+}
+
+/// What the Mileage screen's setup asks for.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MileageForm {
+    pub driver_name: String,
+    pub registration_number: String,
+    pub home: String,
+}
+
+/// Rates written by the mileage setup, as in the example config: kr/km up
+/// to the threshold, kr/km above it, threshold km. The user checks them on
+/// skat.dk.
+const DEFAULT_RATES: [(i32, f64, f64, i64); 1] = [(2026, 3.94, 2.28, 20_000)];
+
+/// Adds a `[mileage]` section with the default rates to `config.toml`
+/// (created when missing, comments kept). Nothing is written unless the
+/// resulting config can be read.
+pub fn add_mileage(setup: &Setup, form: &MileageForm) -> Result<()> {
+    let path = setup.config_path();
+    let driver = form.driver_name.trim();
+    let plate = form.registration_number.trim();
+    if driver.is_empty() || plate.is_empty() {
+        bail!("the logbook needs your name and the car's registration number");
+    }
+    let old = setup.config_text.as_deref().unwrap_or(STARTER_CONFIG);
+    let mut doc: toml_edit::DocumentMut = old
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    if doc.contains_key("mileage") {
+        bail!("{} already has a [mileage] section", path.display());
+    }
+    let mut mileage = toml_edit::Table::new();
+    mileage.decor_mut().set_prefix(
+        "\n# Tax-free mileage allowance (skattefri kørselsgodtgørelse), set up in the app.\n",
+    );
+    mileage["driver_name"] = toml_edit::value(driver);
+    mileage["registration_number"] = toml_edit::value(plate);
+    let home = form.home.trim();
+    if !home.is_empty() {
+        mileage["home"] = toml_edit::value(home);
+    }
+    let mut rates = toml_edit::ArrayOfTables::new();
+    for (i, (year, low, high, threshold)) in DEFAULT_RATES.into_iter().enumerate() {
+        let mut r = toml_edit::Table::new();
+        if i == 0 {
+            r.decor_mut()
+                .set_prefix("\n# Rates from Skatterådet. VERIFY on skat.dk before use.\n");
+        }
+        r["year"] = toml_edit::value(i64::from(year));
+        r["low"] = toml_edit::value(low);
+        r["high"] = toml_edit::value(high);
+        r["threshold_km"] = toml_edit::value(threshold);
+        rates.push(r);
+    }
+    mileage.insert("rates", toml_edit::Item::ArrayOfTables(rates));
+    // The logbook's km go on lønart 39 (Kilometerpenge), as in the example
+    // config, unless the config names another.
+    if let Some(danlon) = doc.get_mut("danlon").and_then(|d| d.as_table_like_mut())
+        && !danlon.contains_key("mileage_lonart")
+    {
+        danlon.insert("mileage_lonart", toml_edit::value("39"));
+    }
+    doc.insert("mileage", toml_edit::Item::Table(mileage));
+    let new = doc.to_string();
+    Config::from_text(&new, &path).context("not saved")?;
+    std::fs::create_dir_all(&setup.dir)
+        .with_context(|| format!("creating {}", setup.dir.display()))?;
+    write_atomic(&path, &new)
+}
+
+/// The account's email, or an error saying to connect it.
+fn account_email(cfg: &Config) -> Result<(State, String)> {
+    let state = State::load(&cfg.state_file)?;
+    let email = AccountAccess::new(cfg, &state)
+        .email
+        .context("no Min Volkswagen account is connected")?;
+    Ok((state, email))
+}
+
+/// Registers this device with the account and keeps the device token in
+/// `store`; the password is used once and never stored.
+pub fn connect_account(
+    cfg: &Config,
+    store: &dyn SecretStore,
+    email: &str,
+    password: &str,
+) -> Result<()> {
+    let email = email.trim();
+    if email.is_empty() || password.is_empty() {
+        bail!("enter the account's email and password");
+    }
+    let secret = Secret::DeviceToken(email.to_string());
+    // Nothing is registered that cannot be kept.
+    store.get(&secret)?;
+    let state = State::load(&cfg.state_file)?;
+    let access = AccountAccess::new(cfg, &state);
+    let token = connected_cars::register_device(access.namespace, email, password)?;
+    store
+        .set(&secret, &token)
+        .context("the device token can't be kept")?;
+    service::remember_account(cfg, email)
+}
+
+/// Fetches the trips since the newest stored one from the account.
+pub fn sync_account(
+    cfg: &Config,
+    store: &dyn SecretStore,
+    today: NaiveDate,
+) -> Result<SyncOutcome> {
+    let (state, email) = account_email(cfg)?;
+    let token = store
+        .get(&Secret::DeviceToken(email.clone()))?
+        .with_context(|| format!("no device token for {email}: connect the account again"))?;
+    service::sync_trips_with(cfg, &AccountAccess::new(cfg, &state), &token, None, today)
+}
+
+/// Deletes the device token and forgets the account.
+pub fn disconnect_account(cfg: &Config, store: &dyn SecretStore) -> Result<()> {
+    let (_, email) = account_email(cfg)?;
+    store.delete(&Secret::DeviceToken(email))?;
+    service::forget_account(cfg)
 }
 
 /// Writes `text` through a temp file and a rename.
@@ -557,7 +681,7 @@ pub mod tests {
             home: "Hjemvej 3".into(),
         };
         let err = save(&s, &form).unwrap_err();
-        assert!(err.to_string().contains("[mileage]"), "{err}");
+        assert!(err.to_string().contains("Mileage screen"), "{err}");
         assert_eq!(
             FileStore(dir.join("secrets.json"))
                 .get(&Secret::CalendarLink)
@@ -617,6 +741,93 @@ pub mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("app.toml")
+        );
+    }
+
+    #[test]
+    fn mileage_setup_adds_a_section_the_cli_reads_and_unblocks_home() {
+        let dir = file_dir("mileage-setup");
+        std::fs::write(
+            dir.join("config.toml"),
+            "employee_number = \"1\"\n# keep me\n[danlon]\n",
+        )
+        .unwrap();
+        let s = Setup::load(Ok(dir.clone()));
+        let form = |driver: &str| MileageForm {
+            driver_name: driver.into(),
+            registration_number: " AB12345 ".into(),
+            home: "Hjemvej 3".into(),
+        };
+        let err = add_mileage(&s, &form(" ")).unwrap_err();
+        assert!(err.to_string().contains("your name"), "{err}");
+
+        add_mileage(&s, &form("Test Testesen")).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(
+            text.contains("# keep me") && text.contains("skat.dk"),
+            "{text}"
+        );
+        let cfg = Config::load(&dir.join("config.toml")).unwrap();
+        let m = cfg.mileage.as_ref().unwrap();
+        assert_eq!(
+            (m.driver_name.as_str(), m.registration_number.as_str()),
+            ("Test Testesen", "AB12345")
+        );
+        assert_eq!(m.home.as_deref(), Some("Hjemvej 3"));
+        assert_eq!(m.rate(2026).unwrap().low, 3.94);
+        assert_eq!(cfg.danlon.mileage_lonart.as_deref(), Some("39"));
+
+        let s = Setup::load(Ok(dir.clone()));
+        let err = add_mileage(&s, &form("Again")).unwrap_err();
+        assert!(err.to_string().contains("already has"), "{err}");
+        // Home can now be changed in Settings.
+        let settings = SettingsForm {
+            home: "Nyvej 1".into(),
+            ..SettingsForm::from_config(s.config.as_ref())
+        };
+        save(&s, &settings).unwrap();
+        let cfg = Config::load(&dir.join("config.toml")).unwrap();
+        assert_eq!(cfg.mileage.unwrap().home.as_deref(), Some("Nyvej 1"));
+    }
+
+    #[test]
+    fn sync_without_an_account_or_token_says_so() {
+        let dir = file_dir("sync-none");
+        std::fs::write(dir.join("config.toml"), MILEAGE).unwrap();
+        let s = Setup::load(Ok(dir.clone()));
+        let cfg = s.config.as_ref().unwrap();
+        let store = s.secret_store();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let err = sync_account(cfg, store.as_ref(), today).unwrap_err();
+        assert!(
+            err.to_string().contains("no Min Volkswagen account"),
+            "{err}"
+        );
+
+        service::remember_account(cfg, "a@example.com").unwrap();
+        let err = sync_account(cfg, store.as_ref(), today).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no device token for a@example.com"),
+            "{err}"
+        );
+        let err = connect_account(cfg, store.as_ref(), "a@example.com", "").unwrap_err();
+        assert!(err.to_string().contains("password"), "{err}");
+
+        store
+            .set(&Secret::DeviceToken("a@example.com".into()), "dev-1")
+            .unwrap();
+        assert!(matches!(
+            Setup::load(Ok(dir.clone())).account,
+            AccountStatus::Connected { .. }
+        ));
+        disconnect_account(cfg, store.as_ref()).unwrap();
+        assert_eq!(Setup::load(Ok(dir)).account, AccountStatus::NotSetUp);
+        assert_eq!(
+            store
+                .get(&Secret::DeviceToken("a@example.com".into()))
+                .unwrap(),
+            None
         );
     }
 }

@@ -3,7 +3,10 @@
 //! and the theme.
 
 use dioxus::prelude::*;
+use vw_danlon::service::SyncOutcome;
 
+use crate::Screen;
+use crate::import::{self, PickButton, Picked};
 use crate::setup::{self, AccountStatus, Problem, SettingsForm, Setup, Theme};
 
 /// Switches the theme now and remembers it in `app.toml`.
@@ -20,13 +23,70 @@ enum Status {
     Failed(String),
 }
 
+/// "3 added, 12 already present · 1 Sep 2026 – 25 Oct 2026", as `trips sync`
+/// prints it.
+fn synced_text(s: &SyncOutcome) -> String {
+    let mut text = format!(
+        "Synced: {} added, {} already present · {} – {}",
+        s.synced.merged.added,
+        s.synced.merged.already,
+        s.from.format("%-d %b %Y"),
+        s.to.format("%-d %b %Y")
+    );
+    if s.synced.without_position > 0 {
+        text.push_str(&format!(
+            " · {} trips without position: turn on position sharing in the app",
+            s.synced.without_position
+        ));
+    }
+    text
+}
+
+/// Reads the data directory again after a change.
+fn reload(mut setup: Signal<Setup>) {
+    let dir = setup.peek().dir.clone();
+    setup.set(Setup::load(Ok(dir)));
+}
+
+/// Runs `job` with the config and the secret store off the UI thread.
+async fn in_background<T: Send + 'static>(
+    setup: Signal<Setup>,
+    job: impl FnOnce(&vw_danlon::config::Config, &dyn crate::secrets::SecretStore) -> anyhow::Result<T>
+    + Send
+    + 'static,
+) -> Result<T, String> {
+    let (cfg, store) = {
+        let s = setup.peek();
+        (s.config.clone(), s.secret_store())
+    };
+    let cfg = cfg.ok_or("the config can't be used yet")?;
+    tokio::task::spawn_blocking(move || job(&cfg, store.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[component]
-pub fn Settings(setup: Signal<Setup>) -> Element {
+pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let initial = SettingsForm::from_config(setup.peek().config.as_ref());
     let mut link = use_signal(String::new);
     let mut workplace = use_signal(|| initial.workplace.clone());
     let mut home = use_signal(|| initial.home.clone());
     let mut status = use_signal(|| Status::None);
+    let mut trips_status = use_signal(|| None::<Result<String, String>>);
+    let mut account_status = use_signal(|| None::<Result<String, String>>);
+    let mut busy = use_signal(|| false);
+    let mut email = use_signal(|| match &setup.peek().account {
+        AccountStatus::NoToken { email } => email.clone(),
+        _ => setup
+            .peek()
+            .config
+            .as_ref()
+            .and_then(|c| c.connected_cars.as_ref())
+            .and_then(|c| c.email.clone())
+            .unwrap_or_default(),
+    });
+    let mut password = use_signal(String::new);
 
     let s = setup.read();
     let store = s.secret_store().describe();
@@ -54,6 +114,8 @@ pub fn Settings(setup: Signal<Setup>) -> Element {
         ),
         _ => "No trips imported yet.".to_string(),
     };
+    let connected = matches!(s.account, AccountStatus::Connected { .. });
+    let has_config = s.config.is_some();
     let account = match &s.account {
         AccountStatus::NotSetUp => "Not set up".to_string(),
         AccountStatus::Connected { email, last_sync } => match last_sync {
@@ -84,6 +146,70 @@ pub fn Settings(setup: Signal<Setup>) -> Element {
             }
             Err(e) => status.set(Status::Failed(format!("{e:#}"))),
         }
+    };
+
+    let on_picked = move |picked: Result<Picked, String>| {
+        let picked = match picked {
+            Ok(p) => p,
+            Err(e) => {
+                trips_status.set(Some(Err(e)));
+                return;
+            }
+        };
+        let Some(cfg) = setup.peek().config.clone() else {
+            trips_status.set(Some(Err("the config can't be used yet".into())));
+            return;
+        };
+        busy.set(true);
+        trips_status.set(Some(Ok(format!("Importing {}…", picked.name))));
+        spawn(async move {
+            let result = import::import(cfg, picked).await;
+            if result.is_ok() {
+                reload(setup);
+            }
+            trips_status.set(Some(result));
+            busy.set(false);
+        });
+    };
+    let sync_now = move |_| {
+        busy.set(true);
+        account_status.set(Some(Ok("Syncing…".into())));
+        spawn(async move {
+            let result = in_background(setup, |cfg, store| {
+                let today = crate::screens::now(cfg).date_naive();
+                setup::sync_account(cfg, store, today)
+            })
+            .await;
+            reload(setup);
+            account_status.set(Some(result.map(|s| synced_text(&s))));
+            busy.set(false);
+        });
+    };
+    let connect = move |_| {
+        let (address, secret) = (email(), password());
+        busy.set(true);
+        account_status.set(Some(Ok("Connecting…".into())));
+        spawn(async move {
+            let result = in_background(setup, move |cfg, store| {
+                setup::connect_account(cfg, store, &address, &secret)
+            })
+            .await;
+            password.set(String::new());
+            reload(setup);
+            account_status.set(Some(result.map(|()| "Connected".into())));
+            busy.set(false);
+        });
+    };
+    let disconnect = move |_| {
+        busy.set(true);
+        spawn(async move {
+            let result = in_background(setup, setup::disconnect_account).await;
+            reload(setup);
+            account_status.set(Some(
+                result.map(|()| "Disconnected; the device token is deleted".into()),
+            ));
+            busy.set(false);
+        });
     };
 
     let toggle_file = move |e: Event<FormData>| {
@@ -157,7 +283,12 @@ pub fn Settings(setup: Signal<Setup>) -> Element {
                         if has_mileage {
                             "Home ↔ workplace is commuting, never reimbursed"
                         } else {
-                            "Part of the mileage logbook ([mileage] in config.toml), which isn't set up"
+                            "Part of the mileage logbook, which isn't set up. "
+                            button {
+                                class: "link-btn",
+                                onclick: move |_| screen.set(Screen::Mileage),
+                                "Set it up"
+                            }
                         }
                     }
                 }
@@ -169,15 +300,77 @@ pub fn Settings(setup: Signal<Setup>) -> Element {
             div { class: "box",
                 b { "Min Volkswagen export (.xlsx) or CSV/JSON file" }
                 span { class: "sub", "{trips}" }
-                span { class: "note", "In Min Volkswagen: Ture → Historik → share icon. Overlapping exports are merged." }
+                span { class: "note",
+                    "In Min Volkswagen: Ture → Historik → share icon. Exports can overlap: a trip already imported (same start time and odometer) is skipped. A CSV/JSON file has start, end, distance_km, from, to, purpose."
+                }
+                div { class: "box-actions",
+                    if has_config && !busy() {
+                        PickButton {
+                            label: "Import trips file",
+                            class: "small-btn",
+                            on_picked,
+                        }
+                    } else {
+                        button { class: "small-btn", disabled: true, "Import trips file" }
+                    }
+                }
+                match trips_status() {
+                    None => rsx! {},
+                    Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
+                    Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
+                }
             }
             div { class: "box",
-                span {
-                    b { "Sync from your Min Volkswagen account" }
-                    span { class: "note", " optional · unofficial" }
+                div { class: "box-row",
+                    span { class: "grow",
+                        b { "Sync from your Min Volkswagen account" }
+                        span { class: "note", " optional · unofficial" }
+                        br {}
+                        span { class: "sub",
+                            span { class: if connected { "dot" } else { "dot warn" }, "aria-hidden": "true" }
+                            " {account}"
+                        }
+                    }
+                    if connected {
+                        button { class: "small-btn", disabled: busy(), onclick: sync_now, "Sync now" }
+                        button { class: "small-btn", disabled: busy(), onclick: disconnect, "Disconnect" }
+                    }
                 }
-                span { class: "sub", "{account}" }
-                span { class: "note", "The device token is kept in {store}; your password is never stored." }
+                if !connected && has_config {
+                    div { class: "grid2",
+                        div { class: "field",
+                            label { r#for: "acc-email", "Account email" }
+                            input {
+                                id: "acc-email",
+                                r#type: "text",
+                                autocomplete: "username",
+                                value: "{email}",
+                                oninput: move |e| email.set(e.value()),
+                            }
+                        }
+                        div { class: "field",
+                            label { r#for: "acc-pw", "Password (used once, never stored)" }
+                            input {
+                                id: "acc-pw",
+                                r#type: "password",
+                                autocomplete: "current-password",
+                                value: "{password}",
+                                oninput: move |e| password.set(e.value()),
+                            }
+                        }
+                    }
+                    div { class: "box-actions",
+                        button { class: "small-btn", disabled: busy(), onclick: connect, "Connect" }
+                    }
+                }
+                match account_status() {
+                    None => rsx! {},
+                    Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
+                    Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
+                }
+                span { class: "note",
+                    "Fetches your trips with a device token kept in {store}; your password is never stored. Uses the app’s own unofficial access, so it can stop working when the app changes; the export above always works."
+                }
             }
         }
 

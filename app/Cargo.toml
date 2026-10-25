@@ -22,6 +22,7 @@ keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sy
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "1.0.0"
+base64 = "0.22.1"
 jni = "0.21.1"
 keyring-core = "1.0.1"
 ndk-context = "0.1.1"
