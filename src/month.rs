@@ -171,16 +171,9 @@ impl MonthReport {
     }
 }
 
-/// [`build_with_overrides`] without lunch overrides, for tests in modules
-/// that do not exercise lunch.
-#[cfg(test)]
-pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]) -> MonthReport {
-    build_with_overrides(cfg, month, trips, calendar, &BTreeMap::new())
-}
-
 /// The month's days. `lunch_overrides` (from the state file) beat a lunch
 /// calendar event, which beats the `[lunch]` default.
-pub fn build_with_overrides(
+pub fn build(
     cfg: &Config,
     month: Month,
     trips: &[Trip],
@@ -413,18 +406,8 @@ pub struct TimedEntry<'a> {
     pub location: &'a str,
 }
 
-/// [`classified_entries`] without a lunch title, for tests in modules that
-/// do not exercise lunch.
-#[cfg(test)]
-pub fn timed_entries<'a>(
-    calendar: &'a [Occurrence],
-    private_words: &[String],
-) -> Vec<TimedEntry<'a>> {
-    classified_entries(calendar, private_words, "")
-}
-
 /// The calendar's timed entries, classified by title (see [`classify`]).
-pub fn classified_entries<'a>(
+pub fn timed_entries<'a>(
     calendar: &'a [Occurrence],
     private_words: &[String],
     lunch_title: &str,
@@ -624,7 +607,13 @@ mod tests {
     #[test]
     fn norm_hours_october_2026() {
         let cfg = cfg("");
-        let r = build(&cfg, Month::parse("2026-10").unwrap(), &[], &[]);
+        let r = build(
+            &cfg,
+            Month::parse("2026-10").unwrap(),
+            &[],
+            &[],
+            &BTreeMap::new(),
+        );
         // 22 weekdays, no holidays, 7.4 h each.
         assert!((r.norm_total() - 22.0 * 7.4).abs() < 1e-9);
     }
@@ -633,7 +622,13 @@ mod tests {
     fn holidays_reduce_norm() {
         let cfg = cfg("");
         // December 2026: 23 weekdays, minus 24th, 25th, 31st (26th is a Saturday).
-        let r = build(&cfg, Month::parse("2026-12").unwrap(), &[], &[]);
+        let r = build(
+            &cfg,
+            Month::parse("2026-12").unwrap(),
+            &[],
+            &[],
+            &BTreeMap::new(),
+        );
         assert!((r.norm_total() - 20.0 * 7.4).abs() < 1e-9);
     }
 
@@ -645,7 +640,13 @@ mod tests {
             trip(&cfg, "2026-10-05 16:30", "2026-10-05 17:00"),
             trip(&cfg, "2026-10-10 09:00", "2026-10-10 12:30"),
         ];
-        let r = build(&cfg, Month::parse("2026-10").unwrap(), &trips, &[]);
+        let r = build(
+            &cfg,
+            Month::parse("2026-10").unwrap(),
+            &trips,
+            &[],
+            &BTreeMap::new(),
+        );
         let mon = &r.days[4];
         assert_eq!(mon.worked_hours, 9.0); // 07:30–17:00 minus 30 min
         assert!((mon.difference() - 1.6).abs() < 1e-9);
@@ -684,7 +685,7 @@ END:VEVENT
 ";
         let m = Month::parse("2026-10").unwrap();
         let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
-        let r = build(&cfg, m, &[], &occ);
+        let r = build(&cfg, m, &[], &occ, &BTreeMap::new());
         // Mon–Thu 8 h from 5 Oct: weeks of 5, 12, 26 Oct = 12 days; 19–22 Oct are ferie.
         assert_eq!(r.norm_total(), 12.0 * 8.0);
         assert_eq!(r.days[18].off_reason.as_deref(), Some("Efterårsferie"));
@@ -776,7 +777,7 @@ END:VEVENT
                 "Bauhaus",
             ),
         ];
-        let r = build(&cfg, m, &trips, &occ);
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
 
         let tue = &r.days[5];
         assert_eq!(tue.periods_text(), "08:40–11:30, 12:05–14:30");
@@ -800,7 +801,7 @@ END:VEVENT
 
         // With travel time, Tuesday runs from leaving home to arriving home.
         cfg.periods.count_travel_time = true;
-        let r = build(&cfg, m, &trips, &occ);
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
         assert_eq!(r.days[5].periods_text(), "07:30–11:40, 11:55–15:40");
     }
 
@@ -842,7 +843,7 @@ END:VEVENT
             located_trip(&cfg, "2026-10-07 07:40", "2026-10-07 08:00", home, office),
             located_trip(&cfg, "2026-10-07 16:30", "2026-10-07 16:50", office, home),
         ];
-        let r = build(&cfg, m, &trips, &occ);
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
         assert_eq!(r.days[5].periods_text(), "08:00–15:00");
         assert_eq!(r.days[6].periods_text(), "08:00–16:30");
         assert_eq!(r.days[6].note, None);
@@ -909,7 +910,7 @@ END:VEVENT
             located_trip(&cfg, "2026-10-08 07:40", "2026-10-08 08:00", home, office),
             located_trip(&cfg, "2026-10-08 16:00", "2026-10-08 16:20", office, home),
         ];
-        let r = build(&cfg, m, &trips, &occ);
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
 
         // Monday: 07:58–16:00 minus Læge 10:00–11:15; norm stays 8 h.
         let mon = &r.days[4];
@@ -953,7 +954,7 @@ END:VEVENT
 
         // An empty word list disables the feature.
         cfg.calendar.as_mut().unwrap().private_keywords.clear();
-        let r = build(&cfg, m, &trips, &occ);
+        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new());
         assert_eq!(r.days[4].worked_hours, 482.0 / 60.0);
         assert!(r.days[4].appointments.is_empty());
     }
@@ -1035,7 +1036,7 @@ END:VEVENT
                 },
             ),
         ]);
-        let r = build_with_overrides(&cfg, m, &trips, &occ, &overrides);
+        let r = build(&cfg, m, &trips, &occ, &overrides);
         let day = |i: usize| (r.days[i].worked_hours * 60.0).round() as i64;
 
         // Normal day 07:52–16:05 (493 min): 30 min deducted.

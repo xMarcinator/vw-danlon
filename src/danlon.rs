@@ -163,13 +163,13 @@ mod tests {
             business: None,
         }];
         let m = Month::parse("2026-10").unwrap();
-        let report = month::build(&cfg, m, &trips, &[]);
+        let report = month::build(&cfg, m, &trips, &[], &Default::default());
         let mil = mileage::compute(cfg.mileage.as_ref().unwrap(), None, m, &trips, &[]).unwrap();
         let mut buf = Vec::new();
         write(&cfg, &report, &lines(&cfg, &report, Some(&mil)), &mut buf).unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "7;H;8,50;;\n7;K;42,00;3,94;165,48\n"
+            "7;H;8,00;;\n7;K;42,00;3,94;165,48\n"
         );
     }
 
@@ -184,7 +184,13 @@ mod tests {
             "#,
         )
         .unwrap();
-        let report = month::build(&cfg, Month::parse("2026-10").unwrap(), &[], &[]);
+        let report = month::build(
+            &cfg,
+            Month::parse("2026-10").unwrap(),
+            &[],
+            &[],
+            &Default::default(),
+        );
         let lines = [
             Line {
                 lonart: "39".into(),

@@ -132,13 +132,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Norm { month } => {
             let month = Month::parse(&month)?;
-            let report = month::build_with_overrides(
-                &cfg,
-                month,
-                &[],
-                &calendar(&cfg, month)?,
-                &BTreeMap::new(),
-            );
+            let report = month::build(&cfg, month, &[], &calendar(&cfg, month)?, &BTreeMap::new());
             print_days(&report, false);
         }
         Command::Report { month, trips } => {
@@ -426,9 +420,7 @@ fn build_month(
     cal: &[Occurrence],
 ) -> Result<MonthReport> {
     let overrides = state::State::load(&cfg.state_file)?.lunch;
-    Ok(month::build_with_overrides(
-        cfg, month, trips, cal, &overrides,
-    ))
+    Ok(month::build(cfg, month, trips, cal, &overrides))
 }
 
 /// The calendar's timed entries, classified with the configured private
@@ -439,7 +431,7 @@ fn timed_entries<'a>(cfg: &Config, cal: &'a [Occurrence]) -> Vec<month::TimedEnt
         .as_ref()
         .map(|c| c.private_keywords.as_slice())
         .unwrap_or_default();
-    month::classified_entries(cal, private_words, &cfg.lunch.title)
+    month::timed_entries(cal, private_words, &cfg.lunch.title)
 }
 
 fn create(path: &Path) -> Result<BufWriter<File>> {

@@ -427,7 +427,7 @@ mod tests {
             trip("2026-10-07 07:30", "Hjem", "Kontor", "", 25.0),
             trip("2026-10-07 16:00", "Kontor", "Hjem", "", 25.0),
         ];
-        let cal = timed_entries(&cal, &[]);
+        let cal = timed_entries(&cal, &[], "Frokost");
         let m = compute(&c, WORK, Month::parse("2026-10").unwrap(), &trips, &cal).unwrap();
         let reimbursed: Vec<_> = m
             .entries
@@ -450,7 +450,7 @@ mod tests {
             visit("2026-10-08 08:00", "Kontor", "Kontor"),
             appointment("2026-10-08 10:00", "2026-10-08 11:15", "Læge", doctor),
         ];
-        let cal = timed_entries(&occurrences, &["Læge".to_string()]);
+        let cal = timed_entries(&occurrences, &["Læge".to_string()], "Frokost");
         let trips = vec![
             trip(
                 "2026-10-08 09:45",
