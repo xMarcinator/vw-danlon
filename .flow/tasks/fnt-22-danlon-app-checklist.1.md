@@ -1,5 +1,5 @@
 ---
-satisfies: [R1, R2, R3, R5]
+satisfies: [R1, R2, R3, R5, R6]
 ---
 # fnt-22-danlon-app-checklist.1 Checklist model: Komme/gå and Kørsel registrations per day
 
@@ -16,6 +16,7 @@ Pure function from a month report (day records with periods, private time, lunch
 - Unit tests with the month.rs test helpers.
 
 ## Acceptance
+- [ ] Test: Kørsel shows "Hjem → Kunde A" with 74,0 km (calendar title as name); an unnamed address falls back to the address
 - [ ] Test: Læge 10:00–11:15 gives two Komme/gå (07:58–10:00, 11:15–16:00)
 - [ ] Test: lunch errand 11:45–12:30 gives one Komme/gå 07:41–15:55
 - [ ] Test: business trip gives Kørsel with km, route, purpose
@@ -29,3 +30,4 @@ TBD
 - Commits:
 - Tests:
 - PRs:
+

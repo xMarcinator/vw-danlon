@@ -6,6 +6,7 @@
 > user: "I want this app to be invisible to the payroll since this app is not approved I just wanted a tool to ease the procces"
 > user (selected): "Danløn app"
 > user: "Yes do it. But how does copying work."
+> user: "In most cases im interested in the clock for coming and going. The addresses are named in the system so named them here  don't let me copy just list the name and Il match it in the app. It also plans the route using Google maps so the miles need to be shown but don't need a explicit button. Please move copying the address and mileage in a action menu"
 
 ## Goal & Context
 
@@ -21,7 +22,7 @@ The user is an employee and reports hours and driving themselves in Danløn's ow
 ## API Contracts
 
 - CLI: `checklist <YYYY-MM>` prints each working day with its registrations and status; `checklist mark <YYYY-MM-DD>` and `checklist unmark <YYYY-MM-DD>`.
-- The app screen (FNT-21) shows the same data with one Copy button per text or number field; times are shown large for the Danløn app's time picker and have no Copy button.
+- The app screen (FNT-21): each Komme/gå line has a Copy button for its times; Kørsel lines show place names and km with no button, and copying the addresses or km sits in a ⋯ action menu.
 
 ## Edge Cases & Constraints
 
@@ -36,6 +37,7 @@ The user is an employee and reports hours and driving themselves in Danløn's ow
 - **R3:** Days without anything to enter are shown as such, and a flagged day shows "fix first" with the reason; neither can be ticked. Errors: `checklist mark` on such a day is refused naming the reason.
 - **R4:** Ticking a day records it in the local state file and the checklist shows progress (days and trips entered); unticking removes it. Errors: a corrupt state file stops with its path, as in FNT-18.
 - **R5:** The checklist makes no network call and writes nothing but the local state file. No error surface.
+- **R6:** Places are shown by the names used in the Danløn app: a calendar entry's title for its address, and configurable names for home and the fixed workplace (default "Hjem" and "Kontoret"); km is shown for checking. Errors: an address with no name falls back to the address itself. [paraphrase]
 
 ## Early proof point
 
@@ -67,3 +69,5 @@ cargo run -- checklist 2026-11 -t examples/trips.csv
 | R3 | Days without anything to enter are shown as such, and a flagged day shows "fix first" with the reason; neither can be ticked. Errors: `checklist mark` on such a day is refused naming the reason. | fnt-22-danlon-app-checklist.1, fnt-22-danlon-app-checklist.2 | — |
 | R4 | Ticking a day records it in the local state file and the checklist shows progress (days and trips entered); unticking removes it. Errors: a corrupt state file stops with its path, as in FNT-18. | fnt-22-danlon-app-checklist.2 | — |
 | R5 | The checklist makes no network call and writes nothing but the local state file. No error surface. | fnt-22-danlon-app-checklist.1, fnt-22-danlon-app-checklist.2 | — |
+| R6 | Places are shown by the names used in the Danløn app: a calendar entry's title for its address, and configurable names for home and the fixed workplace (default "Hjem" and "Kontoret"); km is shown for checking. Errors: an address with no name falls back to the address itself. | fnt-22-danlon-app-checklist.1 | — |
+
