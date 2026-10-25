@@ -26,9 +26,16 @@ satisfies: [R2, R3, R5]
 
 
 ## Done summary
-TBD
+Added `trips sync [--from]`: logs in with the stored device token, picks the vehicle, fetches trips month by month (`Session::trips_on_days`) and merges each fully fetched month into `trips.json` via `trip_store::sync` (start time + start odometer identity), then records `account.last_sync`; 429 is retried once after Retry-After through `connected_cars::retry_429` (injected call and sleep), other errors stop with the HTTP status and keep earlier months. Tests: syncing_trips_already_imported_from_an_export_adds_nothing, a_failed_month_leaves_the_store_unchanged_for_that_month, a_429_is_retried_once_after_retry_after. README documents connect (incl. token_file), sync, status/check/disconnect, unofficial status, export as fallback; the "Not yet done" item is removed.
 
+Decisions: default start is the newest stored trip's DAY (not the day after), so trips later that day missing from a mid-day export are still fetched; dedup makes the overlap free. Empty store defaults to 1 January (year km total). Trips a month's fetch returns that start outside its days are dropped and counted in their own month (no double counting at boundaries). `without_position` now also counts trips with empty addresses. `account check` reuses the shared AccountAccess/trips_on_days. Not verified against the real service (lead runs the live sync).
+
+baseline: green (cargo test, 59 passed)
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+Tier: not provided (model: claude-opus-5-5)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: bff4e13432a1edb1534f6369c8d6515e2fdd0288
+- Tests: cargo test (62 passed), cargo clippy --all-targets (clean)
 - PRs:
