@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T20:42:33.543926Z",
+  "depends_on": [
+    "fnt-26-home-working-month-to-date-and-mileage.3"
+  ],
+  "id": "fnt-26-home-working-month-to-date-and-mileage.4",
+  "priority": null,
+  "spec": "fnt-26-home-working-month-to-date-and-mileage",
+  "spec_path": ".flow/tasks/fnt-26-home-working-month-to-date-and-mileage.4.md",
+  "status": "todo",
+  "title": "Private time starts automatically, calendar time after grace, always editable",
+  "updated_at": "2026-10-25T20:42:33.543926Z"
+}
