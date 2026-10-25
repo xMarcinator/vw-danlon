@@ -76,7 +76,7 @@ threshold_km = 20000
 hours = "none"
 # hours_lonart = "XXXX"
 # Lønart for skattefri kørselsgodtgørelse. 39 = Kilometerpenge: Danløn takes
-# only the km and applies its own rate. Check with `danlon info`.
+# only the km and applies its own rate. Check the code in Danløn.
 mileage_lonart = "39"
 # File layout — check against Danløn's file description before first import.
 delimiter = ";"
@@ -84,9 +84,3 @@ decimal_comma = true
 header = false
 columns = ["employee", "lonart", "quantity"]   # code 39 allows no rate
 
-# Sending directly with `export --send` (Danløn GraphQL API). The refresh
-# token comes from DANLON_REFRESH_TOKEN, or from this file:
-[danlon.api]
-# refresh_token_file = "danlon-token"   # relative to this config file
-# company_id = ""    # default: the company the token belongs to
-# employee_id = ""   # default: the employee whose number is employee_number

@@ -5,7 +5,9 @@ Turns your car trips (myVolkswagen) into:
 - **Working-time record** (arbejdstidsregistrering): every day, start, end,
   hours, norm and difference.
 - **Mileage logbook** (kørselsregnskab) for tax-free kørselsgodtgørelse.
-- **Danløn import file** (Lønberegning → Indlæs fra fil).
+- **Pay lines** (lønart and quantity) for your own records.
+
+The tool runs only on your machine and never talks to Danløn.
 
 The norm (planned hours) comes from a Proton Calendar plus Danish public
 holidays.
@@ -24,8 +26,7 @@ cargo run -- export    2026-10 -o danlon-2026-10.txt
 
 1. Print `korebog-…csv`, check it, and sign it as employer. The signed
    control is a condition for the allowance being tax-free.
-2. Import `danlon-…txt` in Danløn under **Lønberegning → Indlæs fra fil**,
-   or send it directly with `export 2026-10 --send` (see below).
+2. Use `danlon-…txt` to check the month's pay lines (lønart and quantity).
 3. Keep `arbejdstid-…csv` and `korebog-…csv` for at least 5 years.
 
 Without `-t`, the commands use the trips stored by `trips import`. Pass
@@ -71,7 +72,7 @@ end, lunch break and hours.
 Danmarks Statistik expect the *norm* to be reported (160,33 h/month for
 37 h/week), not actual hours. Danløn already does this from its Normtimer
 field, so the default is `hours = "none"`. Set `hours = "actual"` and
-`hours_lonart` to also send actual hours.
+`hours_lonart` to also export actual hours.
 
 **Kørselsgodtgørelse (bekendtgørelse 173/2000, Skattestyrelsen).**
 - A trip is reimbursed only when it has date, from/to (mål og delmål),
@@ -224,36 +225,14 @@ and against `mileage.home`/`mileage.workplace`. See `examples/trips.csv`.
 Without a `[calendar]`, a day runs from the first departure to the last
 arrival.
 
-## Sending to Danløn (API)
-
-`export --send` sends the pay lines through Danløn's GraphQL API
-(api.danlon.dk) instead of, or as well as, writing the file. It shows what
-will be sent, warns if lines with the same code are already waiting in
-Danløn, and asks before sending.
-
-```sh
-export DANLON_REFRESH_TOKEN=…        # or danlon.api.refresh_token_file
-cargo run -- danlon info              # company, employees, pay codes, waiting pay parts
-cargo run -- export 2026-10 --send
-cargo run -- danlon delete <id>       # undo, before running payroll
-```
-
-- Get the refresh token from Danløn. Keep it out of git.
-- The employee is found by `employee_number` (Danløn's medarbejdernummer).
-- Only the fields Danløn allows for each code are sent. For 39
-  Kilometerpenge that is the km; Danløn applies its own rate.
-- Values are sent in hundredths, as in the file import (196,50 → 19650).
-  Check the first upload in Danløn before running payroll.
-
-## Before the first real import
+## Before first use
 
 - Set `employee_number` to your number in Danløn.
-- Check the lønart codes with `danlon info` (mileage defaults to 39
+- Check the lønart codes in Danløn (mileage defaults to 39
   Kilometerpenge).
 - Check the `[danlon]` delimiter, decimal format and column order against
   Danløn's current file description. Danløn changed its format in 2026.
 - Check the year's km rates on skat.dk.
-- Do a test import before running payroll.
 
 ## Not yet done
 

@@ -2,7 +2,6 @@ mod address;
 mod calendar;
 mod config;
 mod danlon;
-mod danlon_api;
 mod holidays;
 mod mileage;
 mod month;
@@ -13,10 +12,10 @@ mod trips;
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufRead, BufWriter, Write};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
 use clap::{Parser, Subcommand};
 
@@ -27,7 +26,8 @@ use month::{Month, MonthReport};
 use trips::Trip;
 
 /// Turns myVolkswagen trips into work periods, a working-time record, a
-/// mileage logbook and a Danløn import file.
+/// mileage logbook and a pay-line file for your own records. It never
+/// talks to Danløn.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -71,27 +71,15 @@ enum Command {
         #[arg(short, long)]
         out: PathBuf,
     },
-    /// Write the Danløn import file for a month, or send it with --send.
+    /// Write the month's pay lines (lønart, quantity, rate) to a file.
     Export {
         month: String,
         /// Trips file (default: the trips stored by `trips import`).
         #[arg(short, long)]
         trips: Option<PathBuf>,
-        /// Import file to write.
-        #[arg(short, long, required_unless_present = "send")]
-        out: Option<PathBuf>,
-        /// Send the pay lines to Danløn through its API.
-        #[arg(long)]
-        send: bool,
-        /// Send without asking (refuses if lines with the same code are
-        /// already waiting in Danløn).
-        #[arg(long, requires = "send")]
-        yes: bool,
-    },
-    /// Danløn API: show ids and pay codes, or delete pay parts.
-    Danlon {
-        #[command(subcommand)]
-        action: DanlonAction,
+        /// File to write.
+        #[arg(short, long)]
+        out: PathBuf,
     },
     /// Set or clear a day's lunch break (stored in state.json beside the config).
     Lunch {
@@ -167,18 +155,6 @@ enum LunchAction {
     },
 }
 
-#[derive(Subcommand)]
-enum DanlonAction {
-    /// Show the company, employees, pay codes and your waiting pay parts.
-    Info,
-    /// Delete pay parts that have not been through payroll yet.
-    Delete {
-        /// Pay part ids, as shown by `export --send` or `danlon info`.
-        #[arg(required = true)]
-        ids: Vec<String>,
-    },
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load(&cli.config)?;
@@ -238,13 +214,7 @@ fn main() -> Result<()> {
             print_mileage(&m);
             println!("Wrote {}", out.display());
         }
-        Command::Export {
-            month,
-            trips,
-            out,
-            send,
-            yes,
-        } => {
+        Command::Export { month, trips, out } => {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref())?;
             let cal = calendar(&cfg, month)?;
@@ -264,24 +234,8 @@ fn main() -> Result<()> {
             if lines.is_empty() {
                 println!("Nothing to export for {}", report.month);
             }
-            if let Some(out) = out {
-                danlon::write(&cfg, &report, &lines, create(&out)?)?;
-                println!("Wrote {}", out.display());
-            }
-            if send && !lines.is_empty() {
-                send_to_danlon(&cfg, &lines, yes)?;
-            }
-        }
-        Command::Danlon { action } => {
-            let api = danlon_api::Client::connect(&cfg.danlon.api)?;
-            let company = company_id(&cfg, &api)?;
-            match action {
-                DanlonAction::Info => danlon_info(&cfg, &api, &company)?,
-                DanlonAction::Delete { ids } => {
-                    api.delete(&company, &ids)?;
-                    println!("Deleted {} pay part(s)", ids.len());
-                }
-            }
+            danlon::write(&cfg, &report, &lines, create(&out)?)?;
+            println!("Wrote {}", out.display());
         }
         Command::Lunch { action } => lunch(&cfg, action)?,
         Command::Private { action } => private(&cfg, action)?,
@@ -456,131 +410,6 @@ fn interval_text(i: &state::PrivateInterval) -> String {
         i.label,
         replaces
     )
-}
-
-fn company_id(cfg: &Config, api: &danlon_api::Client) -> Result<String> {
-    match &cfg.danlon.api.company_id {
-        Some(id) => Ok(id.clone()),
-        None => api.current_company(),
-    }
-}
-
-fn danlon_info(cfg: &Config, api: &danlon_api::Client, company: &str) -> Result<()> {
-    use danlon_api::show;
-    println!("Company id: {company}");
-    println!();
-    println!("Employees (number, id, name):");
-    let employees = api.employees(company)?;
-    for e in &employees {
-        let inactive = if e.active { "" } else { " (inactive)" };
-        println!("  {:<6} {:<16} {}{}", e.domain_id, e.id, e.name, inactive);
-    }
-    println!();
-    println!("Pay codes (units / rate / amount allowed):");
-    for c in api.pay_codes()? {
-        let yn = |b: bool| if b { "ja " } else { "nej" };
-        println!(
-            "  {:<6} {} {} {}  {}",
-            c.code,
-            yn(c.units_allowed),
-            yn(c.rate_allowed),
-            yn(c.amount_allowed),
-            c.description
-        );
-    }
-    let employee = danlon_api::find_employee(
-        &employees,
-        cfg.danlon.api.employee_id.as_deref(),
-        &cfg.employee_number,
-    )?;
-    println!();
-    println!(
-        "Waiting pay parts for {} ({}):",
-        employee.name, employee.domain_id
-    );
-    let parts = api.pay_parts(company, &employee.id)?;
-    for p in &parts {
-        println!(
-            "  {:<16} {:<6} units {:>9}  rate {:>9}  amount {:>10}",
-            p.id,
-            p.code,
-            show(p.units),
-            show(p.rate),
-            show(p.amount)
-        );
-    }
-    if parts.is_empty() {
-        println!("  none");
-    }
-    Ok(())
-}
-
-/// Sends the export lines as pay parts after showing them and asking.
-fn send_to_danlon(cfg: &Config, lines: &[danlon::Line], yes: bool) -> Result<()> {
-    use danlon_api::show;
-    let api = danlon_api::Client::connect(&cfg.danlon.api)?;
-    let company = company_id(cfg, &api)?;
-    let employees = api.employees(&company)?;
-    let employee = danlon_api::find_employee(
-        &employees,
-        cfg.danlon.api.employee_id.as_deref(),
-        &cfg.employee_number,
-    )?;
-    let codes = api.pay_codes()?;
-    let parts = danlon_api::to_pay_parts(lines, &codes)?;
-
-    println!();
-    println!(
-        "To send to Danløn for {} ({}):",
-        employee.name, employee.domain_id
-    );
-    for p in &parts {
-        let description = codes
-            .iter()
-            .find(|c| c.code == p.code)
-            .map(|c| c.description.as_str())
-            .unwrap_or_default();
-        println!(
-            "  {:<6} {:<28} units {:>9}  rate {:>9}  amount {:>10}",
-            p.code,
-            description,
-            show(p.units),
-            show(p.rate),
-            show(p.amount)
-        );
-    }
-    let waiting: Vec<_> = api
-        .pay_parts(&company, &employee.id)?
-        .into_iter()
-        .filter(|w| parts.iter().any(|p| p.code == w.code))
-        .collect();
-    if !waiting.is_empty() {
-        eprintln!();
-        eprintln!("warning: Danløn already has waiting pay parts with these codes:");
-        for w in &waiting {
-            eprintln!("  {}  {}  units {}", w.id, w.code, show(w.units));
-        }
-        if yes {
-            bail!("not sending twice; check in Danløn or run `danlon delete` first");
-        }
-    }
-    if !yes {
-        print!("Send to Danløn? [y/N] ");
-        std::io::stdout().flush()?;
-        let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer)?;
-        if !matches!(answer.trim(), "y" | "Y" | "j" | "J") {
-            println!("Not sent.");
-            return Ok(());
-        }
-    }
-    let created = api.create(&company, &employee.id, &parts)?;
-    println!("Sent. Created pay parts:");
-    for p in &created {
-        println!("  {}  {}  units {}", p.id, p.code, show(p.units));
-    }
-    println!("Undo with: danlon delete <id>…  (before running payroll)");
-    Ok(())
 }
 
 /// Calendar occurrences from 1 January to the end of `month`; the earlier

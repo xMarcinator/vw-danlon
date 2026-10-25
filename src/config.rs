@@ -302,39 +302,6 @@ pub struct DanlonConfig {
     /// amount, text, period_start, period_end, empty.
     #[serde(default = "default_columns")]
     pub columns: Vec<Column>,
-    #[serde(default)]
-    pub api: ApiConfig,
-}
-
-/// Danløn GraphQL API, used by `export --send` and `danlon …`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApiConfig {
-    #[serde(default = "default_api_url")]
-    pub url: String,
-    /// File holding the refresh token, used when DANLON_REFRESH_TOKEN is not
-    /// set. Relative to the config file.
-    pub refresh_token_file: Option<PathBuf>,
-    /// Danløn's company id. Default: the company the token belongs to.
-    pub company_id: Option<String>,
-    /// Danløn's employee id. Default: the employee whose number is
-    /// `employee_number`.
-    pub employee_id: Option<String>,
-}
-
-impl Default for ApiConfig {
-    fn default() -> Self {
-        ApiConfig {
-            url: default_api_url(),
-            refresh_token_file: None,
-            company_id: None,
-            employee_id: None,
-        }
-    }
-}
-
-fn default_api_url() -> String {
-    "https://api.danlon.dk/graphql".into()
 }
 
 fn default_delimiter() -> char {
@@ -379,7 +346,6 @@ impl Config {
             cal.source = base.join(&cal.source).to_string_lossy().into_owned();
         }
         let config_dir = path.parent().unwrap_or(Path::new("."));
-        crate::danlon_api::resolve_token_file(&mut cfg.danlon.api.refresh_token_file, config_dir);
         cfg.state_file = config_dir.join("state.json");
         cfg.trip_store = config_dir.join("trips.json");
         cfg.validate()?;
@@ -467,6 +433,17 @@ mod tests {
         let err =
             Config::parse(&format!("{base}[periods]\nunpaid_break_minutes = 30\n")).unwrap_err();
         assert!(err.to_string().contains("[lunch]"), "{err}");
+    }
+
+    #[test]
+    fn old_api_section_is_refused() {
+        let err = Config::parse("employee_number = \"1\"\n[danlon]\n[danlon.api]\nurl = \"x\"\n")
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("[danlon.api]") && msg.contains("unknown field `api`"),
+            "{msg}"
+        );
     }
 
     #[test]
