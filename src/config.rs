@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::Weekday;
+use chrono::{NaiveTime, Weekday};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +22,8 @@ pub struct Config {
     pub workplace: Option<String>,
     #[serde(default)]
     pub periods: PeriodConfig,
+    #[serde(default)]
+    pub lunch: LunchConfig,
     pub mileage: Option<MileageConfig>,
     pub danlon: DanlonConfig,
     /// The local state file (`state.json` beside the config file).
@@ -139,15 +141,50 @@ pub struct CalendarConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeriodConfig {
-    /// Unpaid break deducted from each worked day, in minutes.
-    #[serde(default)]
-    pub unpaid_break_minutes: u32,
     /// Round each day's worked time to the nearest N minutes (0 = no rounding).
     #[serde(default)]
     pub round_to_minutes: u32,
     /// Count the drive to and from the work address as working time.
     #[serde(default)]
     pub count_travel_time: bool,
+}
+
+/// The daily lunch break. It is deducted only where it overlaps time at work.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LunchConfig {
+    /// Default start of lunch.
+    #[serde(default = "default_lunch_start")]
+    pub start: NaiveTime,
+    /// Default length in minutes (0 = no lunch break).
+    #[serde(default = "default_lunch_minutes")]
+    pub minutes: u32,
+    /// Timed calendar events with this title (whole word, case-insensitive)
+    /// set the day's lunch window.
+    #[serde(default = "default_lunch_title")]
+    pub title: String,
+}
+
+fn default_lunch_start() -> NaiveTime {
+    NaiveTime::from_hms_opt(12, 0, 0).unwrap()
+}
+
+fn default_lunch_minutes() -> u32 {
+    30
+}
+
+fn default_lunch_title() -> String {
+    "Frokost".into()
+}
+
+impl Default for LunchConfig {
+    fn default() -> Self {
+        LunchConfig {
+            start: default_lunch_start(),
+            minutes: default_lunch_minutes(),
+            title: default_lunch_title(),
+        }
+    }
 }
 
 /// Tax-free mileage allowance (skattefri kørselsgodtgørelse).
@@ -288,8 +325,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        let mut cfg: Config =
-            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        let mut cfg =
+            Config::parse(&text).with_context(|| format!("parsing config {}", path.display()))?;
         // Resolve a local calendar path relative to the config file.
         if let Some(cal) = &mut cfg.calendar
             && !cal.source.contains("://")
@@ -305,6 +342,20 @@ impl Config {
         Ok(cfg)
     }
 
+    pub fn parse(text: &str) -> Result<Self> {
+        let raw: toml::Table = toml::from_str(text)?;
+        if raw
+            .get("periods")
+            .and_then(|p| p.get("unpaid_break_minutes"))
+            .is_some()
+        {
+            bail!(
+                "periods.unpaid_break_minutes is no longer supported; set the lunch break in [lunch] (start, minutes, title)"
+            );
+        }
+        Ok(toml::from_str(text)?)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.danlon.hours == HoursReporting::Actual && self.danlon.hours_lonart.is_none() {
             bail!("danlon.hours = \"actual\" requires danlon.hours_lonart");
@@ -313,5 +364,30 @@ impl Config {
             bail!("[mileage] requires danlon.mileage_lonart");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lunch_defaults_and_old_break_key_names_lunch() {
+        let base = "employee_number = \"1\"\n[danlon]\n";
+        let cfg = Config::parse(base).unwrap();
+        assert_eq!(cfg.lunch.start, NaiveTime::from_hms_opt(12, 0, 0).unwrap());
+        assert_eq!(
+            (cfg.lunch.minutes, cfg.lunch.title.as_str()),
+            (30, "Frokost")
+        );
+
+        let cfg =
+            Config::parse(&format!("{base}[lunch]\nstart = \"11:30\"\nminutes = 45\n")).unwrap();
+        assert_eq!(cfg.lunch.start, NaiveTime::from_hms_opt(11, 30, 0).unwrap());
+        assert_eq!(cfg.lunch.minutes, 45);
+
+        let err =
+            Config::parse(&format!("{base}[periods]\nunpaid_break_minutes = 30\n")).unwrap_err();
+        assert!(err.to_string().contains("[lunch]"), "{err}");
     }
 }

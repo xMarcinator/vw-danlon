@@ -35,7 +35,7 @@ counted from 1 January.
 **Working time (arbejdstidsloven, since 1 July 2024).** Daily working time
 must be recorded objectively and reliably, be accessible to the employee and
 be kept for 5 years. `timesheet` writes every day of the month with start,
-end, break and hours.
+end, lunch break and hours.
 
 **Hours to eIndkomst.** For full-time monthly salaried employees Skat and
 Danmarks Statistik expect the *norm* to be reported (160,33 h/month for
@@ -107,8 +107,28 @@ A day's worked time is computed in this order:
 1. the periods at a work address, from the trips;
 2. minus private appointments (overlapping appointments count once; one
    crossing midnight is split per date);
-3. minus the unpaid break (`periods.unpaid_break_minutes`);
+3. minus the lunch break where it overlaps what is left (see below);
 4. rounding (`periods.round_to_minutes`).
+
+### Lunch
+
+Each day has one lunch window, taken from the first of:
+1. an override set with `lunch set <YYYY-MM-DD> <HH:MM> <minutes>` (removed
+   again with `lunch clear <YYYY-MM-DD>`), kept in `state.json` beside the
+   config file; 0 minutes means no lunch that day;
+2. a timed calendar event whose title contains `lunch.title` (default
+   `Frokost`) as a whole word. It is not a work address and adds no planned
+   hours;
+3. the default, `[lunch]` `start` and `minutes` (12:00, 30 minutes).
+
+Only the part of the window that overlaps time at work is deducted. Work
+that ends before lunch, a lunch errand that already leaves a gap in the
+periods, or a doctor's visit covering lunch deducts nothing more. The report
+and the working-time record show each day's window and its source
+(`default`, `calendar` or `override`).
+
+The old `periods.unpaid_break_minutes` key is no longer accepted; use
+`[lunch]` instead.
 
 Addresses are compared loosely:
 - case, punctuation and "Danmark" are ignored

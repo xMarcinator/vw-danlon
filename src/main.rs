@@ -10,6 +10,7 @@ mod state;
 mod timesheet;
 mod trips;
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -131,14 +132,20 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Norm { month } => {
             let month = Month::parse(&month)?;
-            let report = month::build(&cfg, month, &[], &calendar(&cfg, month)?);
+            let report = month::build_with_overrides(
+                &cfg,
+                month,
+                &[],
+                &calendar(&cfg, month)?,
+                &BTreeMap::new(),
+            );
             print_days(&report, false);
         }
         Command::Report { month, trips } => {
             let month = Month::parse(&month)?;
             let trips = trips::load(&trips, cfg.timezone)?;
             let cal = calendar(&cfg, month)?;
-            let report = month::build(&cfg, month, &trips, &cal);
+            let report = build_month(&cfg, month, &trips, &cal)?;
             print_days(&report, true);
             if let Some(m) = mileage_for(&cfg, month, &trips, &cal)? {
                 print_mileage(&m);
@@ -147,7 +154,7 @@ fn main() -> Result<()> {
         Command::Timesheet { month, trips, out } => {
             let month = Month::parse(&month)?;
             let trips = trips::load(&trips, cfg.timezone)?;
-            let report = month::build(&cfg, month, &trips, &calendar(&cfg, month)?);
+            let report = build_month(&cfg, month, &trips, &calendar(&cfg, month)?)?;
             timesheet::write(&cfg, &report, create(&out)?)?;
             println!("Wrote {}", out.display());
         }
@@ -175,7 +182,7 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = trips::load(&trips, cfg.timezone)?;
             let cal = calendar(&cfg, month)?;
-            let report = month::build(&cfg, month, &trips, &cal);
+            let report = build_month(&cfg, month, &trips, &cal)?;
             let mil = mileage_for(&cfg, month, &trips, &cal)?;
             if let Some(m) = &mil {
                 warn_skipped(m);
@@ -411,14 +418,28 @@ fn mileage_for(
         .transpose()
 }
 
-/// The calendar's timed entries, classified with the configured private words.
+/// The month's days, with the lunch overrides from the state file.
+fn build_month(
+    cfg: &Config,
+    month: Month,
+    trips: &[Trip],
+    cal: &[Occurrence],
+) -> Result<MonthReport> {
+    let overrides = state::State::load(&cfg.state_file)?.lunch;
+    Ok(month::build_with_overrides(
+        cfg, month, trips, cal, &overrides,
+    ))
+}
+
+/// The calendar's timed entries, classified with the configured private
+/// words and lunch title.
 fn timed_entries<'a>(cfg: &Config, cal: &'a [Occurrence]) -> Vec<month::TimedEntry<'a>> {
     let private_words = cfg
         .calendar
         .as_ref()
         .map(|c| c.private_keywords.as_slice())
         .unwrap_or_default();
-    month::timed_entries(cal, private_words)
+    month::classified_entries(cal, private_words, &cfg.lunch.title)
 }
 
 fn create(path: &Path) -> Result<BufWriter<File>> {
@@ -429,8 +450,8 @@ fn create(path: &Path) -> Result<BufWriter<File>> {
 fn print_days(r: &MonthReport, with_trips: bool) {
     if with_trips {
         println!(
-            "{:<10}  {:<3}  {:<11}  {:>5}  {:<24}  {:>6}  {:>6}  note",
-            "date", "day", "planned", "norm", "at work address", "worked", "diff"
+            "{:<10}  {:<3}  {:<11}  {:>5}  {:<24}  {:<23}  {:>6}  {:>6}  note",
+            "date", "day", "planned", "norm", "at work address", "lunch", "worked", "diff"
         );
     } else {
         println!(
@@ -445,13 +466,19 @@ fn print_days(r: &MonthReport, with_trips: bool) {
             .map(|(s, e)| format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")))
             .unwrap_or_default();
         if with_trips {
+            let lunch = if d.first_start.is_some() {
+                d.lunch_text()
+            } else {
+                String::new()
+            };
             println!(
-                "{}  {}  {:<11}  {:>5.2}  {:<24}  {:>6.2}  {:>+6.2}  {}",
+                "{}  {}  {:<11}  {:>5.2}  {:<24}  {:<23}  {:>6.2}  {:>+6.2}  {}",
                 d.date,
                 day,
                 planned,
                 d.norm_hours,
                 d.periods_text(),
+                lunch,
                 d.worked_hours,
                 d.difference(),
                 d.remark()

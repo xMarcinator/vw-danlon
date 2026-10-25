@@ -12,6 +12,7 @@ use chrono_tz::Tz;
 
 use crate::calendar::Occurrence;
 use crate::config::Config;
+use crate::state::LunchOverride;
 use crate::trips::Trip;
 use crate::{address, holidays};
 
@@ -83,8 +84,37 @@ pub struct Day {
     pub last_end: Option<DateTime<Tz>>,
     /// Anything that needs checking (e.g. arrival without departure).
     pub note: Option<String>,
-    pub break_minutes: u32,
+    /// The day's lunch break, deducted where it overlaps `segments`.
+    pub lunch: Lunch,
     pub worked_hours: f64,
+}
+
+/// A day's lunch break and where it comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lunch {
+    /// `None` when the day has no lunch (an override of 0 minutes).
+    pub window: Option<Span>,
+    pub source: LunchSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LunchSource {
+    /// `[lunch]` start and minutes.
+    Default,
+    /// A timed calendar event with the lunch title.
+    Calendar,
+    /// Set with `lunch set`.
+    Override,
+}
+
+impl std::fmt::Display for LunchSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LunchSource::Default => "default",
+            LunchSource::Calendar => "calendar",
+            LunchSource::Override => "override",
+        })
+    }
 }
 
 impl Day {
@@ -99,6 +129,15 @@ impl Day {
             .map(|(s, e)| format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")))
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// Lunch window and source, e.g. "12:00–12:30 (default)".
+    pub fn lunch_text(&self) -> String {
+        let window = match self.lunch.window {
+            Some((s, e)) => format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")),
+            None => "none".into(),
+        };
+        format!("{window} ({})", self.lunch.source)
     }
 
     /// Day-off reason and anything that needs checking.
@@ -132,7 +171,22 @@ impl MonthReport {
     }
 }
 
+/// [`build_with_overrides`] without lunch overrides, for tests in modules
+/// that do not exercise lunch.
+#[cfg(test)]
 pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]) -> MonthReport {
+    build_with_overrides(cfg, month, trips, calendar, &BTreeMap::new())
+}
+
+/// The month's days. `lunch_overrides` (from the state file) beat a lunch
+/// calendar event, which beats the `[lunch]` default.
+pub fn build_with_overrides(
+    cfg: &Config,
+    month: Month,
+    trips: &[Trip],
+    calendar: &[Occurrence],
+    lunch_overrides: &BTreeMap<NaiveDate, LunchOverride>,
+) -> MonthReport {
     let tz = cfg.timezone;
 
     let mut off: HashMap<NaiveDate, String> = holidays::days_off(month.year, &cfg.holidays)
@@ -166,6 +220,7 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
     let mut appointments: BTreeMap<NaiveDate, Vec<(Span, &str)>> = BTreeMap::new();
     let mut locations: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
     let mut missing_location: BTreeMap<NaiveDate, String> = BTreeMap::new();
+    let mut lunch_events: BTreeMap<NaiveDate, Span> = BTreeMap::new();
     for occ in calendar {
         match occ {
             Occurrence::AllDay { date, summary } => {
@@ -180,14 +235,27 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
                 summary,
                 location,
             } => {
-                if classify(summary, private_words) == EntryKind::Private {
-                    for span in split_at_midnight(*start, *end, tz) {
-                        appointments
-                            .entry(span.0.date_naive())
-                            .or_default()
-                            .push((span, summary));
+                match classify(summary, private_words, &cfg.lunch.title) {
+                    EntryKind::Private => {
+                        for span in split_at_midnight(*start, *end, tz) {
+                            appointments
+                                .entry(span.0.date_naive())
+                                .or_default()
+                                .push((span, summary));
+                        }
+                        continue;
                     }
-                    continue;
+                    EntryKind::Lunch => {
+                        // One break per day: the earliest lunch event.
+                        if let Some(span) = split_at_midnight(*start, *end, tz).first() {
+                            let day = lunch_events.entry(span.0.date_naive()).or_insert(*span);
+                            if span.0 < day.0 {
+                                *day = *span;
+                            }
+                        }
+                        continue;
+                    }
+                    EntryKind::Work => {}
                 }
                 let day_locations = locations.entry(start.date_naive()).or_default();
                 if location.trim().is_empty() {
@@ -289,8 +357,21 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
             let appointments: Vec<Span> = day_appointments.iter().map(|(span, _)| *span).collect();
             let segments = subtract(&segments, &appointments);
 
-            let minutes: i64 = segments.iter().map(|(s, e)| (*e - *s).num_minutes()).sum();
-            let (worked_hours, break_minutes) = worked(minutes, cfg);
+            let lunch = match (lunch_overrides.get(&date), lunch_events.get(&date)) {
+                (Some(o), _) => Lunch {
+                    window: window(date, o.start, o.minutes, tz),
+                    source: LunchSource::Override,
+                },
+                (None, Some(span)) => Lunch {
+                    window: Some(*span),
+                    source: LunchSource::Calendar,
+                },
+                (None, None) => Lunch {
+                    window: window(date, cfg.lunch.start, cfg.lunch.minutes, tz),
+                    source: LunchSource::Default,
+                },
+            };
+            let worked_hours = worked(&segments, lunch.window, cfg.periods.round_to_minutes);
             Day {
                 date,
                 norm_hours,
@@ -302,7 +383,7 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
                 appointments,
                 segments,
                 note,
-                break_minutes,
+                lunch,
                 worked_hours,
             }
         })
@@ -318,6 +399,8 @@ pub enum EntryKind {
     Work,
     /// A private appointment (e.g. the doctor): not company time.
     Private,
+    /// The day's lunch break: no work address and no planned hours.
+    Lunch,
 }
 
 /// A timed calendar entry and what its title makes it.
@@ -330,10 +413,21 @@ pub struct TimedEntry<'a> {
     pub location: &'a str,
 }
 
-/// The calendar's timed entries, classified by title (see [`classify`]).
+/// [`classified_entries`] without a lunch title, for tests in modules that
+/// do not exercise lunch.
+#[cfg(test)]
 pub fn timed_entries<'a>(
     calendar: &'a [Occurrence],
     private_words: &[String],
+) -> Vec<TimedEntry<'a>> {
+    classified_entries(calendar, private_words, "")
+}
+
+/// The calendar's timed entries, classified by title (see [`classify`]).
+pub fn classified_entries<'a>(
+    calendar: &'a [Occurrence],
+    private_words: &[String],
+    lunch_title: &str,
 ) -> Vec<TimedEntry<'a>> {
     calendar
         .iter()
@@ -344,7 +438,7 @@ pub fn timed_entries<'a>(
                 summary,
                 location,
             } => Some(TimedEntry {
-                kind: classify(summary, private_words),
+                kind: classify(summary, private_words, lunch_title),
                 start: *start,
                 end: *end,
                 summary,
@@ -357,8 +451,8 @@ pub fn timed_entries<'a>(
 
 /// Classifies a timed calendar entry by its title. A configured word matches
 /// a whole word of the title, case-insensitively ("Lægemiddelfirma" is not
-/// "Læge").
-fn classify(summary: &str, private_words: &[String]) -> EntryKind {
+/// "Læge"). A private word wins over the lunch title.
+fn classify(summary: &str, private_words: &[String], lunch_title: &str) -> EntryKind {
     let words = |s: &str| -> Vec<String> {
         s.split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -366,12 +460,14 @@ fn classify(summary: &str, private_words: &[String]) -> EntryKind {
             .collect()
     };
     let title = words(summary);
-    let private = private_words.iter().any(|k| {
+    let has = |k: &str| {
         let k = words(k);
         !k.is_empty() && title.windows(k.len()).any(|w| w == k.as_slice())
-    });
-    if private {
+    };
+    if private_words.iter().any(|k| has(k)) {
         EntryKind::Private
+    } else if has(lunch_title) {
+        EntryKind::Lunch
     } else {
         EntryKind::Work
     }
@@ -470,21 +566,29 @@ fn work_segments(
     (merged, note)
 }
 
-/// Worked minutes minus break, rounded. Returns hours and the break deducted.
-fn worked(total_minutes: i64, cfg: &Config) -> (f64, u32) {
-    if total_minutes <= 0 {
-        return (0.0, 0);
+/// A lunch window of `minutes` from `start` on `date`; `None` for 0 minutes.
+fn window(date: NaiveDate, start: chrono::NaiveTime, minutes: u32, tz: Tz) -> Option<Span> {
+    if minutes == 0 {
+        return None;
     }
-    let brk = i64::from(cfg.periods.unpaid_break_minutes).min(total_minutes);
-    let mut minutes = total_minutes - brk;
+    let s = tz.from_local_datetime(&date.and_time(start)).earliest()?;
+    Some((s, s + Duration::minutes(i64::from(minutes))))
+}
+
+/// Hours at work minus the part of the lunch window that overlaps it, rounded
+/// to `round_to` minutes. Lunch outside work time (e.g. inside a private
+/// appointment or a lunch errand) is not deducted.
+fn worked(segments: &[Span], lunch: Option<Span>, round_to: u32) -> f64 {
+    let left = subtract(segments, lunch.as_slice());
+    let mut minutes: i64 = left.iter().map(|(s, e)| (*e - *s).num_minutes()).sum();
     if minutes <= 0 {
-        return (0.0, brk as u32);
+        return 0.0;
     }
-    let step = i64::from(cfg.periods.round_to_minutes);
+    let step = i64::from(round_to);
     if step > 0 {
         minutes = (minutes + step / 2) / step * step;
     }
-    (minutes as f64 / 60.0, brk as u32)
+    minutes as f64 / 60.0
 }
 
 #[cfg(test)]
@@ -492,13 +596,12 @@ mod tests {
     use super::*;
     use crate::calendar;
     use crate::trips::parse_time;
+    use chrono::NaiveTime;
 
     fn cfg(extra: &str) -> Config {
         toml::from_str(&format!(
             r#"
             employee_number = "1"
-            [periods]
-            unpaid_break_minutes = 30
             [danlon]
             {extra}
             "#
@@ -602,7 +705,7 @@ END:VEVENT
     #[test]
     fn working_time_is_time_at_calendar_address() {
         let mut cfg = cfg("");
-        cfg.periods.unpaid_break_minutes = 0;
+        cfg.lunch.minutes = 0;
         cfg.calendar = Some(crate::config::CalendarConfig {
             source: String::new(),
             norm_from_calendar: true,
@@ -704,7 +807,7 @@ END:VEVENT
     #[test]
     fn workplace_counts_on_calendar_days_elsewhere() {
         let mut cfg = cfg("");
-        cfg.periods.unpaid_break_minutes = 0;
+        cfg.lunch.minutes = 0;
         cfg.workplace = Some("Kontorvej 1, 8000 Aarhus C".into());
         cfg.calendar = Some(crate::config::CalendarConfig {
             source: String::new(),
@@ -749,7 +852,7 @@ END:VEVENT
     fn private_appointments_are_not_company_time() {
         // `private_keywords` defaults to ["Læge", "Tandlæge", "Fysioterapeut"].
         let mut cfg = cfg("[calendar]\nsource = \"\"");
-        cfg.periods.unpaid_break_minutes = 0;
+        cfg.lunch.minutes = 0;
         let ics = "BEGIN:VEVENT
 UID:w
 SUMMARY:Kontor
@@ -853,6 +956,108 @@ END:VEVENT
         let r = build(&cfg, m, &trips, &occ);
         assert_eq!(r.days[4].worked_hours, 482.0 / 60.0);
         assert!(r.days[4].appointments.is_empty());
+    }
+
+    #[test]
+    fn lunch_overlap_with_work_time_is_deducted() {
+        let cfg = cfg("[calendar]\nsource = \"\"");
+        let ics = "BEGIN:VEVENT
+UID:w
+SUMMARY:Kontor
+LOCATION:Kontorvej 1\\, 8000 Aarhus C
+DTSTART;TZID=Europe/Copenhagen:20261005T080000
+DTEND;TZID=Europe/Copenhagen:20261005T160000
+RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;COUNT=7
+END:VEVENT
+BEGIN:VEVENT
+UID:l
+SUMMARY:Læge
+DTSTART;TZID=Europe/Copenhagen:20261008T113000
+DTEND;TZID=Europe/Copenhagen:20261008T123000
+END:VEVENT
+BEGIN:VEVENT
+UID:f
+SUMMARY:Frokost
+LOCATION:Café Kanten\\, Åboulevarden 1\\, 8000 Aarhus C
+DTSTART;TZID=Europe/Copenhagen:20261009T123000
+DTEND;TZID=Europe/Copenhagen:20261009T130000
+RRULE:FREQ=WEEKLY;COUNT=2
+END:VEVENT
+";
+        let m = Month::parse("2026-10").unwrap();
+        let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
+        let (home, office) = ("Hjem", "Kontorvej 1, 8000 Aarhus");
+        let mut trips = Vec::new();
+        for (day, arrive, leave) in [
+            ("05", "07:52", "16:05"),
+            ("06", "08:00", "11:30"),
+            ("07", "08:00", "16:00"),
+            ("08", "08:00", "16:00"),
+            ("09", "08:00", "16:00"),
+            ("12", "08:00", "16:00"),
+            ("13", "08:00", "16:00"),
+        ] {
+            let at = |t: &str| format!("2026-10-{day} {t}");
+            trips.push(located_trip(&cfg, &at("07:30"), &at(arrive), home, office));
+            if day == "07" {
+                // Lunch errand: away 11:45–12:30.
+                trips.push(located_trip(
+                    &cfg,
+                    &at("11:45"),
+                    &at("11:55"),
+                    office,
+                    "Bager",
+                ));
+                trips.push(located_trip(
+                    &cfg,
+                    &at("12:20"),
+                    &at("12:30"),
+                    "Bager",
+                    office,
+                ));
+            }
+            trips.push(located_trip(&cfg, &at(leave), &at("16:30"), office, home));
+        }
+        let at = |h, min| NaiveTime::from_hms_opt(h, min, 0).unwrap();
+        let overrides = BTreeMap::from([
+            (
+                m.first_day() + Duration::days(11),
+                LunchOverride {
+                    start: at(11, 0),
+                    minutes: 45,
+                },
+            ),
+            (
+                m.first_day() + Duration::days(12),
+                LunchOverride {
+                    start: at(12, 0),
+                    minutes: 0,
+                },
+            ),
+        ]);
+        let r = build_with_overrides(&cfg, m, &trips, &occ, &overrides);
+        let day = |i: usize| (r.days[i].worked_hours * 60.0).round() as i64;
+
+        // Normal day 07:52–16:05 (493 min): 30 min deducted.
+        assert_eq!(day(4), 493 - 30);
+        assert_eq!(r.days[4].lunch_text(), "12:00–12:30 (default)");
+        // Work ends 11:30: no deduction.
+        assert_eq!(day(5), 210);
+        // Lunch errand gap 11:45–12:30 already covers lunch: nothing more.
+        assert_eq!(r.days[6].periods_text(), "08:00–11:45, 12:30–16:00");
+        assert_eq!(day(6), 435);
+        // Doctor 11:30–12:30 covers lunch: deducted once.
+        assert_eq!(day(7), 480 - 60);
+        // Frokost event sets the window; not a work address, no planned hours.
+        assert_eq!(day(8), 480 - 30);
+        assert_eq!(r.days[8].lunch_text(), "12:30–13:00 (calendar)");
+        assert_eq!(r.days[8].norm_hours, 8.0);
+        assert_eq!(r.days[8].work_locations, vec!["Kontorvej 1, 8000 Aarhus C"]);
+        // Override beats the event; 0 minutes is no lunch.
+        assert_eq!(day(11), 480 - 45);
+        assert_eq!(r.days[11].lunch_text(), "11:00–11:45 (override)");
+        assert_eq!(day(12), 480);
+        assert_eq!(r.days[12].lunch_text(), "none (override)");
     }
 
     #[test]

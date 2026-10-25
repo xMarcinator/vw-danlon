@@ -38,9 +38,15 @@ private_keywords = ["Læge", "Tandlæge", "Fysioterapeut"]  # timed entries that
 # default_location = "Kontorvej 1, 8000 Aarhus C"   # for days without a located entry
 
 [periods]
-unpaid_break_minutes = 0
 round_to_minutes = 0
 count_travel_time = false   # true: include the drive to/from the work address
+
+# Lunch break, deducted only where it overlaps time at work. A timed calendar
+# event with this title sets the day's lunch instead; `lunch set` overrides both.
+[lunch]
+start = "12:00"
+minutes = 30
+title = "Frokost"
 
 # Tax-free mileage allowance (skattefri kørselsgodtgørelse).
 [mileage]

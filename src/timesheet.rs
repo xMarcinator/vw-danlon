@@ -19,7 +19,7 @@ pub fn write(cfg: &Config, r: &MonthReport, mut w: impl Write) -> Result<()> {
     writeln!(w)?;
     writeln!(
         w,
-        "Dato;Ugedag;Start;Slut;Perioder;Arbejdsadresse;Pause (min);Arbejdstid (timer);Normtid (timer);Difference;Bemærkning"
+        "Dato;Ugedag;Start;Slut;Perioder;Arbejdsadresse;Frokost;Arbejdstid (timer);Normtid (timer);Difference;Bemærkning"
     )?;
     for d in &r.days {
         let time = |t: Option<chrono::DateTime<chrono_tz::Tz>>| {
@@ -40,7 +40,7 @@ pub fn write(cfg: &Config, r: &MonthReport, mut w: impl Write) -> Result<()> {
                 String::new()
             },
             if worked {
-                d.break_minutes.to_string()
+                d.lunch_text()
             } else {
                 String::new()
             },
