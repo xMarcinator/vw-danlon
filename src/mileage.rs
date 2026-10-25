@@ -1248,6 +1248,7 @@ mod tests {
             start: at("2026-10-08 10:02"),
             end: at("2026-10-08 11:14"),
             label: "Privat".into(),
+            kind: Default::default(),
             replaces: None,
         }];
         let cal = crate::month::recorded_entries(&recorded, chrono_tz::Europe::Copenhagen);

@@ -18,7 +18,7 @@ use crate::address::{self, Places};
 use crate::calendar::Occurrence;
 use crate::config::Config;
 use crate::holidays;
-use crate::state::{PrivateInterval, State};
+use crate::state::{PlannedWindow, PrivateInterval, State};
 use crate::trips::Trip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,7 +283,8 @@ impl MonthReport {
 /// (`NaiveDate::MAX`: the whole month). The lunch overrides in `state` beat
 /// a lunch calendar event, which beats the `[lunch]` default. Recorded
 /// private time counts like a private appointment; one linked to an
-/// appointment replaces that appointment's planned window. Recorded
+/// appointment replaces that appointment's planned window, and an
+/// appointment whose time you deleted counts nothing. Recorded
 /// home-working time, and the planned window of a home-working event on a
 /// day up to today, count as worked.
 pub fn build(
@@ -347,16 +348,17 @@ pub fn build(
             } => {
                 match classify(summary, private_words, &cfg.lunch.title) {
                     EntryKind::Private => {
-                        let measured =
-                            recorded
-                                .iter()
-                                .filter_map(|i| i.replaces.as_ref())
-                                .any(|w| {
-                                    w.title == *summary
-                                        && w.start == start.naive_local()
-                                        && w.end == end.naive_local()
-                                });
-                        if measured {
+                        let window = PlannedWindow {
+                            title: summary.clone(),
+                            start: start.naive_local(),
+                            end: end.naive_local(),
+                        };
+                        // Measured (or calendar time, the same window), or
+                        // deleted because you did not go.
+                        let measured = recorded
+                            .iter()
+                            .any(|i| i.replaces.as_ref() == Some(&window));
+                        if measured || state.dismissed.contains(&window) {
                             continue;
                         }
                         for span in split_at_midnight(*start, *end, tz) {
@@ -1342,6 +1344,7 @@ END:VEVENT
                 start: at("2026-11-02 10:02"),
                 end: at("2026-11-02 11:14"),
                 label: "Læge".into(),
+                kind: Default::default(),
                 replaces: None,
             },
             PrivateInterval {
@@ -1349,6 +1352,7 @@ END:VEVENT
                 start: at("2026-11-03 12:30"),
                 end: at("2026-11-03 14:10"),
                 label: "Læge".into(),
+                kind: Default::default(),
                 replaces: Some(crate::state::PlannedWindow {
                     title: "Læge".into(),
                     start: at("2026-11-03 13:00"),
@@ -1548,6 +1552,7 @@ END:VEVENT
             start: at("2026-11-04 12:30"),
             end: at("2026-11-04 15:00"),
             label: "Hjemmearbejde".into(),
+            kind: Default::default(),
             replaces: None,
         });
         let today = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();

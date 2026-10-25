@@ -23,8 +23,9 @@ pub const FILE_NAME: &str = "vw-danlon.db";
 
 /// The schema version, kept in `PRAGMA user_version`. Version 2 added the
 /// home-working timer ([`HOME_SCHEMA`]), version 3 the trip overrides
-/// ([`OVERRIDE_SCHEMA`]).
-const VERSION: i32 = 3;
+/// ([`OVERRIDE_SCHEMA`]), version 4 calendar time and the deleted private
+/// appointments ([`CALENDAR_TIME_SCHEMA`]).
+const VERSION: i32 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -99,6 +100,19 @@ const OVERRIDE_SCHEMA: &str = "
 CREATE TABLE trip_overrides (start TEXT PRIMARY KEY, business INTEGER NOT NULL);
 ";
 
+/// What version 4 added: whether a private interval is calendar time (the
+/// planned window of an appointment left untouched), and the private
+/// appointments whose time you deleted.
+const CALENDAR_TIME_SCHEMA: &str = "
+ALTER TABLE private_intervals ADD COLUMN calendar_time INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE private_dismissed (
+    title TEXT NOT NULL,
+    start TEXT NOT NULL,
+    end TEXT NOT NULL,
+    PRIMARY KEY (title, start, end)
+);
+";
+
 /// The JSON files earlier versions kept beside the config file.
 const TRIPS_JSON: &str = "trips.json";
 const STATE_JSON: &str = "state.json";
@@ -137,6 +151,9 @@ fn upgrade(conn: &mut Connection, path: &Path) -> Result<()> {
     if version <= 2 {
         tx.execute_batch(OVERRIDE_SCHEMA)?;
     }
+    if version <= 3 {
+        tx.execute_batch(CALENDAR_TIME_SCHEMA)?;
+    }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()
         .with_context(|| format!("upgrading the database {}", path.display()))
@@ -147,6 +164,15 @@ pub(crate) fn has_table(conn: &Connection, name: &str) -> rusqlite::Result<bool>
     conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
         [name],
+        |r| r.get(0),
+    )
+}
+
+/// Whether the database's table `table` has the column `column`.
+pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        [table, column],
         |r| r.get(0),
     )
 }
@@ -269,6 +295,7 @@ fn build(path: &Path, tmp: &Path) -> Result<Vec<PathBuf>> {
     tx.execute_batch(SCHEMA)?;
     tx.execute_batch(HOME_SCHEMA)?;
     tx.execute_batch(OVERRIDE_SCHEMA)?;
+    tx.execute_batch(CALENDAR_TIME_SCHEMA)?;
     let mut moved = Vec::new();
     if let Some(t) = &trips {
         crate::trip_store::insert(&tx, &t.trips)?;
@@ -463,13 +490,15 @@ mod tests {
     }
 
     #[test]
-    fn a_version_1_database_gets_the_home_and_override_tables() {
+    fn a_version_1_database_gets_the_later_tables() {
         let dir = temp_dir("db-upgrade");
         let db = dir.join(FILE_NAME);
         State::update(&db, |s| s.entered.insert("2026-10-05".parse().unwrap())).unwrap();
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
             "DROP TABLE home_intervals; DROP TABLE home_running; DROP TABLE trip_overrides; \
+             DROP TABLE private_dismissed; \
+             ALTER TABLE private_intervals DROP COLUMN calendar_time; \
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -481,12 +510,20 @@ mod tests {
         assert_eq!((s.entered.len(), s.home.intervals.len()), (1, 0));
         assert!(!has_table(&conn, "home_intervals").unwrap());
         assert!(s.trip_overrides.is_empty());
+        assert!(s.dismissed.is_empty());
+        assert!(!has_column(&conn, "private_intervals", "calendar_time").unwrap());
         drop(conn);
 
         let trip_start: chrono::DateTime<chrono::FixedOffset> =
             "2026-10-06T07:45:00+02:00".parse().unwrap();
+        let w = crate::state::PlannedWindow {
+            title: "Læge".into(),
+            start: "2026-10-06T13:00:00".parse().unwrap(),
+            end: "2026-10-06T14:00:00".parse().unwrap(),
+        };
         State::update(&db, |s| {
             s.trip_overrides.insert(trip_start, true);
+            s.dismissed.insert(w.clone());
             s.home
                 .start("2026-10-06T08:00:00".parse().unwrap(), None, None)
                 .map(|_| ())
@@ -496,6 +533,7 @@ mod tests {
         let s = State::load(&db).unwrap();
         assert_eq!((s.entered.len(), s.home.running.is_some()), (1, true));
         assert_eq!(s.trip_overrides.get(&trip_start), Some(&true));
+        assert!(s.dismissed.contains(&w));
         let conn = open(&db).unwrap();
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))

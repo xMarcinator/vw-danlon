@@ -397,9 +397,25 @@ stop when you are back:
 cargo run -- private start [label]   # links the current or next private event
 cargo run -- private stop
 cargo run -- private list 2026-11
-cargo run -- private edit <id> 12:25 14:10
+cargo run -- private edit <id> 12:25 14:10 [--label <label>]
 cargo run -- private rm <id>
+cargo run -- private start --at 12:50   # the real start of an appointment started automatically
+cargo run -- private skip [--event <title>] [--date YYYY-MM-DD]   # you did not go
 ```
+
+A private calendar appointment starts automatically: once its planned start
+has passed and nothing records it, `private list` (and the app) show it as
+"started automatically" from the planned start. `private start --at HH:MM`
+sets its real start, `private stop` records its planned start until now, and
+`private skip` says you did not go. Left untouched until `grace_minutes`
+(default 60) after its planned end, its planned window is recorded and
+marked "calendar time" the next time the CLI or the app loads it (there is
+no background service); the month's numbers are the same before and after.
+`private list` shows each entry's kind: recorded, calendar time or started
+automatically. Every entry can be edited, relabelled or deleted at any time;
+deleting one for a calendar appointment means you did not go, so that
+appointment then counts no private time and is not recorded again. Switch
+this off with `[private] auto_start = false`.
 
 `private start` links to the private calendar appointment that is running,
 or starts within 2 hours, that day, and takes its title as the label

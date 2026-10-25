@@ -222,11 +222,16 @@ enum TripsAction {
 
 #[derive(Subcommand)]
 enum PrivateAction {
-    /// Start the timer; it links to the current or next private calendar
-    /// appointment today and takes its title as the label.
+    /// Start the timer; it links to the private calendar appointment that
+    /// started automatically, else the current or next one today, and
+    /// takes its title as the label.
     Start {
         /// Label (default: the linked appointment's title, else "Privat").
         label: Option<String>,
+        /// Start at this time today (HH:MM, not later than now), e.g. the
+        /// real start of an appointment that started automatically.
+        #[arg(long)]
+        at: Option<String>,
         /// Link the private appointment today with this title.
         #[arg(long, conflicts_with = "no_event")]
         event: Option<String>,
@@ -234,23 +239,41 @@ enum PrivateAction {
         #[arg(long)]
         no_event: bool,
     },
-    /// Stop the timer and record the interval.
+    /// Stop the timer and record the interval; without a running timer,
+    /// stop the appointment that started automatically (its planned start
+    /// until now is recorded).
     Stop,
-    /// Show the recorded intervals of a month.
+    /// Show a month's private time: recorded, calendar time, and started
+    /// automatically.
     List {
         /// Month as YYYY-MM.
         month: String,
     },
-    /// Change a recorded interval's start and end.
+    /// Change an interval's start and end (calendar time included).
     Edit {
         id: u32,
         /// Start as HH:MM.
         start: String,
         /// End as HH:MM.
         end: String,
+        /// New label.
+        #[arg(long)]
+        label: Option<String>,
     },
-    /// Delete a recorded interval.
+    /// Delete an interval. For a calendar appointment this means you did
+    /// not go: it then counts no private time.
     Rm { id: u32 },
+    /// You did not go to a private appointment that has not been recorded
+    /// (default: the one that started automatically today): it counts no
+    /// private time.
+    Skip {
+        /// The appointment's title.
+        #[arg(long)]
+        event: Option<String>,
+        /// Its day as YYYY-MM-DD (default: today).
+        #[arg(long)]
+        date: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -318,6 +341,10 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
+            let now = chrono::Utc::now()
+                .with_timezone(&cfg.timezone)
+                .naive_local();
+            print_calendar_time(&service::settle_private(&cfg, &cal, now)?);
             let report = build_month(&cfg, month, &trips, &cal, today)?;
             print_days(&report, true);
             if let Some(m) = mileage_for(&cfg, month, &trips, &cal)? {
@@ -700,9 +727,20 @@ fn lunch(cfg: &Config, action: LunchAction) -> Result<()> {
 fn private(cfg: &Config, mode: service::CalendarMode, action: PrivateAction) -> Result<()> {
     let path = &cfg.database;
     let now = chrono::Utc::now().with_timezone(&cfg.timezone);
+    let this_month = || {
+        calendar(
+            cfg,
+            Month {
+                year: now.year(),
+                month: now.month(),
+            },
+            mode,
+        )
+    };
     match action {
         PrivateAction::Start {
             label,
+            at,
             event,
             no_event,
         } => {
@@ -711,20 +749,12 @@ fn private(cfg: &Config, mode: service::CalendarMode, action: PrivateAction) -> 
                 (Some(title), _) => state::EventChoice::Title(title),
                 (None, false) => state::EventChoice::Auto,
             };
-            let window = match choice {
-                state::EventChoice::None => None,
-                _ => {
-                    let today = Month {
-                        year: now.year(),
-                        month: now.month(),
-                    };
-                    let cal = calendar(cfg, today, mode)?;
-                    state::link_event(&service::timed_entries(cfg, &cal), now, &choice)?
-                }
+            let at = at.as_deref().map(state::parse_time).transpose()?;
+            let cal = match choice {
+                state::EventChoice::None => Vec::new(),
+                _ => this_month()?,
             };
-            let r = state::State::update(path, |s| {
-                s.private.start(now.naive_local(), label, window).cloned()
-            })??;
+            let r = service::start_private(cfg, &cal, now, &choice, at, label)?;
             print!("Timer started {} ({})", r.start.format("%H:%M"), r.label);
             match &r.replaces {
                 Some(w) => println!(
@@ -737,22 +767,51 @@ fn private(cfg: &Config, mode: service::CalendarMode, action: PrivateAction) -> 
             }
         }
         PrivateAction::Stop => {
-            let i = state::State::update(path, |s| s.private.stop(now.naive_local()).cloned())??;
-            println!("Recorded {}", interval_text(&i));
+            let running = state::State::load(path)?.private.running.is_some();
+            let cal = if running { Vec::new() } else { this_month()? };
+            let i = service::stop_private(cfg, &cal, now.naive_local())?;
+            println!("Recorded {}", private_text(&i));
         }
         PrivateAction::List { month } => {
             let month = Month::parse(&month)?;
-            let p = state::State::load(path)?.private;
+            let cal = calendar(cfg, month, mode)?;
+            // Listed below with the rest.
+            service::settle_private(cfg, &cal, now.naive_local())?;
+            let s = state::State::load(path)?;
             let mut any = false;
-            for i in p
+            for i in s
+                .private
                 .intervals
                 .iter()
                 .filter(|i| month.contains(i.start.date()))
             {
-                println!("{}", interval_text(i));
+                println!("{}", private_text(i));
                 any = true;
             }
-            if let Some(r) = p.running.filter(|r| month.contains(r.start.date())) {
+            let t = service::private_time(
+                &service::timed_entries(cfg, &cal),
+                &s,
+                &cfg.private,
+                month.first_day(),
+                month.last_day(),
+                now.naive_local(),
+            );
+            for item in &t.items {
+                if let service::PrivateState::StartedAutomatically { since } = item.state {
+                    let end = item.planned.map(|p| p.1).unwrap_or(since);
+                    println!(
+                        "  -  {}  {}–       started automatically  {}  (planned until {}; \
+                         recorded as calendar time at {} unless you stop, start or skip it)",
+                        since.format("%Y-%m-%d"),
+                        since.format("%H:%M"),
+                        item.label,
+                        end.format("%H:%M"),
+                        (end + cfg.private.grace()).format("%H:%M"),
+                    );
+                    any = true;
+                }
+            }
+            if let Some(r) = s.private.running.filter(|r| month.contains(r.start.date())) {
                 println!(
                     "running  since {}  {}",
                     r.start.format("%Y-%m-%d %H:%M"),
@@ -764,18 +823,75 @@ fn private(cfg: &Config, mode: service::CalendarMode, action: PrivateAction) -> 
                 println!("No private time recorded in {month}");
             }
         }
-        PrivateAction::Edit { id, start, end } => {
+        PrivateAction::Edit {
+            id,
+            start,
+            end,
+            label,
+        } => {
             let start = state::parse_time(&start)?;
             let end = state::parse_time(&end)?;
-            let i = state::State::update(path, |s| s.private.edit(id, start, end).cloned())??;
-            println!("Changed {}", interval_text(&i));
+            let i = state::State::update(path, |s| {
+                s.private.edit(id, start, end)?;
+                if let Some(label) = &label {
+                    s.private.relabel(id, label)?;
+                }
+                s.private
+                    .intervals
+                    .iter()
+                    .find(|i| i.id == id)
+                    .cloned()
+                    .context("the interval vanished")
+            })??;
+            println!("Changed {}", private_text(&i));
         }
         PrivateAction::Rm { id } => {
-            let i = state::State::update(path, |s| s.private.remove(id))??;
-            println!("Deleted {}", interval_text(&i));
+            let i = service::delete_private(cfg, id)?;
+            println!("Deleted {}", private_text(&i));
+            if let Some(w) = &i.replaces {
+                println!(
+                    "{} {}–{} now counts no private time (you did not go)",
+                    w.title,
+                    w.start.format("%Y-%m-%d %H:%M"),
+                    w.end.format("%H:%M")
+                );
+            }
+        }
+        PrivateAction::Skip { event, date } => {
+            let date = match date {
+                Some(d) => state::parse_date(&d)?,
+                None => now.date_naive(),
+            };
+            let cal = calendar(
+                cfg,
+                Month {
+                    year: date.year(),
+                    month: date.month(),
+                },
+                mode,
+            )?;
+            let w = service::skip_private(cfg, &cal, date, event.as_deref(), now.naive_local())?;
+            println!(
+                "{} {}–{} counts no private time (you did not go)",
+                w.title,
+                w.start.format("%Y-%m-%d %H:%M"),
+                w.end.format("%H:%M")
+            );
         }
     }
     Ok(())
+}
+
+/// Says which private appointments were just recorded as calendar time.
+fn print_calendar_time(recorded: &[state::PrivateInterval]) {
+    for i in recorded {
+        println!("Calendar time recorded: {}", private_text(i));
+    }
+}
+
+/// A private interval as a line, with its kind.
+fn private_text(i: &state::PrivateInterval) -> String {
+    format!("{}  [{}]", interval_text(i), i.kind.name())
 }
 
 fn home(cfg: &Config, action: HomeAction) -> Result<()> {

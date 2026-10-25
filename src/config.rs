@@ -36,6 +36,8 @@ pub struct Config {
     pub vacation: VacationConfig,
     #[serde(default)]
     pub home_working: HomeWorkingConfig,
+    #[serde(default)]
+    pub private: PrivateConfig,
     /// The Min Volkswagen account (Connected Cars) for `trips sync`.
     pub connected_cars: Option<ConnectedCarsConfig>,
     pub danlon: DanlonConfig,
@@ -181,6 +183,41 @@ impl Default for HomeWorkingConfig {
             keywords: default_home_working_keywords(),
             at_home_address: true,
         }
+    }
+}
+
+/// `[private]`: private calendar appointments start automatically.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateConfig {
+    /// A private appointment whose start has passed without a recording
+    /// shows as started automatically, and is recorded as "calendar time"
+    /// (its planned window) once `grace_minutes` after its end have passed
+    /// untouched.
+    #[serde(default = "yes")]
+    pub auto_start: bool,
+    #[serde(default = "default_grace_minutes")]
+    pub grace_minutes: u32,
+}
+
+fn default_grace_minutes() -> u32 {
+    60
+}
+
+impl Default for PrivateConfig {
+    fn default() -> Self {
+        PrivateConfig {
+            auto_start: true,
+            grace_minutes: default_grace_minutes(),
+        }
+    }
+}
+
+impl PrivateConfig {
+    /// How long after its planned end an untouched appointment waits before
+    /// its planned window is recorded.
+    pub fn grace(&self) -> chrono::Duration {
+        chrono::Duration::minutes(i64::from(self.grace_minutes))
     }
 }
 

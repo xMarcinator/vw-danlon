@@ -102,6 +102,14 @@ threshold_km = 20000
 # keywords = ["Hjemmearbejde", "Hjemme"]
 # at_home_address = true
 
+# Private calendar appointments (see calendar.private_keywords) start
+# automatically when their planned start has passed; one you have not
+# started, stopped or changed by grace_minutes after its planned end is
+# recorded with its planned window, marked "calendar time".
+# [private]
+# auto_start = true
+# grace_minutes = 60
+
 [danlon]
 # "none": Danløn reports its own Normtimer (160,33 for 37 h/week), which is
 #         what Skat expects for full-time monthly salaried employees.

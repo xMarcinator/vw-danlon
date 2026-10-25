@@ -6,18 +6,21 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 
 use crate::calendar::{self, Occurrence};
 use crate::checklist::{self, ChecklistDay};
-use crate::config::{Config, MileageConfig};
+use crate::config::{Config, MileageConfig, PrivateConfig};
 use crate::connected_cars::{self, TokenStore, Vehicle};
 use crate::db;
 use crate::mileage::{self, MileageMonth, Status};
 use crate::month::{self, EntryKind, Month, MonthReport, TimedEntry};
-use crate::state::{self, EventChoice, Private, RunningTimer, State};
+use crate::state::{
+    self, Appointment, EventChoice, IntervalKind, PlannedWindow, PrivateInterval, RunningTimer,
+    State,
+};
 use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
 use crate::vacation::{self, Overview, Rules};
@@ -179,6 +182,36 @@ pub fn timed_entries<'a>(cfg: &Config, cal: &'a [Occurrence]) -> Vec<TimedEntry<
     entries
 }
 
+/// The calendar's entries with the recorded private time, for classifying
+/// trips: a private appointment whose time you deleted is left out.
+fn trip_entries<'a>(cfg: &Config, cal: &'a [Occurrence], state: &'a State) -> Vec<TimedEntry<'a>> {
+    let mut entries = timed_entries(cfg, cal);
+    entries.retain(|e| e.kind != EntryKind::Private || !state.dismissed.contains(&window_of(e)));
+    entries.extend(month::recorded_entries(
+        &state.private.intervals,
+        cfg.timezone,
+    ));
+    entries
+}
+
+/// A private calendar entry's planned window.
+fn window_of(e: &TimedEntry) -> PlannedWindow {
+    PlannedWindow {
+        title: e.summary.to_string(),
+        start: e.start.naive_local(),
+        end: e.end.naive_local(),
+    }
+}
+
+/// The private appointments among `entries`.
+fn private_windows(entries: &[TimedEntry]) -> Vec<PlannedWindow> {
+    entries
+        .iter()
+        .filter(|e| e.kind == EntryKind::Private)
+        .map(window_of)
+        .collect()
+}
+
 /// The month's work calendar and norm hours, without trips or the state
 /// file; the totals are the whole month's.
 pub fn norm_month(cfg: &Config, month: Month, cal: &[Occurrence]) -> MonthReport {
@@ -223,11 +256,7 @@ pub fn compute_mileage(
     cal: &[Occurrence],
 ) -> Result<MileageMonth> {
     let state = State::load(&cfg.database)?;
-    let mut entries = timed_entries(cfg, cal);
-    entries.extend(month::recorded_entries(
-        &state.private.intervals,
-        cfg.timezone,
-    ));
+    let entries = trip_entries(cfg, cal, &state);
     mileage::compute(
         mcfg,
         cfg.workplace.as_deref(),
@@ -302,11 +331,7 @@ pub fn fradrag(
             }
         }
     }
-    let mut entries = timed_entries(cfg, &cal);
-    entries.extend(month::recorded_entries(
-        &state.private.intervals,
-        cfg.timezone,
-    ));
+    let entries = trip_entries(cfg, &cal, &state);
     mileage::fradrag(
         mcfg,
         cfg.workplace.as_deref(),
@@ -427,8 +452,8 @@ pub struct MonthView {
     pub private: PrivateTime,
 }
 
-/// The month's days and mileage as `report` builds them, and the private
-/// time from `now`'s day through [`PRIVATE_DAYS_AHEAD`] days later. `cal`
+/// The month's days and mileage as `report` builds them (calendar time
+/// recorded first, see [`settle_private`]), and the private time from `now`'s day through [`PRIVATE_DAYS_AHEAD`] days later. `cal`
 /// may reach past the month (see [`month_calendar`]); the days and mileage
 /// use only the occurrences up to the month's end, like `report`.
 pub fn month_view(
@@ -445,11 +470,13 @@ pub fn month_view(
         .cloned()
         .collect();
     let today = now.date_naive();
+    settle_private(cfg, cal, now.naive_local())?;
     let report = build_month(cfg, month, trips, &up_to, today)?;
     let mileage = mileage_for(cfg, month, trips, &up_to)?;
     let private = private_time(
         &timed_entries(cfg, cal),
-        &State::load(&cfg.database)?.private,
+        &State::load(&cfg.database)?,
+        &cfg.private,
         today,
         today + Duration::days(PRIVATE_DAYS_AHEAD),
         now.naive_local(),
@@ -475,11 +502,16 @@ pub enum PrivateState {
     Planned,
     /// The timer measures it now.
     Running { since: NaiveDateTime },
-    /// Measured with the timer; `id` is the recorded interval's.
+    /// A private appointment whose start has passed without a recording:
+    /// it counts as running since its planned start (see
+    /// [`Appointment::StartedAutomatically`]).
+    StartedAutomatically { since: NaiveDateTime },
+    /// Recorded; `id` is the interval's.
     Recorded {
         id: u32,
         start: NaiveDateTime,
         end: NaiveDateTime,
+        kind: IntervalKind,
     },
 }
 
@@ -498,6 +530,7 @@ impl PrivateItem {
     pub fn start(&self) -> NaiveDateTime {
         match (&self.state, self.planned) {
             (PrivateState::Running { since }, _) => *since,
+            (PrivateState::StartedAutomatically { since }, _) => *since,
             (PrivateState::Recorded { start, .. }, _) => *start,
             (PrivateState::Planned, Some((start, _))) => start,
             (PrivateState::Planned, None) => NaiveDateTime::MIN,
@@ -510,30 +543,44 @@ impl PrivateItem {
 pub struct PrivateTime {
     pub running: Option<RunningTimer>,
     pub items: Vec<PrivateItem>,
-    /// The item to show first: the running one, else the first planned
-    /// appointment that has not ended at `now`.
+    /// The item to show first: the running one, else the first one started
+    /// automatically, else the first planned appointment that has not ended
+    /// at `now`.
     pub current: Option<usize>,
 }
 
 /// The private appointments and recorded intervals starting `from`
 /// through `to`, and the running timer when it started then or `now` is
 /// in that range. A recording or timer linked to an appointment is shown
-/// as that appointment.
+/// as that appointment; an appointment whose start has passed without one
+/// shows as started automatically; one whose time you deleted is left out.
 pub fn private_time(
     entries: &[TimedEntry],
-    private: &Private,
+    state: &State,
+    pcfg: &PrivateConfig,
     from: NaiveDate,
     to: NaiveDate,
     now: NaiveDateTime,
 ) -> PrivateTime {
+    let private = &state.private;
     let in_range = |d: NaiveDate| from <= d && d <= to;
     let mut items: Vec<PrivateItem> = entries
         .iter()
         .filter(|e| e.kind == month::EntryKind::Private && in_range(e.start.date_naive()))
-        .map(|e| PrivateItem {
-            label: e.summary.to_string(),
-            planned: Some((e.start.naive_local(), e.end.naive_local())),
-            state: PrivateState::Planned,
+        .filter_map(|e| {
+            let w = window_of(e);
+            let state = match state.appointment(&w, now, pcfg) {
+                Appointment::Dismissed => return None,
+                Appointment::StartedAutomatically => {
+                    PrivateState::StartedAutomatically { since: w.start }
+                }
+                _ => PrivateState::Planned,
+            };
+            Some(PrivateItem {
+                label: w.title,
+                planned: Some((w.start, w.end)),
+                state,
+            })
         })
         .collect();
     let mut place = |label: &str, replaces: Option<&state::PlannedWindow>, state: PrivateState| {
@@ -568,6 +615,7 @@ pub fn private_time(
                 id: i.id,
                 start: i.start,
                 end: i.end,
+                kind: i.kind,
             },
         );
     }
@@ -587,6 +635,11 @@ pub fn private_time(
         .iter()
         .position(|i| matches!(i.state, PrivateState::Running { .. }))
         .or_else(|| {
+            items
+                .iter()
+                .position(|i| matches!(i.state, PrivateState::StartedAutomatically { .. }))
+        })
+        .or_else(|| {
             items.iter().position(|i| {
                 i.state == PrivateState::Planned && i.planned.is_some_and(|(_, end)| end > now)
             })
@@ -598,18 +651,196 @@ pub fn private_time(
     }
 }
 
-/// Starts the private timer at `now`, linked to the private calendar
-/// appointment that day that `choice` names, and saves it.
+/// Records calendar time: the planned window of each private appointment
+/// in `cal` left untouched until the grace period after its end (see
+/// [`Appointment::Due`]). Runs whenever the CLI or the app loads the
+/// private time; there is no background service. Returns what it recorded.
+pub fn settle_private(
+    cfg: &Config,
+    cal: &[Occurrence],
+    now: NaiveDateTime,
+) -> Result<Vec<PrivateInterval>> {
+    if !cfg.private.auto_start {
+        return Ok(Vec::new());
+    }
+    let windows = private_windows(&timed_entries(cfg, cal));
+    let state = State::load(&cfg.database)?;
+    let due = |s: &State| {
+        windows
+            .iter()
+            .any(|w| s.appointment(w, now, &cfg.private) == Appointment::Due)
+    };
+    if !due(&state) {
+        return Ok(Vec::new());
+    }
+    State::update(&cfg.database, |s| {
+        s.record_calendar_time(&windows, now, &cfg.private)
+    })
+}
+
+/// The private appointments in `cal` started automatically at `now`, in
+/// start order.
+fn started_automatically(
+    cfg: &Config,
+    cal: &[Occurrence],
+    state: &State,
+    now: NaiveDateTime,
+) -> Vec<PlannedWindow> {
+    let mut found: Vec<PlannedWindow> = private_windows(&timed_entries(cfg, cal))
+        .into_iter()
+        .filter(|w| state.appointment(w, now, &cfg.private) == Appointment::StartedAutomatically)
+        .collect();
+    found.sort();
+    found.dedup();
+    found.sort_by_key(|w| w.start);
+    found
+}
+
+/// Starts the private timer at `at` today (default `now`; not later than
+/// `now`), linked to the private calendar appointment that `choice` names:
+/// with [`EventChoice::Auto`] the one started automatically, else the
+/// current or next one (see [`state::link_event`]). The label defaults to
+/// the appointment's title. Setting the real start of an appointment
+/// started automatically is this, with `at` its real start.
 pub fn start_private(
     cfg: &Config,
     cal: &[Occurrence],
     now: DateTime<Tz>,
     choice: &EventChoice,
+    at: Option<NaiveTime>,
+    label: Option<String>,
 ) -> Result<RunningTimer> {
-    let window = state::link_event(&timed_entries(cfg, cal), now, choice)?;
+    let start = match at {
+        Some(t) => {
+            let start = now.date_naive().and_time(t);
+            if start > now.naive_local() {
+                bail!("{} is in the future", t.format("%H:%M"));
+            }
+            start
+        }
+        None => now.naive_local(),
+    };
+    let entries = timed_entries(cfg, cal);
     State::update(&cfg.database, |s| {
-        s.private.start(now.naive_local(), None, window).cloned()
+        let auto = match choice {
+            EventChoice::Auto => started_automatically(cfg, cal, s, now.naive_local()).pop(),
+            _ => None,
+        };
+        let window = match auto {
+            Some(w) => Some(w),
+            None => state::link_event(&entries, now, choice)?,
+        };
+        s.private.start(start, label, window).cloned()
     })?
+}
+
+/// Stops the private timer at `now` and records the interval. Without a
+/// running timer, stops the appointment started automatically (the one
+/// that started last): its planned start through `now` is recorded,
+/// replacing its planned window.
+pub fn stop_private(
+    cfg: &Config,
+    cal: &[Occurrence],
+    now: NaiveDateTime,
+) -> Result<PrivateInterval> {
+    State::update(&cfg.database, |s| {
+        if s.private.running.is_some() {
+            return s.private.stop(now).cloned();
+        }
+        let Some(w) = started_automatically(cfg, cal, s, now).pop() else {
+            bail!("no timer is running and no private appointment has started");
+        };
+        let end = state::minute(now).max(w.start);
+        Ok(s.private
+            .record(
+                w.start,
+                end,
+                w.title.clone(),
+                Some(w),
+                IntervalKind::Recorded,
+            )
+            .clone())
+    })?
+}
+
+/// Marks the private appointment on `date` titled `title` (default: the
+/// one started automatically at `now`) as not taken: you did not go, so it
+/// counts no private time and is not recorded as calendar time. An
+/// appointment with recorded time is refused, naming the interval to
+/// delete instead.
+pub fn skip_private(
+    cfg: &Config,
+    cal: &[Occurrence],
+    date: NaiveDate,
+    title: Option<&str>,
+    now: NaiveDateTime,
+) -> Result<PlannedWindow> {
+    let windows: Vec<PlannedWindow> = private_windows(&timed_entries(cfg, cal))
+        .into_iter()
+        .filter(|w| w.start.date() == date)
+        .collect();
+    State::update(&cfg.database, |s| {
+        let w = match title {
+            Some(title) => {
+                let wanted = title.trim().to_lowercase();
+                windows
+                    .iter()
+                    .find(|w| w.title.trim().to_lowercase() == wanted)
+                    .cloned()
+                    .with_context(|| {
+                        let names: Vec<&str> = windows.iter().map(|w| w.title.as_str()).collect();
+                        format!(
+                            "no private calendar event {title:?} on {date}; that day has: {}",
+                            if names.is_empty() {
+                                "none".to_string()
+                            } else {
+                                names.join(", ")
+                            }
+                        )
+                    })?
+            }
+            None => {
+                let started: Vec<&PlannedWindow> = windows
+                    .iter()
+                    .filter(|w| {
+                        s.appointment(w, now, &cfg.private) == Appointment::StartedAutomatically
+                    })
+                    .collect();
+                match started.as_slice() {
+                    [w] => (*w).clone(),
+                    [] => bail!(
+                        "no private appointment on {date} has started automatically; name it with --event"
+                    ),
+                    _ => bail!(
+                        "several private appointments on {date} have started; name one with --event"
+                    ),
+                }
+            }
+        };
+        if let Some(i) = s
+            .private
+            .intervals
+            .iter()
+            .find(|i| i.replaces.as_ref() == Some(&w))
+        {
+            bail!(
+                "{} {}–{} has recorded time; delete it with `private rm {}`",
+                w.title,
+                w.start.format("%H:%M"),
+                w.end.format("%H:%M"),
+                i.id
+            );
+        }
+        s.dismissed.insert(w.clone());
+        Ok(w)
+    })?
+}
+
+/// Deletes a recorded interval; when it was for a calendar appointment,
+/// that appointment then counts no private time (you did not go) and is
+/// not recorded again (see [`State::remove_private`]).
+pub fn delete_private(cfg: &Config, id: u32) -> Result<PrivateInterval> {
+    State::update(&cfg.database, |s| s.remove_private(id))?
 }
 
 /// Sets a recorded interval's label and start and end times; nothing is
@@ -1023,16 +1254,26 @@ mod tests {
             private("Fysioterapeut", "2026-12-20 15:00", "2026-12-20 16:00"),
             private("Gammel", "2026-11-20 09:00", "2026-11-20 10:00"),
         ];
-        let mut p = Private::default();
-        p.start(at("2026-11-24 10:02"), None, None).unwrap();
-        p.stop(at("2026-11-24 11:14")).unwrap();
+        let mut st = State::default();
+        st.private
+            .start(at("2026-11-24 10:02"), None, None)
+            .unwrap();
+        st.private.stop(at("2026-11-24 11:14")).unwrap();
         let day = |s: &str| state::parse_date(s).unwrap();
-        let view = |p: &Private, now: &str| {
-            private_time(&entries, p, day("2026-11-24"), day("2026-12-08"), at(now))
+        let view = |s: &State, now: &str| {
+            let pcfg = PrivateConfig::default();
+            private_time(
+                &entries,
+                s,
+                &pcfg,
+                day("2026-11-24"),
+                day("2026-12-08"),
+                at(now),
+            )
         };
 
         // Nothing running: the next appointment comes first.
-        let t = view(&p, "2026-11-24 12:00");
+        let t = view(&st, "2026-11-24 12:00");
         let labels: Vec<&str> = t.items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["Privat", "Læge", "Tandlæge"]);
         assert_eq!(t.current, Some(1));
@@ -1042,13 +1283,14 @@ mod tests {
         ));
 
         // A timer linked to Læge shows as Læge, running.
-        p.start(
-            at("2026-11-24 12:30"),
-            None,
-            window("Læge", "2026-11-24 13:00", "2026-11-24 14:00"),
-        )
-        .unwrap();
-        let t = view(&p, "2026-11-24 12:40");
+        st.private
+            .start(
+                at("2026-11-24 12:30"),
+                None,
+                window("Læge", "2026-11-24 13:00", "2026-11-24 14:00"),
+            )
+            .unwrap();
+        let t = view(&st, "2026-11-24 12:40");
         assert_eq!(t.items.len(), 3);
         assert_eq!(t.current, Some(1));
         assert_eq!(
@@ -1060,9 +1302,9 @@ mod tests {
 
         // Stopped and relabelled: recorded, keeping the planned window; the
         // next appointment is now Tandlæge.
-        p.stop(at("2026-11-24 14:10")).unwrap();
-        p.relabel(2, "Læge (blodprøve)").unwrap();
-        let t = view(&p, "2026-11-24 14:20");
+        st.private.stop(at("2026-11-24 14:10")).unwrap();
+        st.private.relabel(2, "Læge (blodprøve)").unwrap();
+        let t = view(&st, "2026-11-24 14:20");
         assert_eq!(t.items[1].label, "Læge (blodprøve)");
         assert_eq!(
             t.items[1].planned,
@@ -1075,12 +1317,272 @@ mod tests {
         assert_eq!(t.current, Some(2));
 
         // A timer left running since yesterday still shows today.
-        let mut p = Private::default();
-        p.start(at("2026-11-23 16:00"), None, None).unwrap();
-        let t = view(&p, "2026-11-24 08:00");
+        let mut st = State::default();
+        st.private
+            .start(at("2026-11-23 16:00"), None, None)
+            .unwrap();
+        let t = view(&st, "2026-11-24 08:00");
         assert_eq!(t.items[0].label, state::DEFAULT_LABEL);
         assert_eq!(t.current, Some(0));
         assert!(t.running.is_some());
+    }
+
+    /// A config with a calendar (for the private words), its database in a
+    /// fresh folder, and a day with home working 08:00–16:00 and Læge
+    /// 13:00–14:00 on 2026-11-03.
+    fn private_setup(name: &str, extra: &str) -> (std::path::PathBuf, Config, Vec<Occurrence>) {
+        let dir = crate::trips::tests::temp_dir(name);
+        let cfg = Config::from_text(
+            &format!(
+                "employee_number = \"1\"\n[danlon]\n[calendar]\nsource = \"cal.ics\"\n{extra}"
+            ),
+            &dir.join("config.toml"),
+        )
+        .unwrap();
+        let tz = cfg.timezone;
+        let timed = |summary: &str, start: &str, end: &str| Occurrence::Timed {
+            start: at(start).and_local_timezone(tz).unwrap(),
+            end: at(end).and_local_timezone(tz).unwrap(),
+            summary: summary.into(),
+            location: String::new(),
+        };
+        let cal = vec![
+            timed("Hjemmearbejde", "2026-11-03 08:00", "2026-11-03 16:00"),
+            timed("Læge", "2026-11-03 13:00", "2026-11-03 14:00"),
+        ];
+        (dir, cfg, cal)
+    }
+
+    fn view_at(cfg: &Config, cal: &[Occurrence], now: &str) -> PrivateTime {
+        let s = State::load(&cfg.database).unwrap();
+        let day = at(now).date();
+        private_time(
+            &timed_entries(cfg, cal),
+            &s,
+            &cfg.private,
+            day,
+            day,
+            at(now),
+        )
+    }
+
+    fn worked(cfg: &Config, cal: &[Occurrence]) -> f64 {
+        let month = Month {
+            year: 2026,
+            month: 11,
+        };
+        let day = state::parse_date("2026-11-03").unwrap();
+        let r = build_month(cfg, month, &[], cal, day).unwrap();
+        r.days.iter().find(|d| d.date == day).unwrap().worked_hours
+    }
+
+    #[test]
+    fn a_private_appointment_starts_automatically_then_becomes_calendar_time() {
+        let (dir, cfg, cal) = private_setup("svc-auto-start", "");
+        let state_of = |now: &str| view_at(&cfg, &cal, now).items[0].state.clone();
+        assert_eq!(state_of("2026-11-03 12:59"), PrivateState::Planned);
+        let since = at("2026-11-03 13:00");
+        assert_eq!(
+            state_of("2026-11-03 13:05"),
+            PrivateState::StartedAutomatically { since }
+        );
+        let t = view_at(&cfg, &cal, "2026-11-03 13:05");
+        assert_eq!(t.current, Some(0));
+        let before = worked(&cfg, &cal);
+
+        // Within the grace period (60 min after the planned end): nothing
+        // is recorded yet.
+        assert!(
+            settle_private(&cfg, &cal, at("2026-11-03 14:59"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            state_of("2026-11-03 14:59"),
+            PrivateState::StartedAutomatically { since }
+        );
+
+        // Grace over: the planned window is recorded, marked calendar time,
+        // once; the month's numbers do not change.
+        let recorded = settle_private(&cfg, &cal, at("2026-11-03 15:00")).unwrap();
+        assert_eq!(recorded.len(), 1);
+        let i = &recorded[0];
+        assert_eq!(
+            (i.start, i.end, i.label.as_str(), i.kind),
+            (
+                at("2026-11-03 13:00"),
+                at("2026-11-03 14:00"),
+                "Læge",
+                IntervalKind::CalendarTime
+            )
+        );
+        assert!(
+            settle_private(&cfg, &cal, at("2026-11-04 09:00"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            State::load(&cfg.database).unwrap().private.intervals.len(),
+            1
+        );
+        assert_eq!(worked(&cfg, &cal), before);
+        assert!(matches!(
+            state_of("2026-11-03 15:00"),
+            PrivateState::Recorded {
+                id: 1,
+                kind: IntervalKind::CalendarTime,
+                ..
+            }
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn calendar_time_can_be_edited_relabelled_and_deleted() {
+        let (dir, cfg, cal) = private_setup("svc-calendar-time", "");
+        settle_private(&cfg, &cal, at("2026-11-03 18:00")).unwrap();
+        let before = worked(&cfg, &cal);
+        let t = |s| state::parse_time(s).unwrap();
+
+        change_private(&cfg, 1, "Læge (blodprøve)", t("13:00"), t("14:00")).unwrap();
+        let i = &State::load(&cfg.database).unwrap().private.intervals[0];
+        assert_eq!(
+            (i.label.as_str(), i.kind),
+            ("Læge (blodprøve)", IntervalKind::CalendarTime)
+        );
+        change_private(&cfg, 1, "Læge (blodprøve)", t("13:00"), t("14:30")).unwrap();
+        let i = &State::load(&cfg.database).unwrap().private.intervals[0];
+        assert_eq!(
+            (i.end, i.kind),
+            (at("2026-11-03 14:30"), IntervalKind::Recorded)
+        );
+        assert_eq!(worked(&cfg, &cal), before - 0.5);
+
+        // Deleting it means you did not go: no private time for Læge, and
+        // it is not recorded again.
+        delete_private(&cfg, 1).unwrap();
+        assert!(
+            settle_private(&cfg, &cal, at("2026-11-04 09:00"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            State::load(&cfg.database)
+                .unwrap()
+                .private
+                .intervals
+                .is_empty()
+        );
+        assert_eq!(worked(&cfg, &cal), before + 1.0);
+        assert!(view_at(&cfg, &cal, "2026-11-03 18:00").items.is_empty());
+        let err = delete_private(&cfg, 1).unwrap_err();
+        assert_eq!(err.to_string(), "no private interval with id 1");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_appointment_started_automatically_gets_its_real_start_or_is_stopped() {
+        let (dir, cfg, cal) = private_setup("svc-auto-set", "");
+        let now = |s: &str| at(s).and_local_timezone(cfg.timezone).unwrap();
+        let t = |s| state::parse_time(s).unwrap();
+        let w = window("Læge", "2026-11-03 13:00", "2026-11-03 14:00");
+
+        // An earlier real start, linked to the appointment.
+        let err = start_private(
+            &cfg,
+            &cal,
+            now("2026-11-03 13:20"),
+            &EventChoice::Auto,
+            Some(t("13:30")),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "13:30 is in the future");
+        let r = start_private(
+            &cfg,
+            &cal,
+            now("2026-11-03 13:20"),
+            &EventChoice::Auto,
+            Some(t("12:50")),
+            None,
+        )
+        .unwrap();
+        assert_eq!((r.start, &r.replaces), (at("2026-11-03 12:50"), &w));
+        // After the planned end, within the grace period: stop records it.
+        let i = stop_private(&cfg, &cal, at("2026-11-03 14:20")).unwrap();
+        assert_eq!(
+            (i.start, i.end, &i.replaces, i.kind),
+            (
+                at("2026-11-03 12:50"),
+                at("2026-11-03 14:20"),
+                &w,
+                IntervalKind::Recorded
+            )
+        );
+        assert!(
+            settle_private(&cfg, &cal, at("2026-11-03 18:00"))
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // No timer: stop records the planned start until now.
+        let (dir, cfg, cal) = private_setup("svc-auto-stop", "");
+        let err = stop_private(&cfg, &cal, at("2026-11-03 12:30")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no timer is running and no private appointment has started"
+        );
+        let i = stop_private(&cfg, &cal, at("2026-11-03 13:45")).unwrap();
+        assert_eq!(
+            (i.start, i.end, &i.replaces, i.kind),
+            (
+                at("2026-11-03 13:00"),
+                at("2026-11-03 13:45"),
+                &w,
+                IntervalKind::Recorded
+            )
+        );
+        assert!(
+            settle_private(&cfg, &cal, at("2026-11-03 18:00"))
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // Skipped: you did not go; nothing is recorded later.
+        let (dir, cfg, cal) = private_setup("svc-auto-skip", "");
+        let day = at("2026-11-03 13:10").date();
+        let skipped = skip_private(&cfg, &cal, day, None, at("2026-11-03 13:10")).unwrap();
+        assert_eq!(Some(skipped), w);
+        assert!(view_at(&cfg, &cal, "2026-11-03 13:10").items.is_empty());
+        assert!(
+            settle_private(&cfg, &cal, at("2026-11-03 18:00"))
+                .unwrap()
+                .is_empty()
+        );
+        let err =
+            skip_private(&cfg, &cal, day, Some("Tandlæge"), at("2026-11-03 13:10")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no private calendar event \"Tandlæge\" on 2026-11-03; that day has: Læge"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_auto_start_an_appointment_stays_planned() {
+        let (dir, cfg, cal) = private_setup("svc-auto-off", "[private]\nauto_start = false\n");
+        assert_eq!(
+            view_at(&cfg, &cal, "2026-11-03 13:30").items[0].state,
+            PrivateState::Planned
+        );
+        assert!(
+            settle_private(&cfg, &cal, at("2026-11-04 09:00"))
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

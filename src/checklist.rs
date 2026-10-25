@@ -606,6 +606,7 @@ END:VEVENT
             start: at("2026-11-07 09:00"),
             end: at("2026-11-07 11:00"),
             label: "Hjemmearbejde".into(),
+            kind: Default::default(),
             replaces: None,
         });
         let trips = [

@@ -17,7 +17,7 @@ use dioxus::prelude::*;
 use vw_danlon::calendar::Occurrence;
 use vw_danlon::config::Config;
 use vw_danlon::service::{self, LunchChoice, ManualTripForm, PrivateItem, PrivateState};
-use vw_danlon::state::{self, EventChoice, State};
+use vw_danlon::state::{self, EventChoice};
 use vw_danlon::trips::Trip;
 
 /// Hours as the mockup writes them: "7,58".
@@ -231,13 +231,11 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
                 Some(t) => EventChoice::Title(t.clone()),
                 None => EventChoice::None,
             };
-            let r = service::start_private(cfg, cal, now, &choice)?;
+            let r = service::start_private(cfg, cal, now, &choice, None, None)?;
             format!("Timer started {} ({})", hm(r.start), r.label)
         }
         Action::Stop => {
-            let i = State::update(&cfg.database, |s| {
-                s.private.stop(now.naive_local()).cloned()
-            })??;
+            let i = service::stop_private(cfg, cal, now.naive_local())?;
             let replaces = i
                 .replaces
                 .as_ref()
@@ -262,7 +260,7 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
             format!("Changed {label}")
         }
         Action::Delete(id) => {
-            let i = State::update(&cfg.database, |s| s.private.remove(*id))??;
+            let i = service::delete_private(cfg, *id)?;
             format!("Deleted {} {}–{}", i.label, hm(i.start), hm(i.end))
         }
         Action::Lunch(date, choice) => service::set_lunch(cfg, *date, *choice)?,
@@ -327,6 +325,15 @@ fn describe(item: &PrivateItem, current: bool) -> (String, &'static str, &'stati
             "Running",
             "chip warn",
         ),
+        PrivateState::StartedAutomatically { since } => (
+            format!(
+                "Started automatically at {}{}",
+                hm(*since),
+                replaces(item.planned)
+            ),
+            "Started",
+            "chip warn",
+        ),
         PrivateState::Recorded { start, end, .. } => (
             format!(
                 "Recorded {}–{}{}",
@@ -356,7 +363,8 @@ pub fn PrivateList(
                 let (note, chip, chip_class) = describe(&item, current == Some(i));
                 let (start, end) = match &item.state {
                     PrivateState::Recorded { start, end, .. } => (*start, Some(*end)),
-                    PrivateState::Running { since } => (*since, None),
+                    PrivateState::Running { since }
+                    | PrivateState::StartedAutomatically { since } => (*since, None),
                     PrivateState::Planned => (item.start(), item.planned.map(|p| p.1)),
                 };
                 let id = match item.state {

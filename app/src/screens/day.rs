@@ -53,7 +53,7 @@ fn private_span(i: &PrivateItem, now: NaiveDateTime) -> Option<(NaiveDateTime, N
     match i.state {
         PrivateState::Recorded { start, end, .. } => Some((start, end)),
         PrivateState::Running { since } => Some((since, now.max(since))),
-        PrivateState::Planned => i.planned,
+        PrivateState::StartedAutomatically { .. } | PrivateState::Planned => i.planned,
     }
 }
 
@@ -83,7 +83,8 @@ pub fn render(a: DayArgs) -> Element {
     let private = match State::load(&cfg.database) {
         Ok(s) => service::private_time(
             &service::timed_entries(cfg, &loaded.occurrences),
-            &s.private,
+            &s,
+            &cfg.private,
             date,
             date,
             now,

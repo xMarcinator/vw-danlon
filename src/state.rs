@@ -32,6 +32,9 @@ pub struct State {
     /// Trips you set to business (`true`) or private (`false`), by their
     /// start to the minute; they win over the mileage rules.
     pub trip_overrides: BTreeMap<DateTime<FixedOffset>, bool>,
+    /// Private calendar appointments whose time you deleted: you did not
+    /// go, so they count no private time and are not recorded again.
+    pub dismissed: BTreeSet<PlannedWindow>,
 }
 
 /// The account `account connect` registered, and when trips were last synced.
@@ -120,10 +123,34 @@ pub struct PrivateInterval {
     pub label: String,
     /// The calendar appointment whose planned window this interval replaces.
     pub replaces: Option<PlannedWindow>,
+    #[serde(default)]
+    pub kind: IntervalKind,
+}
+
+/// How a recorded interval came about.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IntervalKind {
+    /// Measured with the timer, or times you set.
+    #[default]
+    Recorded,
+    /// The planned window of a private appointment nobody started, stopped
+    /// or changed by the grace period after its end.
+    CalendarTime,
+}
+
+impl IntervalKind {
+    /// How `private list` names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            IntervalKind::Recorded => "recorded",
+            IntervalKind::CalendarTime => "calendar time",
+        }
+    }
 }
 
 /// A private calendar appointment as planned.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlannedWindow {
     pub title: String,
     pub start: NaiveDateTime,
@@ -195,7 +222,8 @@ pub fn link_event(
     }))
 }
 
-fn minute(t: NaiveDateTime) -> NaiveDateTime {
+/// `t` to the minute.
+pub(crate) fn minute(t: NaiveDateTime) -> NaiveDateTime {
     t.with_second(0)
         .and_then(|t| t.with_nanosecond(0))
         .unwrap_or(t)
@@ -247,22 +275,37 @@ impl<K: TimerKind> Timer<K> {
         let Some(r) = self.running.take() else {
             bail!("no timer is running");
         };
+        let end = minute(now).max(r.start);
+        Ok(self.record(r.start, end, r.label, r.replaces, IntervalKind::Recorded))
+    }
+
+    /// Records an interval with the next id.
+    pub fn record(
+        &mut self,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+        label: String,
+        replaces: Option<PlannedWindow>,
+        kind: IntervalKind,
+    ) -> &PrivateInterval {
         let id = self.next_id.max(1);
         self.next_id = id + 1;
         self.intervals.push(PrivateInterval {
             id,
-            start: r.start,
-            end: minute(now).max(r.start),
-            label: r.label,
-            replaces: r.replaces,
+            start,
+            end,
+            label,
+            replaces,
+            kind,
         });
-        Ok(self.intervals.last().unwrap())
+        self.intervals.last().unwrap()
     }
 
     /// Sets an interval's start and end times. Both are on the interval's
     /// start day, except an end earlier than the start when the interval
     /// already ended on a later day (it ran past midnight): that end stays
-    /// on its own day.
+    /// on its own day. Calendar time whose times change becomes recorded
+    /// time.
     pub fn edit(&mut self, id: u32, start: NaiveTime, end: NaiveTime) -> Result<&PrivateInterval> {
         let i = self.find(id)?;
         let interval = &mut self.intervals[i];
@@ -286,6 +329,9 @@ impl<K: TimerKind> Timer<K> {
                 stamp(new_start),
                 stamp(new_end)
             );
+        }
+        if (interval.start, interval.end) != (new_start, new_end) {
+            interval.kind = IntervalKind::Recorded;
         }
         interval.start = new_start;
         interval.end = new_end;
@@ -317,7 +363,94 @@ impl<K: TimerKind> Timer<K> {
     }
 }
 
+/// What happened to a private calendar appointment at some moment, with
+/// automatic start on (see [`State::appointment`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appointment {
+    /// Not started yet, or automatic start is off.
+    Planned,
+    /// Its start has passed and nothing records it: it counts as running
+    /// since its planned start.
+    StartedAutomatically,
+    /// Untouched until the grace period after its end: its planned window
+    /// is to be recorded as calendar time.
+    Due,
+    /// A recorded interval or the running timer measures it.
+    Measured,
+    /// You deleted its time: it counts no private time.
+    Dismissed,
+}
+
 impl State {
+    /// Where the private appointment `w` stands at `now`.
+    pub fn appointment(
+        &self,
+        w: &PlannedWindow,
+        now: NaiveDateTime,
+        cfg: &crate::config::PrivateConfig,
+    ) -> Appointment {
+        let linked = |r: Option<&PlannedWindow>| r == Some(w);
+        if self.dismissed.contains(w) {
+            Appointment::Dismissed
+        } else if self
+            .private
+            .intervals
+            .iter()
+            .any(|i| linked(i.replaces.as_ref()))
+            || self
+                .private
+                .running
+                .as_ref()
+                .is_some_and(|r| linked(r.replaces.as_ref()))
+        {
+            Appointment::Measured
+        } else if !cfg.auto_start || now < w.start {
+            Appointment::Planned
+        } else if now < w.end + cfg.grace() {
+            Appointment::StartedAutomatically
+        } else {
+            Appointment::Due
+        }
+    }
+
+    /// Records the planned window of each appointment in `windows` that is
+    /// [`Appointment::Due`] at `now`, marked calendar time; returns them.
+    pub fn record_calendar_time<'a>(
+        &mut self,
+        windows: impl IntoIterator<Item = &'a PlannedWindow>,
+        now: NaiveDateTime,
+        cfg: &crate::config::PrivateConfig,
+    ) -> Vec<PrivateInterval> {
+        let mut recorded = Vec::new();
+        for w in windows {
+            if self.appointment(w, now, cfg) == Appointment::Due {
+                recorded.push(
+                    self.private
+                        .record(
+                            w.start,
+                            w.end,
+                            w.title.clone(),
+                            Some(w.clone()),
+                            IntervalKind::CalendarTime,
+                        )
+                        .clone(),
+                );
+            }
+        }
+        recorded
+    }
+
+    /// Deletes a private interval. When it was for a calendar appointment,
+    /// you did not go: the appointment then counts no private time and is
+    /// not recorded again.
+    pub fn remove_private(&mut self, id: u32) -> Result<PrivateInterval> {
+        let i = self.private.remove(id)?;
+        if let Some(w) = &i.replaces {
+            self.dismissed.insert(w.clone());
+        }
+        Ok(i)
+    }
+
     /// Reads the state from the database `db`.
     pub fn load(db: &Path) -> Result<Self> {
         let conn = crate::db::open(db)?;
@@ -389,11 +522,18 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
         .prepare("SELECT day FROM entered")?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<BTreeSet<NaiveDate>>>()?;
+    // A database from before calendar time (opened read-only, so not
+    // upgraded) has only recorded intervals.
+    let calendar_time = if crate::db::has_column(conn, "private_intervals", "calendar_time")? {
+        "calendar_time"
+    } else {
+        "0"
+    };
     let intervals = conn
-        .prepare(
-            "SELECT id, start, end, label, replaces_title, replaces_start, replaces_end \
-             FROM private_intervals ORDER BY id",
-        )?
+        .prepare(&format!(
+            "SELECT id, start, end, label, replaces_title, replaces_start, replaces_end, \
+             {calendar_time} FROM private_intervals ORDER BY id"
+        ))?
         .query_map([], |r| {
             Ok(PrivateInterval {
                 id: r.get(0)?,
@@ -401,6 +541,11 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
                 end: r.get(2)?,
                 label: r.get(3)?,
                 replaces: window(r.get(4)?, r.get(5)?, r.get(6)?),
+                kind: if r.get(7)? {
+                    IntervalKind::CalendarTime
+                } else {
+                    IntervalKind::Recorded
+                },
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -438,7 +583,25 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
         entered,
         account,
         trip_overrides: read_overrides(conn)?,
+        dismissed: read_dismissed(conn)?,
     })
+}
+
+/// The private appointments whose time you deleted; none in a database
+/// from before them (opened read-only, so not upgraded).
+fn read_dismissed(conn: &Connection) -> rusqlite::Result<BTreeSet<PlannedWindow>> {
+    if !crate::db::has_table(conn, "private_dismissed")? {
+        return Ok(BTreeSet::new());
+    }
+    conn.prepare("SELECT title, start, end FROM private_dismissed")?
+        .query_map([], |r| {
+            Ok(PlannedWindow {
+                title: r.get(0)?,
+                start: r.get(1)?,
+                end: r.get(2)?,
+            })
+        })?
+        .collect()
 }
 
 /// The trip overrides; none in a database from before them (opened
@@ -477,6 +640,7 @@ fn read_home(conn: &Connection) -> rusqlite::Result<Home> {
                 end: r.get(2)?,
                 label: r.get(3)?,
                 replaces: None,
+                kind: IntervalKind::Recorded,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -503,6 +667,7 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
         "DELETE FROM lunch; DELETE FROM entered; DELETE FROM private_intervals; \
          DELETE FROM private_running; DELETE FROM account; \
          DELETE FROM home_intervals; DELETE FROM home_running; DELETE FROM trip_overrides; \
+         DELETE FROM private_dismissed; \
          DELETE FROM meta WHERE key IN ('private_next_id', 'home_next_id');",
     )?;
     let mut st = conn.prepare("INSERT INTO lunch (day, start, minutes) VALUES (?1, ?2, ?3)")?;
@@ -514,8 +679,9 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
         st.execute([day])?;
     }
     let mut st = conn.prepare(
-        "INSERT INTO private_intervals (id, start, end, label, replaces_title, replaces_start, replaces_end) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO private_intervals \
+         (id, start, end, label, replaces_title, replaces_start, replaces_end, calendar_time) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     for i in &state.private.intervals {
         let w = i.replaces.as_ref();
@@ -526,7 +692,8 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
             i.label,
             w.map(|w| &w.title),
             w.map(|w| w.start),
-            w.map(|w| w.end)
+            w.map(|w| w.end),
+            i.kind == IntervalKind::CalendarTime
         ])?;
     }
     if let Some(r) = &state.private.running {
@@ -571,6 +738,11 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
     let mut st = conn.prepare("INSERT INTO trip_overrides (start, business) VALUES (?1, ?2)")?;
     for (start, business) in &state.trip_overrides {
         st.execute(params![start, business])?;
+    }
+    let mut st =
+        conn.prepare("INSERT INTO private_dismissed (title, start, end) VALUES (?1, ?2, ?3)")?;
+    for w in &state.dismissed {
+        st.execute(params![w.title, w.start, w.end])?;
     }
     Ok(())
 }
@@ -780,6 +952,7 @@ mod tests {
                 start: at("2026-11-03 12:30"),
                 end: at("2026-11-03 14:15"),
                 label: DEFAULT_LABEL.into(),
+                kind: Default::default(),
                 replaces: None,
             }]
         );
@@ -867,6 +1040,7 @@ mod tests {
                 start: at("2026-11-03 08:00"),
                 end: at("2026-11-03 11:30"),
                 label: HOME_LABEL.into(),
+                kind: Default::default(),
                 replaces: None,
             }]
         );
