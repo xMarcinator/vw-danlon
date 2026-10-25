@@ -1,32 +1,17 @@
-mod address;
-mod calendar;
-mod checklist;
-mod config;
-mod connected_cars;
-mod danlon;
-mod holidays;
-mod mileage;
-mod month;
-mod state;
-mod timesheet;
-mod trip_store;
-mod trips;
-mod vacation;
-
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, NaiveDate};
+use chrono::Datelike;
 use clap::{Parser, Subcommand};
 
-use calendar::Occurrence;
-use config::{Config, MileageConfig};
-use mileage::MileageMonth;
-use month::{Month, MonthReport};
-use trips::Trip;
+use vw_danlon::calendar::Occurrence;
+use vw_danlon::config::Config;
+use vw_danlon::mileage::{self, MileageMonth};
+use vw_danlon::month::{Month, MonthReport};
+use vw_danlon::service::{self, AccountAccess, build_month, load_trips, mileage_for};
+use vw_danlon::{checklist, danlon, state, timesheet, trip_store, vacation};
 
 /// Turns myVolkswagen trips into work periods, a working-time record, a
 /// mileage logbook and a pay-line file for your own records. It never
@@ -231,14 +216,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Norm { month } => {
             let month = Month::parse(&month)?;
-            let report = month::build(
-                &cfg,
-                month,
-                &[],
-                &calendar(&cfg, month)?,
-                &BTreeMap::new(),
-                &[],
-            );
+            let report = service::norm_month(&cfg, month, &calendar(&cfg, month)?);
             print_days(&report, false);
         }
         Command::Report { month, trips } => {
@@ -253,9 +231,7 @@ fn main() -> Result<()> {
             let now = chrono::Utc::now()
                 .with_timezone(&cfg.timezone)
                 .naive_local();
-            if let Some(r) = state::State::load(&cfg.state_file)?.private.running
-                && r.forgotten(now)
-            {
+            if let Some(r) = service::forgotten_timer(&cfg, now)? {
                 println!(
                     "\ncheck: private timer running since {} ({}); stop it and fix the time with `private edit`",
                     r.start.format("%Y-%m-%d %H:%M"),
@@ -278,7 +254,7 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref())?;
             let cal = calendar(&cfg, month)?;
-            let m = compute_mileage(&cfg, mcfg, month, &trips, &cal)?;
+            let m = service::compute_mileage(&cfg, mcfg, month, &trips, &cal)?;
             mileage::write_logbook(mcfg, &m, create(&out)?)?;
             print_mileage(&m);
             println!("Wrote {}", out.display());
@@ -323,12 +299,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Trips from `-t`, else from the trip store.
-fn load_trips(cfg: &Config, file: Option<&Path>) -> Result<Vec<Trip>> {
-    if let Some(file) = file {
-        return trips::load(file, cfg.timezone);
+/// The calendar from 1 January to the end of `month`, printing its warning.
+fn calendar(cfg: &Config, month: Month) -> Result<Vec<Occurrence>> {
+    let cal = service::calendar(cfg, month)?;
+    warn_calendar(cal.warning.as_deref());
+    Ok(cal.occurrences)
+}
+
+fn warn_calendar(warning: Option<&str>) {
+    if let Some(w) = warning {
+        eprintln!("warning: {w}");
     }
-    trip_store::stored_trips(&cfg.trip_store, cfg.timezone)
 }
 
 fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
@@ -343,116 +324,35 @@ fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
     Ok(())
 }
 
-/// How to reach the account: namespace, where the device token is kept,
-/// and the connected (else configured) email.
-struct AccountAccess<'a> {
-    namespace: &'a str,
-    tokens: connected_cars::TokenStore,
-    email: Option<String>,
-    vehicle: Option<&'a str>,
-}
-
-impl AccountAccess<'_> {
-    fn new<'a>(cfg: &'a Config, state: &state::State) -> AccountAccess<'a> {
-        let cc = cfg.connected_cars.as_ref();
-        AccountAccess {
-            namespace: cc.map_or("semler:minvolkswagen", |c| c.namespace.as_str()),
-            tokens: match cc.and_then(|c| c.token_file.as_deref()) {
-                Some(f) => connected_cars::TokenStore::File(f.into()),
-                None => connected_cars::TokenStore::Keychain,
-            },
-            email: state
-                .account
-                .as_ref()
-                .map(|a| a.email.clone())
-                .or_else(|| cc.and_then(|c| c.email.clone())),
-            vehicle: cc.and_then(|c| c.vehicle.as_deref()),
-        }
-    }
-
-    /// The stored device token, or an error naming `account connect` and
-    /// `trips import`.
-    fn token(&self) -> Result<String> {
-        self.email
-            .as_deref()
-            .map(|e| self.tokens.get(e))
-            .transpose()?
-            .flatten()
-            .context("no device token: run `account connect`, or use `trips import`")
-    }
-}
-
-/// Fetches trips from the account month by month into the trip store.
 fn sync_trips(cfg: &Config, from: Option<&str>) -> Result<()> {
-    let state = state::State::load(&cfg.state_file)?;
-    let access = AccountAccess::new(cfg, &state);
-    let token = access.token()?;
     let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-    let from = match from {
-        Some(f) => state::parse_date(f)?,
-        None => trip_store::sync_start(&cfg.trip_store, cfg.timezone, today)?,
-    };
-    if from > today {
-        anyhow::bail!("--from {from} is after today");
-    }
-    let mut sleep = std::thread::sleep;
-    let session = connected_cars::retry_429(&mut sleep, || {
-        connected_cars::Session::login(access.namespace, &token)
-    })?;
-    let vehicles = connected_cars::retry_429(&mut sleep, || session.vehicles())?;
-    let vehicle = connected_cars::pick_vehicle(&vehicles, access.vehicle)?;
-    let synced = trip_store::sync(&cfg.trip_store, from, today, cfg.timezone, |first, last| {
-        connected_cars::retry_429(&mut sleep, || {
-            session.trips_on_days(&vehicle.id, first, last, cfg.timezone)
-        })
-    })?;
-    let email = access.email.clone().unwrap_or_default();
-    state::State::update(&cfg.state_file, |s| {
-        s.account
-            .get_or_insert(state::Account {
-                email,
-                last_sync: None,
-            })
-            .last_sync = Some(chrono::Utc::now().fixed_offset());
-    })?;
+    let s = service::sync_trips(cfg, from, today)?;
     println!(
         "{} added, {} already present",
-        synced.merged.added, synced.merged.already
+        s.synced.merged.added, s.synced.merged.already
     );
-    if synced.without_position > 0 {
+    if s.synced.without_position > 0 {
         println!(
             "{} trips without position: turn on position sharing in the app",
-            synced.without_position
+            s.synced.without_position
         );
     }
-    println!("Period: {from} – {today}");
+    println!("Period: {} – {}", s.from, s.to);
     Ok(())
 }
 
 fn account(cfg: &Config, action: AccountAction) -> Result<()> {
     let state = state::State::load(&cfg.state_file)?;
     let access = AccountAccess::new(cfg, &state);
-    let (namespace, tokens, email) = (access.namespace, &access.tokens, access.email.clone());
+    let (tokens, email) = (&access.tokens, access.email.clone());
     match action {
         AccountAction::Connect => {
             let email = prompt_email(email.as_deref())?;
             tokens.check(&email)?;
             let password = rpassword::prompt_password("Password (not shown, never stored): ")
                 .context("reading the password")?;
-            let token = connected_cars::register_device(namespace, &email, &password)?;
+            access.connect(cfg, &email, &password)?;
             drop(password);
-            tokens.set(&email, &token)?;
-            state::State::update(&cfg.state_file, |s| {
-                let last_sync = s
-                    .account
-                    .take()
-                    .filter(|a| a.email == email)
-                    .and_then(|a| a.last_sync);
-                s.account = Some(state::Account {
-                    email: email.clone(),
-                    last_sync,
-                });
-            })?;
             println!(
                 "Connected {email}; the device token is in {}",
                 tokens.describe()
@@ -463,9 +363,7 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
                 println!("Not connected");
                 return Ok(());
             };
-            let deleted = tokens.delete(&email)?;
-            state::State::update(&cfg.state_file, |s| s.account = None)?;
-            if deleted {
+            if access.disconnect(cfg, &email)? {
                 println!("Disconnected {email}; the device token is deleted");
             } else {
                 println!(
@@ -475,11 +373,7 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
             }
         }
         AccountAction::Status => {
-            let connected = match &email {
-                Some(e) => tokens.get(e)?.is_some(),
-                None => false,
-            };
-            match (&email, connected) {
+            match (&email, access.connected()?) {
                 (Some(e), true) => {
                     println!("Connected: {e} (device token in {})", tokens.describe())
                 }
@@ -495,30 +389,18 @@ fn account(cfg: &Config, action: AccountAction) -> Result<()> {
             }
         }
         AccountAction::Check { from, to } => {
-            let token = access.token()?;
             let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-            let to = to
-                .as_deref()
-                .map(state::parse_date)
-                .transpose()?
-                .unwrap_or(today);
-            let from = match from {
-                Some(f) => state::parse_date(&f)?,
-                None => to - chrono::Duration::days(30),
-            };
-            let session = connected_cars::Session::login(namespace, &token)?;
-            let vehicles = session.vehicles()?;
-            let vehicle = connected_cars::pick_vehicle(&vehicles, access.vehicle)?;
-            let trips = session.trips_on_days(&vehicle.id, from, to, cfg.timezone)?;
-            println!("Vehicle {} (id {})", vehicle.plate, vehicle.id);
-            println!("{} trips {from} – {to} (nothing stored)", trips.len());
-            let km: f64 = trips.iter().filter_map(|t| t.trip.distance_km).sum();
+            let c = service::check_account(cfg, &access, from.as_deref(), to.as_deref(), today)?;
+            let (from, to) = (c.from, c.to);
+            println!("Vehicle {} (id {})", c.vehicle.plate, c.vehicle.id);
+            println!("{} trips {from} – {to} (nothing stored)", c.trips.len());
+            let km: f64 = c.trips.iter().filter_map(|t| t.trip.distance_km).sum();
             println!("{km:.1} km");
-            let missing = connected_cars::without_position(&trips);
+            let missing = vw_danlon::connected_cars::without_position(&c.trips);
             if missing > 0 {
                 println!("{missing} trips without position: turn on position sharing in the app");
             }
-            for t in trips.iter().rev().take(3) {
+            for t in c.trips.iter().rev().take(3) {
                 let t = &t.trip;
                 println!(
                     "  {} – {}  {:>6} km  {} → {}",
@@ -577,13 +459,7 @@ fn checklist(
                 month: date.month(),
             };
             let days = checklist_days(cfg, month, trips.as_deref())?;
-            let day = days
-                .iter()
-                .find(|d| d.date == date)
-                .with_context(|| format!("{date} is not in the checklist"))?;
-            if let Some(why) = day.tick_refusal() {
-                anyhow::bail!("{date} cannot be ticked: {why}");
-            }
+            service::check_tickable(&days, date)?;
             if state::State::update(path, |s| s.entered.insert(date))? {
                 println!("{date}: entered");
             } else {
@@ -602,7 +478,7 @@ fn checklist(
     Ok(())
 }
 
-/// The month's Danløn app registrations per day.
+/// The month's Danløn app registrations per day, printing the warnings.
 fn checklist_days(
     cfg: &Config,
     month: Month,
@@ -615,12 +491,12 @@ fn checklist_days(
     if let Some(m) = &mileage {
         warn_skipped(m);
     }
-    Ok(checklist::build(
+    Ok(service::checklist_days(
         cfg,
         &report,
         &trips,
         mileage.as_ref(),
-        &timed_entries(cfg, &cal),
+        &cal,
     ))
 }
 
@@ -678,7 +554,7 @@ fn private(cfg: &Config, action: PrivateAction) -> Result<()> {
                         month: now.month(),
                     };
                     let cal = calendar(cfg, today)?;
-                    state::link_event(&timed_entries(cfg, &cal), now, &choice)?
+                    state::link_event(&service::timed_entries(cfg, &cal), now, &choice)?
                 }
             };
             let r = state::State::update(path, |s| {
@@ -770,99 +646,6 @@ fn interval_text(i: &state::PrivateInterval) -> String {
     )
 }
 
-/// Calendar occurrences from 1 January to the end of `month`; the earlier
-/// months are needed for the year's mileage total.
-fn calendar(cfg: &Config, month: Month) -> Result<Vec<Occurrence>> {
-    let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
-    calendar_between(cfg, year_start, month.last_day())
-}
-
-/// Calendar occurrences from `from` to `to`.
-fn calendar_between(cfg: &Config, from: NaiveDate, to: NaiveDate) -> Result<Vec<Occurrence>> {
-    Ok(match &cfg.calendar {
-        Some(cal) => {
-            let text = calendar::fetch(&cal.source)?;
-            if let Some(expected) = &cal.name {
-                match calendar::name(&text) {
-                    Some(actual) if actual.trim().eq_ignore_ascii_case(expected.trim()) => {}
-                    Some(actual) => anyhow::bail!(
-                        "calendar is {actual:?}, expected {expected:?} — check calendar.source"
-                    ),
-                    None => {
-                        eprintln!("warning: calendar has no name; cannot check it is {expected:?}")
-                    }
-                }
-            }
-            calendar::occurrences(&text, cfg.timezone, from, to)?
-        }
-        None => Vec::new(),
-    })
-}
-
-fn mileage_for(
-    cfg: &Config,
-    month: Month,
-    trips: &[Trip],
-    cal: &[Occurrence],
-) -> Result<Option<MileageMonth>> {
-    cfg.mileage
-        .as_ref()
-        .map(|m| compute_mileage(cfg, m, month, trips, cal))
-        .transpose()
-}
-
-/// The month's mileage; trips starting during recorded private time are
-/// private, like those during a private appointment.
-fn compute_mileage(
-    cfg: &Config,
-    mcfg: &MileageConfig,
-    month: Month,
-    trips: &[Trip],
-    cal: &[Occurrence],
-) -> Result<MileageMonth> {
-    let recorded = state::State::load(&cfg.state_file)?.private.intervals;
-    let mut entries = timed_entries(cfg, cal);
-    entries.extend(month::recorded_entries(&recorded, cfg.timezone));
-    mileage::compute(
-        mcfg,
-        cfg.workplace.as_deref(),
-        &cfg.known_places,
-        month,
-        trips,
-        &entries,
-    )
-}
-
-/// The month's days, with the lunch overrides and recorded private time
-/// from the state file.
-fn build_month(
-    cfg: &Config,
-    month: Month,
-    trips: &[Trip],
-    cal: &[Occurrence],
-) -> Result<MonthReport> {
-    let state = state::State::load(&cfg.state_file)?;
-    Ok(month::build(
-        cfg,
-        month,
-        trips,
-        cal,
-        &state.lunch,
-        &state.private.intervals,
-    ))
-}
-
-/// The calendar's timed entries, classified with the configured private
-/// words and lunch title.
-fn timed_entries<'a>(cfg: &Config, cal: &'a [Occurrence]) -> Vec<month::TimedEntry<'a>> {
-    let private_words = cfg
-        .calendar
-        .as_ref()
-        .map(|c| c.private_keywords.as_slice())
-        .unwrap_or_default();
-    month::timed_entries(cal, private_words, &cfg.lunch.title)
-}
-
 fn create(path: &Path) -> Result<BufWriter<File>> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
     Ok(BufWriter::new(file))
@@ -932,33 +715,12 @@ fn print_days(r: &MonthReport, with_trips: bool) {
     }
 }
 
-/// The vacation overview: the calendar from the oldest open holiday year's
-/// start to the newest one's use-by date.
+/// The vacation overview of the open holiday years.
 fn print_vacation(cfg: &Config) -> Result<()> {
     let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-    let open = vacation::open_years(today);
-    let from = open[0].first_day();
-    let to = open[open.len() - 1].use_by();
-    let cal = calendar_between(cfg, from, to)?;
-    let mut days = Vec::new();
-    let mut month = Month {
-        year: from.year(),
-        month: from.month(),
-    };
-    while month.first_day() <= to {
-        days.extend(month::build(cfg, month, &[], &cal, &BTreeMap::new(), &[]).days);
-        let next = month.last_day() + chrono::Duration::days(1);
-        month = Month {
-            year: next.year(),
-            month: next.month(),
-        };
-    }
-    let rules = vacation::Rules::from_config(cfg);
-    let leave = vacation::leave_days(cfg, &cal, &days);
-    print!(
-        "{}",
-        vacation::render(&rules, &vacation::overview(&rules, &leave, today))
-    );
+    let v = service::vacation(cfg, today)?;
+    warn_calendar(v.calendar_warning.as_deref());
+    print!("{}", vacation::render(&v.rules, &v.overview));
     Ok(())
 }
 

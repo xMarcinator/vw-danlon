@@ -418,3 +418,16 @@ arrival.
 - Check the `[danlon]` delimiter, decimal format and column order against
   Danløn's current file description. Danløn changed its format in 2026.
 - Check the year's km rates on skat.dk.
+
+## Code layout
+
+A Cargo workspace. The root package is the `vw_danlon` library (the rules,
+and `service`: loading the calendar and trips, building a month, its
+mileage, checklist and vacation overview, the account sync) plus the
+`vw-danlon` CLI in `src/main.rs`, which only parses arguments, prompts and
+prints. `app/` is the desktop and phone app (`vw-danlon-app`).
+
+```sh
+cargo run -- report 2026-10      # the CLI, from the repository root
+cargo test --workspace
+```
