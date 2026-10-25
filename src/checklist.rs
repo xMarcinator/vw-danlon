@@ -255,13 +255,14 @@ fn status(day: &Day, driving: bool) -> Status {
     if !working {
         return nothing();
     }
-    // Private time is in the remark too, but is no reason to fix anything.
+    // Private time and home working are in the remark too, but are no
+    // reason to fix anything.
     let flags: Vec<&str> = day
-        .note
+        .check
         .as_deref()
         .unwrap_or_default()
         .split("; ")
-        .filter(|part| !part.is_empty() && !part.ends_with(" · private"))
+        .filter(|part| !part.is_empty())
         .collect();
     if !flags.is_empty() {
         Status::FixFirst(flags.join("; "))
@@ -414,7 +415,7 @@ fn korsel(date: NaiveDate, entries: &[&Entry], trips: &[Trip], names: &Names) ->
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use crate::state::State;
 
     use super::*;
     use crate::calendar;
@@ -462,6 +463,16 @@ threshold_km = 100
 
     /// Kontor every weekday at the workplace, plus the given entries.
     fn checklist(cfg: &Config, ics: &str, trips: &[Trip]) -> (MonthReport, Vec<ChecklistDay>) {
+        checklist_with(cfg, ics, trips, &State::default())
+    }
+
+    /// [`checklist`] with the recorded time in `state`.
+    fn checklist_with(
+        cfg: &Config,
+        ics: &str,
+        trips: &[Trip],
+        state: &State,
+    ) -> (MonthReport, Vec<ChecklistDay>) {
         let ics = format!(
             "BEGIN:VEVENT
 UID:kontor
@@ -477,7 +488,7 @@ END:VEVENT
         let occ = calendar::occurrences(&ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
         let private = &cfg.calendar.as_ref().unwrap().private_keywords;
         let cal = timed_entries(&occ, private, &cfg.lunch.title);
-        let report = month::build(cfg, m, trips, &occ, &BTreeMap::new(), &[]);
+        let report = month::build(cfg, m, trips, &occ, state, NaiveDate::MAX);
         let mileage = mileage::compute(
             cfg.mileage.as_ref().unwrap(),
             cfg.workplace.as_deref(),
@@ -581,6 +592,39 @@ END:VEVENT
 
     fn day(days: &[ChecklistDay], d: u32) -> &ChecklistDay {
         days.iter().find(|c| c.date.day() == d).unwrap()
+    }
+
+    #[test]
+    fn home_working_is_entered_and_weekend_driving_is_nothing() {
+        let cfg = Config::parse(BASE).unwrap();
+        let mut state = State::default();
+        let at = |s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        // Saturday morning at home with the timer.
+        state.home.intervals.push(crate::state::PrivateInterval {
+            id: 1,
+            start: at("2026-11-07 09:00"),
+            end: at("2026-11-07 11:00"),
+            label: "Hjemmearbejde".into(),
+            replaces: None,
+        });
+        let trips = [
+            trip("07", "13:00", "13:20", HOME, "Bauhaus", 12.0),
+            trip("08", "10:00", "10:20", HOME, "Bauhaus", 12.0),
+        ];
+        let (_, days) = checklist_with(&cfg, &entry("Hjemmearbejde", "", "09"), &trips, &state);
+        let day = |n: usize| &days[n - 1];
+        assert_eq!(day(7).status, Status::ToEnter);
+        assert_eq!(
+            texts(day(7)),
+            texts_of(&[("09:00 to 11:00", "none", "2h 00m")])
+        );
+        assert_eq!(day(8).status, Status::NothingToEnter("weekend".into()));
+        // Monday at home all day, no driving: the planned 09:00–15:00.
+        assert_eq!(day(9).status, Status::ToEnter);
+        assert_eq!(
+            texts(day(9)),
+            texts_of(&[("09:00 to 15:00", "30m", "5h 30m")])
+        );
     }
 
     #[test]

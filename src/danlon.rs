@@ -165,7 +165,14 @@ mod tests {
             end_pos: None,
         }];
         let m = Month::parse("2026-10").unwrap();
-        let report = month::build(&cfg, m, &trips, &[], &Default::default(), &[]);
+        let report = month::build(
+            &cfg,
+            m,
+            &trips,
+            &[],
+            &Default::default(),
+            chrono::NaiveDate::MAX,
+        );
         let mil = mileage::compute(
             cfg.mileage.as_ref().unwrap(),
             None,
@@ -200,7 +207,7 @@ mod tests {
             &[],
             &[],
             &Default::default(),
-            &[],
+            chrono::NaiveDate::MAX,
         );
         let lines = [
             Line {

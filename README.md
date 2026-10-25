@@ -336,7 +336,8 @@ office, and that is your working time. A drive from one work address to
 another (office → customer) is working time too.
 
 A day's worked time is computed in this order:
-1. the periods at a work address, from the trips;
+1. the periods at a work address, from the trips, and the time working from
+   home (see below; overlaps count once);
 2. minus private appointments and recorded private time (see below;
    overlapping appointments count once; one crossing midnight is split per
    date);
@@ -388,6 +389,29 @@ appointments: they are deducted from worked time, shown in the day's note
 private. A linked interval replaces the appointment's planned window, so
 `Læge 13:00–14:00` measured as 12:30–14:10 deducts 1:40, once.
 
+### Working from home
+
+A timed work event in the calendar is home working when its title has a word
+from `[home_working]` `keywords` (whole word, case-insensitive; default
+`Hjemmearbejde`, `Hjemme`) or, with `at_home_address = true` (the default),
+its location is the home address (`mileage.home`). Its planned window counts
+as worked, minus lunch and private time, without any trips; on a day after
+today it counts nothing yet. Home working that is not in the calendar is
+timed like private time:
+
+```sh
+cargo run -- home start [label]   # label defaults to "Hjemmearbejde"
+cargo run -- home stop
+cargo run -- home list 2026-11
+cargo run -- home edit <id> 08:00 12:30
+cargo run -- home rm <id>
+```
+
+Recorded home working counts as worked and is shown in the day's note (e.g.
+`Hjemmearbejde 08:00–12:30 · home`); the Danløn checklist gets Komme/gå
+entries for it. A home-working timer still running past midnight or for more
+than 12 hours is flagged in the report like the private timer.
+
 Addresses are compared loosely:
 - case, punctuation and "Danmark" are ignored
 - the same street and number with the same (or a missing) postal code counts
@@ -401,6 +425,13 @@ check:
 - an arrival with no departure
 - driving on a day with no work address
 - a calendar entry with no address
+
+A day without a work event, home working or norm hours (e.g. the weekend) is
+never flagged: driving then is private.
+
+The report's totals (norm, worked, difference) count the days up to and
+including today, which is marked `◀ today`; later days show their planned
+norm only. The month's whole norm is printed as `Norm hours in month`.
 
 The report also flags a private timer still running past midnight or for more
 than 12 hours; stop it and fix the time with `private edit`.

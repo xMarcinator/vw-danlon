@@ -589,6 +589,7 @@ pub fn render(rules: &Rules, o: &Overview) -> String {
 mod tests {
     use super::*;
     use crate::calendar;
+    use crate::state::State;
     use chrono::Weekday;
 
     fn d(s: &str) -> NaiveDate {
@@ -676,7 +677,7 @@ END:VEVENT
                     year: 2026,
                     month: m,
                 };
-                month::build(&cfg, month, &[], &occ, &BTreeMap::new(), &[]).days
+                month::build(&cfg, month, &[], &occ, &State::default(), NaiveDate::MAX).days
             })
             .collect();
         let leave = leave_days(&cfg, &occ, &days);

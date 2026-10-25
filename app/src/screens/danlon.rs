@@ -197,7 +197,8 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         Some(Ok(l)) => l,
     };
     let _ = ticks();
-    let view = match service::checklist_view(&cfg, m, trips, cal) {
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
+    let view = match service::checklist_view(&cfg, m, trips, cal, today) {
         Ok(v) => v,
         Err(e) => {
             return rsx! {

@@ -97,6 +97,12 @@ enum Command {
         #[command(subcommand)]
         action: PrivateAction,
     },
+    /// Time working from home with a start/stop timer (stored in the
+    /// database beside the config); it counts as worked.
+    Home {
+        #[command(subcommand)]
+        action: HomeAction,
+    },
     /// The Min Volkswagen account for trip sync (device token in the keychain or `token_file`).
     Account {
         #[command(subcommand)]
@@ -210,6 +216,32 @@ enum PrivateAction {
 }
 
 #[derive(Subcommand)]
+enum HomeAction {
+    /// Start the timer.
+    Start {
+        /// Label (default: "Hjemmearbejde").
+        label: Option<String>,
+    },
+    /// Stop the timer and record the interval.
+    Stop,
+    /// Show the recorded intervals of a month.
+    List {
+        /// Month as YYYY-MM.
+        month: String,
+    },
+    /// Change a recorded interval's start and end.
+    Edit {
+        id: u32,
+        /// Start as HH:MM.
+        start: String,
+        /// End as HH:MM.
+        end: String,
+    },
+    /// Delete a recorded interval.
+    Rm { id: u32 },
+}
+
+#[derive(Subcommand)]
 enum LunchAction {
     /// Use this lunch break on a day instead of the default or the calendar.
     Set {
@@ -236,6 +268,7 @@ fn main() -> Result<()> {
         service::CalendarMode::Fresh
     };
     let calendar = |cfg: &Config, month: Month| calendar(cfg, month, mode);
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
 
     match cli.command {
         Command::Norm { month } => {
@@ -247,7 +280,7 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
-            let report = build_month(&cfg, month, &trips, &cal)?;
+            let report = build_month(&cfg, month, &trips, &cal, today)?;
             print_days(&report, true);
             if let Some(m) = mileage_for(&cfg, month, &trips, &cal)? {
                 print_mileage(&m);
@@ -255,18 +288,24 @@ fn main() -> Result<()> {
             let now = chrono::Utc::now()
                 .with_timezone(&cfg.timezone)
                 .naive_local();
-            if let Some(r) = service::forgotten_timer(&cfg, now)? {
-                println!(
-                    "\ncheck: private timer running since {} ({}); stop it and fix the time with `private edit`",
-                    r.start.format("%Y-%m-%d %H:%M"),
-                    r.label
-                );
+            let (private, home) = service::forgotten_timers(&cfg, now)?;
+            for (r, what, command) in [
+                (private, "private", "private edit"),
+                (home, "home-working", "home edit"),
+            ] {
+                if let Some(r) = r {
+                    println!(
+                        "\ncheck: {what} timer running since {} ({}); stop it and fix the time with `{command}`",
+                        r.start.format("%Y-%m-%d %H:%M"),
+                        r.label
+                    );
+                }
             }
         }
         Command::Timesheet { month, trips, out } => {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref(), month)?;
-            let report = build_month(&cfg, month, &trips, &calendar(&cfg, month)?)?;
+            let report = build_month(&cfg, month, &trips, &calendar(&cfg, month)?, today)?;
             timesheet::write(&cfg, &report, create(&out)?)?;
             println!("Wrote {}", out.display());
         }
@@ -287,7 +326,7 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
-            let report = build_month(&cfg, month, &trips, &cal)?;
+            let report = build_month(&cfg, month, &trips, &cal, today)?;
             let mil = mileage_for(&cfg, month, &trips, &cal)?;
             if let Some(m) = &mil {
                 warn_skipped(m);
@@ -310,9 +349,10 @@ fn main() -> Result<()> {
             month,
             trips,
             action,
-        } => checklist(&cfg, mode, month, trips, action)?,
+        } => checklist(&cfg, mode, month, trips, action, today)?,
         Command::Lunch { action } => lunch(&cfg, action)?,
         Command::Private { action } => private(&cfg, mode, action)?,
+        Command::Home { action } => home(&cfg, action)?,
         Command::Account { action } => account(&cfg, action)?,
         Command::Trips { action } => match action {
             TripsAction::Import { file } => import_trips(&cfg, &file)?,
@@ -502,12 +542,13 @@ fn checklist(
     month: Option<String>,
     trips: Option<PathBuf>,
     action: Option<ChecklistAction>,
+    today: chrono::NaiveDate,
 ) -> Result<()> {
     let path = &cfg.database;
     match action {
         None => {
             let month = Month::parse(month.as_deref().unwrap_or_default())?;
-            let days = checklist_days(cfg, mode, month, trips.as_deref())?;
+            let days = checklist_days(cfg, mode, month, trips.as_deref(), today)?;
             let entered = state::State::load(path)?.entered;
             print!("{}", checklist::render(&days, &entered));
         }
@@ -517,7 +558,7 @@ fn checklist(
                 year: date.year(),
                 month: date.month(),
             };
-            let days = checklist_days(cfg, mode, month, trips.as_deref())?;
+            let days = checklist_days(cfg, mode, month, trips.as_deref(), today)?;
             if service::set_entered(cfg, &days, date, true)? {
                 println!("{date}: entered");
             } else {
@@ -542,10 +583,11 @@ fn checklist_days(
     mode: service::CalendarMode,
     month: Month,
     trips: Option<&Path>,
+    today: chrono::NaiveDate,
 ) -> Result<Vec<checklist::ChecklistDay>> {
     let trips = load_trips(cfg, trips, month)?;
     let cal = calendar(cfg, month, mode)?;
-    let report = build_month(cfg, month, &trips, &cal)?;
+    let report = build_month(cfg, month, &trips, &cal, today)?;
     let mileage = mileage_for(cfg, month, &trips, &cal)?;
     if let Some(m) = &mileage {
         warn_skipped(m);
@@ -662,6 +704,58 @@ fn private(cfg: &Config, mode: service::CalendarMode, action: PrivateAction) -> 
     Ok(())
 }
 
+fn home(cfg: &Config, action: HomeAction) -> Result<()> {
+    let path = &cfg.database;
+    let now = chrono::Utc::now()
+        .with_timezone(&cfg.timezone)
+        .naive_local();
+    match action {
+        HomeAction::Start { label } => {
+            let r = state::State::update(path, |s| s.home.start(now, label, None).cloned())??;
+            println!("Timer started {} ({})", r.start.format("%H:%M"), r.label);
+        }
+        HomeAction::Stop => {
+            let i = state::State::update(path, |s| s.home.stop(now).cloned())??;
+            println!("Recorded {}", interval_text(&i));
+        }
+        HomeAction::List { month } => {
+            let month = Month::parse(&month)?;
+            let h = state::State::load(path)?.home;
+            let mut any = false;
+            for i in h
+                .intervals
+                .iter()
+                .filter(|i| month.contains(i.start.date()))
+            {
+                println!("{}", interval_text(i));
+                any = true;
+            }
+            if let Some(r) = h.running.filter(|r| month.contains(r.start.date())) {
+                println!(
+                    "running  since {}  {}",
+                    r.start.format("%Y-%m-%d %H:%M"),
+                    r.label
+                );
+                any = true;
+            }
+            if !any {
+                println!("No home working recorded in {month}");
+            }
+        }
+        HomeAction::Edit { id, start, end } => {
+            let start = state::parse_time(&start)?;
+            let end = state::parse_time(&end)?;
+            let i = state::State::update(path, |s| s.home.edit(id, start, end).cloned())??;
+            println!("Changed {}", interval_text(&i));
+        }
+        HomeAction::Rm { id } => {
+            let i = state::State::update(path, |s| s.home.remove(id))??;
+            println!("Deleted {}", interval_text(&i));
+        }
+    }
+    Ok(())
+}
+
 /// One recorded interval as a line: id, day, times, hours, label and the
 /// appointment it replaces.
 fn interval_text(i: &state::PrivateInterval) -> String {
@@ -714,6 +808,15 @@ fn print_days(r: &MonthReport, with_trips: bool) {
     }
     for d in &r.days {
         let day = timesheet::weekday_da(d.date.weekday());
+        let remark = if d.date == r.today {
+            ["◀ today".to_string(), d.remark()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            d.remark()
+        };
         let planned = d
             .planned
             .map(|(s, e)| format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")))
@@ -724,17 +827,26 @@ fn print_days(r: &MonthReport, with_trips: bool) {
             } else {
                 String::new()
             };
+            // Later days show their planned norm only.
+            let (worked, diff) = if d.date <= r.today {
+                (
+                    format!("{:.2}", d.worked_hours),
+                    format!("{:+.2}", d.difference()),
+                )
+            } else {
+                Default::default()
+            };
             println!(
-                "{}  {}  {:<11}  {:>5.2}  {:<24}  {:<23}  {:>6.2}  {:>+6.2}  {}",
+                "{}  {}  {:<11}  {:>5.2}  {:<24}  {:<23}  {:>6}  {:>6}  {}",
                 d.date,
                 day,
                 planned,
                 d.norm_hours,
                 d.periods_text(),
                 lunch,
-                d.worked_hours,
-                d.difference(),
-                d.remark()
+                worked,
+                diff,
+                remark
             );
         } else {
             let location = if d.off_reason.is_some() {
@@ -744,23 +856,21 @@ fn print_days(r: &MonthReport, with_trips: bool) {
             };
             println!(
                 "{}  {}  {:<11}  {:>5.2}  {:<30}  {}",
-                d.date,
-                day,
-                planned,
-                d.norm_hours,
-                location,
-                d.remark()
+                d.date, day, planned, d.norm_hours, location, remark
             );
         }
     }
     println!();
-    println!("Norm hours:     {:>8.2}", r.norm_total());
     if with_trips {
-        println!("Worked hours:   {:>8.2}", r.worked_total());
+        println!("Norm hours to date:   {:>8.2}", r.norm_total());
+        println!("Worked hours to date: {:>8.2}", r.worked_total());
         println!(
-            "Difference:     {:>+8.2}",
+            "Difference to date:   {:>+8.2}",
             r.worked_total() - r.norm_total()
         );
+        println!("Norm hours in month:  {:>8.2}", r.month_norm_total());
+    } else {
+        println!("Norm hours:     {:>8.2}", r.norm_total());
     }
 }
 

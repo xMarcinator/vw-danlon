@@ -2,9 +2,13 @@
 //! calendar, work periods from trips, and the difference between them.
 //!
 //! Working time is the time spent at a work address: from arriving at the
-//! address of that day's calendar entry until leaving it again.
+//! address of that day's calendar entry until leaving it again, and the time
+//! working from home.
+//!
+//! Totals count the days up to and including today; later days show their
+//! planned norm only.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Weekday};
@@ -14,7 +18,7 @@ use crate::address::{self, Places};
 use crate::calendar::Occurrence;
 use crate::config::Config;
 use crate::holidays;
-use crate::state::{LunchOverride, PrivateInterval};
+use crate::state::{PrivateInterval, State};
 use crate::trips::Trip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +83,12 @@ pub struct Day {
     /// Private appointments and recorded private time (not company time),
     /// already left out of `segments`.
     pub appointments: Vec<Span>,
-    /// Periods at a work address, minus private appointments.
+    /// Home-working periods: the planned window of a home-working calendar
+    /// event (up to today) and recorded home-working time. Part of
+    /// `segments`.
+    pub home: Vec<Span>,
+    /// Periods at a work address or working from home, minus private
+    /// appointments; overlaps count once.
     pub segments: Vec<Span>,
     /// Start of the first and end of the last period at work.
     pub first_start: Option<DateTime<Tz>>,
@@ -242,36 +251,52 @@ impl Day {
 pub struct MonthReport {
     pub month: Month,
     pub days: Vec<Day>,
+    /// The totals count the days up to and including this one.
+    pub today: NaiveDate,
 }
 
 impl MonthReport {
+    /// The days the totals count: up to and including today.
+    pub fn to_date(&self) -> impl Iterator<Item = &Day> {
+        self.days.iter().filter(|d| d.date <= self.today)
+    }
+    /// Norm hours up to and including today.
     pub fn norm_total(&self) -> f64 {
+        self.to_date().map(|d| d.norm_hours).fold(0.0, |a, b| a + b)
+    }
+    /// Worked hours up to and including today.
+    pub fn worked_total(&self) -> f64 {
+        self.to_date()
+            .map(|d| d.worked_hours)
+            .fold(0.0, |a, b| a + b)
+    }
+    /// Norm hours of the whole month, including the days after today.
+    pub fn month_norm_total(&self) -> f64 {
         self.days
             .iter()
             .map(|d| d.norm_hours)
             .fold(0.0, |a, b| a + b)
     }
-    pub fn worked_total(&self) -> f64 {
-        self.days
-            .iter()
-            .map(|d| d.worked_hours)
-            .fold(0.0, |a, b| a + b)
-    }
 }
 
-/// The month's days. `lunch_overrides` (from the state file) beat a lunch
-/// calendar event, which beats the `[lunch]` default. `recorded` private
-/// time counts like a private appointment; one linked to an appointment
-/// replaces that appointment's planned window.
+/// The month's days, with totals up to and including `today`
+/// (`NaiveDate::MAX`: the whole month). The lunch overrides in `state` beat
+/// a lunch calendar event, which beats the `[lunch]` default. Recorded
+/// private time counts like a private appointment; one linked to an
+/// appointment replaces that appointment's planned window. Recorded
+/// home-working time, and the planned window of a home-working event on a
+/// day up to today, count as worked.
 pub fn build(
     cfg: &Config,
     month: Month,
     trips: &[Trip],
     calendar: &[Occurrence],
-    lunch_overrides: &BTreeMap<NaiveDate, LunchOverride>,
-    recorded: &[PrivateInterval],
+    state: &State,
+    today: NaiveDate,
 ) -> MonthReport {
     let tz = cfg.timezone;
+    let lunch_overrides = &state.lunch;
+    let recorded = state.private.intervals.as_slice();
 
     // Public holidays first: a vacation event over a holiday does not make
     // the holiday a vacation day.
@@ -297,6 +322,9 @@ pub fn build(
     let mut locations: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
     let mut missing_location: BTreeMap<NaiveDate, String> = BTreeMap::new();
     let mut lunch_events: BTreeMap<NaiveDate, Span> = BTreeMap::new();
+    // Dates with a work event (home working included), and home working.
+    let mut work_days: BTreeSet<NaiveDate> = BTreeSet::new();
+    let mut home: BTreeMap<NaiveDate, Vec<(Span, &str)>> = BTreeMap::new();
     for occ in calendar {
         match occ {
             Occurrence::AllDay { date, summary } => {
@@ -349,7 +377,21 @@ pub fn build(
                         }
                         continue;
                     }
-                    EntryKind::Work => {}
+                    EntryKind::Work | EntryKind::Home => {}
+                }
+                work_days.insert(start.date_naive());
+                if is_home_working(cfg, summary, location) {
+                    for span in split_at_midnight(*start, *end, tz) {
+                        if span.0.date_naive() <= today {
+                            home.entry(span.0.date_naive())
+                                .or_default()
+                                .push((span, summary));
+                        }
+                        if norm_from_calendar {
+                            planned.entry(span.0.date_naive()).or_default().push(span);
+                        }
+                    }
+                    continue;
                 }
                 let day_locations = locations.entry(start.date_naive()).or_default();
                 if location.trim().is_empty() {
@@ -376,6 +418,16 @@ pub fn build(
         }
     }
     for day in appointments.values_mut() {
+        day.sort_by_key(|(span, _)| *span);
+    }
+    for (span, label) in recorded_spans(&state.home.intervals, tz) {
+        for span in split_at_midnight(span.0, span.1, tz) {
+            home.entry(span.0.date_naive())
+                .or_default()
+                .push((span, label));
+        }
+    }
+    for day in home.values_mut() {
         day.sort_by_key(|(span, _)| *span);
     }
 
@@ -457,6 +509,7 @@ pub fn build(
                 match_locations.push(work.clone());
             }
 
+            let day_home = home.get(&date).map(Vec::as_slice).unwrap_or(&[]);
             let (segments, mut note) = if !match_addresses {
                 // No calendar: first departure to last arrival.
                 let span = day_trips
@@ -466,7 +519,7 @@ pub fn build(
                     .zip(day_trips.iter().map(|t| t.end).max());
                 (span.into_iter().collect(), None)
             } else if match_locations.is_empty() {
-                let note = (!day_trips.is_empty())
+                let note = (!day_trips.is_empty() && day_home.is_empty())
                     .then(|| "kørsel, men ingen arbejdsadresse i kalenderen".to_string());
                 (Vec::new(), note)
             } else {
@@ -475,6 +528,7 @@ pub fn build(
                     &match_locations,
                     &cfg.known_places,
                     cfg.periods.count_travel_time,
+                    day_home.is_empty(),
                 )
             };
             if note.is_none()
@@ -483,7 +537,21 @@ pub fn build(
                 note = Some(format!("kalenderpost uden adresse: {summary}"));
             }
 
+            // Nothing needs fixing on a day without work: driving then is
+            // private (e.g. at the weekend).
+            if !(work_days.contains(&date) || !day_home.is_empty() || norm_hours > 0.0) {
+                note = None;
+            }
             let check = note.clone();
+            for ((s, e), label) in day_home {
+                let text = format!("{label} {}–{} · home", s.format("%H:%M"), e.format("%H:%M"));
+                note = Some(match note {
+                    Some(n) => format!("{n}; {text}"),
+                    None => text,
+                });
+            }
+            let home_spans: Vec<Span> = day_home.iter().map(|(span, _)| *span).collect();
+            let segments = merge(segments.into_iter().chain(home_spans.iter().copied()));
             let day_appointments = appointments.get(&date).map(Vec::as_slice).unwrap_or(&[]);
             for ((s, e), summary) in day_appointments {
                 let text = format!(
@@ -509,6 +577,7 @@ pub fn build(
                 first_start: segments.first().map(|s| s.0),
                 last_end: segments.last().map(|s| s.1),
                 appointments,
+                home: home_spans,
                 segments,
                 note,
                 check,
@@ -518,7 +587,22 @@ pub fn build(
         })
         .collect();
 
-    MonthReport { month, days }
+    MonthReport { month, days, today }
+}
+
+/// Whether a work event is home working: its title has a `[home_working]`
+/// word (whole word, case-insensitive), or with `at_home_address` its
+/// location is the home address (`mileage.home`).
+pub fn is_home_working(cfg: &Config, summary: &str, location: &str) -> bool {
+    let h = &cfg.home_working;
+    has_word(summary, &h.keywords)
+        || (h.at_home_address
+            && !location.trim().is_empty()
+            && cfg
+                .mileage
+                .as_ref()
+                .and_then(|m| m.home.as_deref())
+                .is_some_and(|home| address::matches(location, home)))
 }
 
 /// What a timed calendar entry is.
@@ -530,6 +614,9 @@ pub enum EntryKind {
     Private,
     /// The day's lunch break: no work address and no planned hours.
     Lunch,
+    /// Planned working time from home (see [`is_home_working`]): no address
+    /// to drive to.
+    Home,
 }
 
 /// A timed calendar entry and what its title makes it.
@@ -596,6 +683,18 @@ fn recorded_spans(recorded: &[PrivateInterval], tz: Tz) -> Vec<(Span, &str)> {
 /// a whole word of the title, case-insensitively ("Lægemiddelfirma" is not
 /// "Læge"). A private word wins over the lunch title.
 fn classify(summary: &str, private_words: &[String], lunch_title: &str) -> EntryKind {
+    if has_word(summary, private_words) {
+        EntryKind::Private
+    } else if has_word(summary, &[lunch_title.to_string()]) {
+        EntryKind::Lunch
+    } else {
+        EntryKind::Work
+    }
+}
+
+/// Whether `summary` contains one of `keywords` as whole words,
+/// case-insensitively.
+fn has_word(summary: &str, keywords: &[String]) -> bool {
     let words = |s: &str| -> Vec<String> {
         s.split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -603,17 +702,10 @@ fn classify(summary: &str, private_words: &[String], lunch_title: &str) -> Entry
             .collect()
     };
     let title = words(summary);
-    let has = |k: &str| {
+    keywords.iter().any(|k| {
         let k = words(k);
         !k.is_empty() && title.windows(k.len()).any(|w| w == k.as_slice())
-    };
-    if private_words.iter().any(|k| has(k)) {
-        EntryKind::Private
-    } else if has(lunch_title) {
-        EntryKind::Lunch
-    } else {
-        EntryKind::Work
-    }
+    })
 }
 
 /// Splits a span crossing midnight into one span per date it covers.
@@ -661,12 +753,14 @@ fn subtract(spans: &[Span], windows: &[Span]) -> Vec<Span> {
 /// until a trip departing from that address. A drive from one work address
 /// to another is working time; with `count_travel` the drives to and from
 /// work are included too. `places` locates home and the workplace by
-/// coordinates too.
+/// coordinates too. Without `expect_driving` (working from home), trips
+/// that never reach work are no reason for a note.
 fn work_segments(
     trips: &[&Trip],
     locations: &[String],
     places: &Places,
     count_travel: bool,
+    expect_driving: bool,
 ) -> (Vec<Span>, Option<String>) {
     let mut segments: Vec<Span> = Vec::new();
     let mut at: Option<(DateTime<Tz>, &str)> = None;
@@ -693,22 +787,28 @@ fn work_segments(
     }
     let note = match at {
         Some((_, loc)) => Some(format!("ankomst til {loc} uden registreret afgang")),
-        None if segments.is_empty() && !trips.is_empty() => {
+        None if segments.is_empty() && !trips.is_empty() && expect_driving => {
             Some("ingen kørsel til eller fra arbejdsadressen".to_string())
         }
         None => None,
     };
 
     // Merge overlaps (travel between two work addresses with count_travel).
-    segments.sort();
+    (merge(segments), note)
+}
+
+/// `spans` sorted, with overlapping ones joined.
+fn merge(spans: impl IntoIterator<Item = Span>) -> Vec<Span> {
+    let mut spans: Vec<Span> = spans.into_iter().collect();
+    spans.sort();
     let mut merged: Vec<Span> = Vec::new();
-    for (s, e) in segments {
+    for (s, e) in spans {
         match merged.last_mut() {
             Some(last) if s <= last.1 => last.1 = last.1.max(e),
             _ => merged.push((s, e)),
         }
     }
-    (merged, note)
+    merged
 }
 
 /// A lunch window of `minutes` from `start` on `date`; `None` for 0 minutes.
@@ -740,6 +840,7 @@ fn worked(segments: &[Span], lunch: Option<Span>, round_to: u32) -> f64 {
 mod tests {
     use super::*;
     use crate::calendar;
+    use crate::state::LunchOverride;
     use crate::trips::parse_time;
     use chrono::NaiveTime;
 
@@ -776,8 +877,8 @@ mod tests {
             Month::parse("2026-10").unwrap(),
             &[],
             &[],
-            &BTreeMap::new(),
-            &[],
+            &State::default(),
+            NaiveDate::MAX,
         );
         // 22 weekdays, no holidays, 7.4 h each.
         assert!((r.norm_total() - 22.0 * 7.4).abs() < 1e-9);
@@ -792,8 +893,8 @@ mod tests {
             Month::parse("2026-12").unwrap(),
             &[],
             &[],
-            &BTreeMap::new(),
-            &[],
+            &State::default(),
+            NaiveDate::MAX,
         );
         assert!((r.norm_total() - 20.0 * 7.4).abs() < 1e-9);
     }
@@ -811,8 +912,8 @@ mod tests {
             Month::parse("2026-10").unwrap(),
             &trips,
             &[],
-            &BTreeMap::new(),
-            &[],
+            &State::default(),
+            NaiveDate::MAX,
         );
         let mon = &r.days[4];
         assert_eq!(mon.worked_hours, 9.0); // 07:30–17:00 minus 30 min
@@ -852,7 +953,7 @@ END:VEVENT
 ";
         let m = Month::parse("2026-10").unwrap();
         let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
-        let r = build(&cfg, m, &[], &occ, &BTreeMap::new(), &[]);
+        let r = build(&cfg, m, &[], &occ, &State::default(), NaiveDate::MAX);
         // Mon–Thu 08:00–16:00 from 5 Oct minus the default lunch = 7,5 h: weeks of
         // 5, 12, 26 Oct = 12 days; 19–22 Oct are ferie.
         assert_eq!(r.norm_total(), 12.0 * 7.5);
@@ -910,7 +1011,7 @@ END:VEVENT
 ";
         let m = Month::parse("2026-10").unwrap();
         let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
-        let r = build(&cfg, m, &[], &occ, &BTreeMap::new(), &[]);
+        let r = build(&cfg, m, &[], &occ, &State::default(), NaiveDate::MAX);
         let day = |n: usize| &r.days[n - 1];
         // Fri 9 – Mon 12 Oct, also outside the days-off keywords.
         for n in [9, 10, 11, 12] {
@@ -961,6 +1062,12 @@ LOCATION:Vestergade 12\\, 5000 Odense C\\, Danmark
 DTSTART;TZID=Europe/Copenhagen:20261006T080000
 DTEND;TZID=Europe/Copenhagen:20261006T153000
 END:VEVENT
+BEGIN:VEVENT
+UID:k
+SUMMARY:Kontor
+DTSTART;TZID=Europe/Copenhagen:20261008T080000
+DTEND;TZID=Europe/Copenhagen:20261008T160000
+END:VEVENT
 ";
         let m = Month::parse("2026-10").unwrap();
         let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
@@ -999,7 +1106,7 @@ END:VEVENT
                 "Kontorvej 1, 8000 Aarhus",
                 home,
             ),
-            // Thursday: arrives but no departure recorded.
+            // Thursday (office in the calendar): arrives but no departure recorded.
             located_trip(
                 &cfg,
                 "2026-10-08 07:40",
@@ -1016,7 +1123,7 @@ END:VEVENT
                 "Bauhaus",
             ),
         ];
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
+        let r = build(&cfg, m, &trips, &occ, &State::default(), NaiveDate::MAX);
 
         let tue = &r.days[5];
         assert_eq!(tue.periods_text(), "08:40–11:30, 12:05–14:30");
@@ -1029,18 +1136,20 @@ END:VEVENT
         let thu = &r.days[7];
         assert_eq!(thu.worked_hours, 0.0);
         assert!(
-            thu.note
+            thu.check
                 .as_deref()
                 .unwrap()
                 .contains("uden registreret afgang")
         );
 
+        // Saturday has no work event: its driving is private, nothing to fix.
         let sat = &r.days[9];
         assert_eq!(sat.worked_hours, 0.0);
+        assert_eq!((sat.note.as_deref(), sat.check.as_deref()), (None, None));
 
         // With travel time, Tuesday runs from leaving home to arriving home.
         cfg.periods.count_travel_time = true;
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
+        let r = build(&cfg, m, &trips, &occ, &State::default(), NaiveDate::MAX);
         assert_eq!(r.days[5].periods_text(), "07:30–11:40, 11:55–15:40");
     }
 
@@ -1082,7 +1191,7 @@ END:VEVENT
             located_trip(&cfg, "2026-10-07 07:40", "2026-10-07 08:00", home, office),
             located_trip(&cfg, "2026-10-07 16:30", "2026-10-07 16:50", office, home),
         ];
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
+        let r = build(&cfg, m, &trips, &occ, &State::default(), NaiveDate::MAX);
         assert_eq!(r.days[5].periods_text(), "08:00–15:00");
         assert_eq!(r.days[6].periods_text(), "08:00–16:30");
         assert_eq!(r.days[6].note, None);
@@ -1149,7 +1258,7 @@ END:VEVENT
             located_trip(&cfg, "2026-10-08 07:40", "2026-10-08 08:00", home, office),
             located_trip(&cfg, "2026-10-08 16:00", "2026-10-08 16:20", office, home),
         ];
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
+        let r = build(&cfg, m, &trips, &occ, &State::default(), NaiveDate::MAX);
 
         // Monday: 07:58–16:00 minus Læge 10:00–11:15; norm stays 8 h.
         let mon = &r.days[4];
@@ -1193,7 +1302,7 @@ END:VEVENT
 
         // An empty word list disables the feature.
         cfg.calendar.as_mut().unwrap().private_keywords.clear();
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &[]);
+        let r = build(&cfg, m, &trips, &occ, &State::default(), NaiveDate::MAX);
         assert_eq!(r.days[4].worked_hours, 482.0 / 60.0);
         assert!(r.days[4].appointments.is_empty());
     }
@@ -1247,7 +1356,9 @@ END:VEVENT
                 }),
             },
         ];
-        let r = build(&cfg, m, &trips, &occ, &BTreeMap::new(), &recorded);
+        let mut state = State::default();
+        state.private.intervals = recorded.to_vec();
+        let r = build(&cfg, m, &trips, &occ, &state, NaiveDate::MAX);
 
         // Recorded 10:02–11:14 is deducted and noted like a calendar Læge.
         let mon = &r.days[1];
@@ -1339,7 +1450,11 @@ END:VEVENT
                 },
             ),
         ]);
-        let r = build(&cfg, m, &trips, &occ, &overrides, &[]);
+        let state = State {
+            lunch: overrides,
+            ..State::default()
+        };
+        let r = build(&cfg, m, &trips, &occ, &state, NaiveDate::MAX);
         let day = |i: usize| (r.days[i].worked_hours * 60.0).round() as i64;
 
         // Normal day 07:52–16:05 (493 min): 30 min deducted.
@@ -1368,6 +1483,121 @@ END:VEVENT
         assert_eq!(r.days[4].norm_hours, 7.5);
         assert_eq!(r.days[11].norm_hours, 8.0 - 0.75);
         assert_eq!(r.days[12].norm_hours, 8.0);
+    }
+
+    #[test]
+    fn home_working_counts_as_worked_and_totals_run_to_today() {
+        let mut cfg = cfg(r#"
+            [calendar]
+            source = ""
+            [mileage]
+            driver_name = "T"
+            registration_number = "AB12345"
+            home = "Hjemvej 3, 8200 Aarhus N"
+            rates = []
+            "#);
+        let event = |uid: &str, summary: &str, location: &str, day: &str, from: &str, to: &str| {
+            format!(
+                "BEGIN:VEVENT\nUID:{uid}\nSUMMARY:{summary}\nLOCATION:{location}\n\
+                 DTSTART;TZID=Europe/Copenhagen:202611{day}T{from}00\n\
+                 DTEND;TZID=Europe/Copenhagen:202611{day}T{to}00\nEND:VEVENT\n"
+            )
+        };
+        let ics = [
+            event("h", "Hjemmearbejde", "", "02", "0800", "1600"),
+            event("l", "Læge", "", "02", "1000", "1100"),
+            event(
+                "a",
+                "Kunde",
+                "Hjemvej 3\\, 8200 Aarhus N",
+                "03",
+                "0800",
+                "1200",
+            ),
+            event(
+                "w",
+                "Hjemmeside møde",
+                "Kontorvej 1\\, 8000 Aarhus C",
+                "04",
+                "0800",
+                "1600",
+            ),
+            event("f", "hjemmearbejde", "", "05", "0800", "1600"),
+        ]
+        .concat();
+        let m = Month::parse("2026-11").unwrap();
+        let occ = calendar::occurrences(&ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
+        let (home, office) = ("Hjemvej 3, 8200 Aarhus N", "Kontorvej 1, 8000 Aarhus");
+        let trips = vec![
+            located_trip(&cfg, "2026-11-02 17:00", "2026-11-02 17:10", home, "Netto"),
+            located_trip(&cfg, "2026-11-04 07:40", "2026-11-04 08:00", home, office),
+            located_trip(&cfg, "2026-11-04 13:00", "2026-11-04 13:20", office, home),
+            // Saturday: private driving without a work event.
+            located_trip(
+                &cfg,
+                "2026-11-07 10:00",
+                "2026-11-07 10:20",
+                home,
+                "Bauhaus",
+            ),
+        ];
+        let at = |s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        let mut state = State::default();
+        state.home.intervals.push(PrivateInterval {
+            id: 1,
+            start: at("2026-11-04 12:30"),
+            end: at("2026-11-04 15:00"),
+            label: "Hjemmearbejde".into(),
+            replaces: None,
+        });
+        let today = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        let r = build(&cfg, m, &trips, &occ, &state, today);
+        let day = |n: usize| &r.days[n - 1];
+
+        // The planned window minus Læge and lunch; the trip is no reason to fix.
+        assert_eq!(day(2).periods_text(), "08:00–10:00, 11:00–16:00");
+        assert_eq!(day(2).worked_hours, 6.5);
+        assert_eq!(day(2).norm_hours, 7.5);
+        assert_eq!(day(2).check, None);
+        assert_eq!(
+            day(2).remark(),
+            "Hjemmearbejde 08:00–16:00 · home; Læge 10:00–11:00 · private"
+        );
+        // An event at the home address is home working too.
+        assert_eq!(day(3).home.len(), 1);
+        assert_eq!(day(3).worked_hours, 4.0);
+        // "Hjemmeside" is not the word "Hjemme": office, then the timer;
+        // 12:30–13:00 at both counts once.
+        assert_eq!(day(4).periods_text(), "08:00–15:00");
+        assert_eq!(day(4).worked_hours, 6.5);
+        // After today: planned norm only.
+        assert_eq!((day(5).norm_hours, day(5).worked_hours), (7.5, 0.0));
+        assert!(day(5).home.is_empty());
+        // No work event at the weekend: nothing to fix.
+        assert_eq!(
+            (day(7).note.as_deref(), day(7).check.as_deref()),
+            (None, None)
+        );
+
+        assert_eq!(r.norm_total(), 7.5 + 4.0 + 7.5);
+        assert_eq!(r.worked_total(), 6.5 + 4.0 + 6.5);
+        assert_eq!(r.month_norm_total(), 7.5 + 4.0 + 7.5 + 7.5);
+        // A past month counts every day, a coming one none.
+        let after = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
+        assert_eq!(
+            build(&cfg, m, &trips, &occ, &state, after).norm_total(),
+            26.5
+        );
+        let before = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let r = build(&cfg, m, &trips, &occ, &state, before);
+        assert_eq!((r.norm_total(), r.worked_total()), (0.0, 0.0));
+
+        // Switched off: the event at home is a work address again.
+        cfg.home_working.at_home_address = false;
+        cfg.home_working.keywords.clear();
+        let r = build(&cfg, m, &trips, &occ, &state, today);
+        assert!(r.days[2].home.is_empty() && r.days[1].home.is_empty());
+        assert_eq!(r.days[2].worked_hours, 0.0);
     }
 
     #[test]

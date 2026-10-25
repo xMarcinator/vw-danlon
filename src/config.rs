@@ -34,6 +34,8 @@ pub struct Config {
     pub checklist: ChecklistConfig,
     #[serde(default)]
     pub vacation: VacationConfig,
+    #[serde(default)]
+    pub home_working: HomeWorkingConfig,
     /// The Min Volkswagen account (Connected Cars) for `trips sync`.
     pub connected_cars: Option<ConnectedCarsConfig>,
     pub danlon: DanlonConfig,
@@ -152,6 +154,34 @@ pub struct CalendarConfig {
     pub name: Option<String>,
     /// Work address for days whose calendar entry has none (or no entry).
     pub default_location: Option<String>,
+}
+
+/// Working from home: a timed work event in the calendar that is home
+/// working counts its planned window as worked, without trips.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeWorkingConfig {
+    /// A work event whose title contains one of these words (whole word,
+    /// case-insensitive) is home working.
+    #[serde(default = "default_home_working_keywords")]
+    pub keywords: Vec<String>,
+    /// A work event whose location is the home address (`mileage.home`) is
+    /// home working.
+    #[serde(default = "yes")]
+    pub at_home_address: bool,
+}
+
+fn default_home_working_keywords() -> Vec<String> {
+    ["Hjemmearbejde", "Hjemme"].map(String::from).to_vec()
+}
+
+impl Default for HomeWorkingConfig {
+    fn default() -> Self {
+        HomeWorkingConfig {
+            keywords: default_home_working_keywords(),
+            at_home_address: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -44,7 +44,9 @@ fn view(dir: &Path, trips: &Path) -> (Config, service::ChecklistView) {
     let month = Month::parse("2026-10").unwrap();
     let trips = service::load_trips(&cfg, Some(trips), month).unwrap();
     let cal = service::calendar(&cfg, month, service::CalendarMode::Fresh).unwrap();
-    let view = service::checklist_view(&cfg, month, &trips, &cal.occurrences).unwrap();
+    // The CLI's today.
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
+    let view = service::checklist_view(&cfg, month, &trips, &cal.occurrences, today).unwrap();
     (cfg, view)
 }
 

@@ -85,6 +85,13 @@ threshold_km = 20000
 # feriefridage = 5                         # per holiday year, from the contract
 # days_per_month = 2.08                    # days earned per full month
 
+# Working from home: a timed work event whose title has one of these words
+# (whole word, any case), or whose location is mileage.home, counts its
+# planned window as worked without trips; see also `home start|stop`.
+# [home_working]
+# keywords = ["Hjemmearbejde", "Hjemme"]
+# at_home_address = true
+
 [danlon]
 # "none": Danløn reports its own Normtimer (160,33 for 37 h/week), which is
 #         what Skat expects for full-time monthly salaried employees.

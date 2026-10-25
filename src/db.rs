@@ -21,8 +21,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, pa
 /// The database's file name, beside the config file.
 pub const FILE_NAME: &str = "vw-danlon.db";
 
-/// The schema version, kept in `PRAGMA user_version`.
-const VERSION: i32 = 1;
+/// The schema version, kept in `PRAGMA user_version`. Version 2 added the
+/// home-working timer ([`HOME_SCHEMA`]).
+const VERSION: i32 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -75,6 +76,22 @@ CREATE TABLE calendar_cache (
 );
 ";
 
+/// The tables version 2 added; a version 1 database gets them when it is
+/// opened for writing.
+const HOME_SCHEMA: &str = "
+CREATE TABLE home_intervals (
+    id INTEGER PRIMARY KEY,
+    start TEXT NOT NULL,
+    end TEXT NOT NULL,
+    label TEXT NOT NULL
+);
+CREATE TABLE home_running (
+    one INTEGER PRIMARY KEY CHECK (one = 1),
+    start TEXT NOT NULL,
+    label TEXT NOT NULL
+);
+";
+
 /// The JSON files earlier versions kept beside the config file.
 const TRIPS_JSON: &str = "trips.json";
 const STATE_JSON: &str = "state.json";
@@ -92,10 +109,36 @@ pub fn open(path: &Path) -> Result<Connection> {
     if !path.exists() {
         create(path)?;
     }
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+    let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| unreadable(path))?;
-    check_version(&conn, path)?;
+    if check_version(&conn, path)? < VERSION {
+        upgrade(&mut conn, path)?;
+    }
     Ok(conn)
+}
+
+/// Brings an older database up to [`VERSION`] in one transaction; another
+/// process may have done it meanwhile.
+fn upgrade(conn: &mut Connection, path: &Path) -> Result<()> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .with_context(|| unreadable(path))?;
+    let version: i32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version == 1 {
+        tx.execute_batch(HOME_SCHEMA)?;
+    }
+    tx.pragma_update(None, "user_version", VERSION)?;
+    tx.commit()
+        .with_context(|| format!("upgrading the database {}", path.display()))
+}
+
+/// Whether the database has the table `name`.
+pub(crate) fn has_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [name],
+        |r| r.get(0),
+    )
 }
 
 /// Opens an existing database read-only, without creating or migrating
@@ -107,13 +150,14 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn check_version(conn: &Connection, path: &Path) -> Result<()> {
+/// The database's schema version: [`VERSION`] or an older one.
+fn check_version(conn: &Connection, path: &Path) -> Result<i32> {
     conn.busy_timeout(Duration::from_secs(10))?;
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .with_context(|| unreadable(path))?;
     match version {
-        VERSION => Ok(()),
+        1..=VERSION => Ok(version),
         v if v > VERSION => bail!(
             "the database {} was written by a newer vw-danlon (schema {v}); it was not changed",
             path.display()
@@ -213,6 +257,7 @@ fn build(path: &Path, tmp: &Path) -> Result<Vec<PathBuf>> {
     let mut conn = Connection::open(tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let tx = conn.transaction()?;
     tx.execute_batch(SCHEMA)?;
+    tx.execute_batch(HOME_SCHEMA)?;
     let mut moved = Vec::new();
     if let Some(t) = &trips {
         crate::trip_store::insert(&tx, &t.trips)?;
@@ -403,6 +448,42 @@ mod tests {
         );
         assert!(State::update(&db, |s| s.entered.clear()).is_err());
         assert_eq!(std::fs::read(&db).unwrap(), junk);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_version_1_database_gets_the_home_tables() {
+        let dir = temp_dir("db-upgrade");
+        let db = dir.join(FILE_NAME);
+        State::update(&db, |s| s.entered.insert("2026-10-05".parse().unwrap())).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "DROP TABLE home_intervals; DROP TABLE home_running; PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        drop(conn);
+
+        // Read-only (the CLI folder the app imports from): not upgraded.
+        let conn = open_read_only(&db).unwrap();
+        let s = crate::state::read_rows(&conn).unwrap();
+        assert_eq!((s.entered.len(), s.home.intervals.len()), (1, 0));
+        assert!(!has_table(&conn, "home_intervals").unwrap());
+        drop(conn);
+
+        State::update(&db, |s| {
+            s.home
+                .start("2026-10-06T08:00:00".parse().unwrap(), None, None)
+                .map(|_| ())
+        })
+        .unwrap()
+        .unwrap();
+        let s = State::load(&db).unwrap();
+        assert_eq!((s.entered.len(), s.home.running.is_some()), (1, true));
+        let conn = open(&db).unwrap();
+        let v: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, VERSION);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

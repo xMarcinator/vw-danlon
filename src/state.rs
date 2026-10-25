@@ -1,9 +1,10 @@
 //! Local state kept in the database beside the config file (see
-//! [`crate::db`]): per-day lunch overrides, the private-time timer, the days
-//! ticked off in the Danløn app checklist and the connected Min Volkswagen
-//! account.
+//! [`crate::db`]): per-day lunch overrides, the private-time and
+//! home-working timers, the days ticked off in the Danløn app checklist and
+//! the connected Min Volkswagen account.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::marker::PhantomData;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -21,6 +22,8 @@ pub struct State {
     pub lunch: BTreeMap<NaiveDate, LunchOverride>,
     /// The private-time timer and the intervals it recorded.
     pub private: Private,
+    /// The home-working timer and the intervals it recorded.
+    pub home: Home,
     /// Days ticked off as entered in the Danløn app.
     pub entered: BTreeSet<NaiveDate>,
     /// The connected Min Volkswagen account. Its device token is in the
@@ -43,16 +46,60 @@ pub struct LunchOverride {
     pub minutes: u32,
 }
 
-/// Private time measured with the timer. Times are local, in the configured
-/// timezone, to the minute.
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct Private {
+/// Time measured with a start/stop timer. Times are local, in the
+/// configured timezone, to the minute.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, bound = "")]
+pub struct Timer<K> {
     pub running: Option<RunningTimer>,
     pub intervals: Vec<PrivateInterval>,
     /// The id the next recorded interval gets; ids are never reused.
     pub next_id: u32,
+    #[serde(skip)]
+    kind: PhantomData<K>,
 }
+
+impl<K> Default for Timer<K> {
+    fn default() -> Self {
+        Timer {
+            running: None,
+            intervals: Vec::new(),
+            next_id: 0,
+            kind: PhantomData,
+        }
+    }
+}
+
+/// What a [`Timer`] measures.
+pub trait TimerKind {
+    /// The label of a timer started without one (and without a linked event).
+    const DEFAULT_LABEL: &'static str;
+    /// What its intervals are called in errors.
+    const NAME: &'static str;
+}
+
+/// Private time: not company time.
+#[derive(Debug, PartialEq)]
+pub struct PrivateKind;
+
+impl TimerKind for PrivateKind {
+    const DEFAULT_LABEL: &'static str = DEFAULT_LABEL;
+    const NAME: &'static str = "private";
+}
+
+/// Working from home: counts as worked.
+#[derive(Debug, PartialEq)]
+pub struct HomeKind;
+
+impl TimerKind for HomeKind {
+    const DEFAULT_LABEL: &'static str = HOME_LABEL;
+    const NAME: &'static str = "home-working";
+}
+
+/// The private-time timer.
+pub type Private = Timer<PrivateKind>;
+/// The home-working timer; its intervals never replace an appointment.
+pub type Home = Timer<HomeKind>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunningTimer {
@@ -80,8 +127,11 @@ pub struct PlannedWindow {
     pub end: NaiveDateTime,
 }
 
-/// The label of a timer started without one and without a linked event.
+/// The label of a private timer started without one and without a linked
+/// event.
 pub const DEFAULT_LABEL: &str = "Privat";
+/// The label of a home-working timer started without one.
+pub const HOME_LABEL: &str = "Hjemmearbejde";
 
 /// Which calendar appointment `private start` links to.
 pub enum EventChoice {
@@ -163,9 +213,9 @@ impl RunningTimer {
     }
 }
 
-impl Private {
+impl<K: TimerKind> Timer<K> {
     /// Starts the timer at `now`. The label defaults to the linked event's
-    /// title, then [`DEFAULT_LABEL`].
+    /// title, then the kind's default label.
     pub fn start(
         &mut self,
         now: NaiveDateTime,
@@ -181,7 +231,7 @@ impl Private {
         }
         let label = label
             .or_else(|| replaces.as_ref().map(|w| w.title.clone()))
-            .unwrap_or_else(|| DEFAULT_LABEL.to_string());
+            .unwrap_or_else(|| K::DEFAULT_LABEL.to_string());
         Ok(self.running.insert(RunningTimer {
             start: minute(now),
             label,
@@ -259,7 +309,7 @@ impl Private {
     fn find(&self, id: u32) -> Result<usize> {
         match self.intervals.iter().position(|i| i.id == id) {
             Some(i) => Ok(i),
-            None => bail!("no private interval with id {id}"),
+            None => bail!("no {} interval with id {id}", K::NAME),
         }
     }
 }
@@ -364,15 +414,7 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
             },
         )
         .optional()?;
-    let next_id = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'private_next_id'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_default();
+    let next_id = read_next_id(conn, "private_next_id")?;
     let account = conn
         .query_row("SELECT email, last_sync FROM account", [], |r| {
             Ok(Account {
@@ -387,9 +429,56 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
             running,
             intervals,
             next_id,
+            kind: PhantomData,
         },
+        home: read_home(conn)?,
         entered,
         account,
+    })
+}
+
+fn read_next_id(conn: &Connection, key: &str) -> rusqlite::Result<u32> {
+    Ok(conn
+        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_default())
+}
+
+/// The home-working timer's rows; none in a database from before it
+/// (opened read-only, so not upgraded).
+fn read_home(conn: &Connection) -> rusqlite::Result<Home> {
+    if !crate::db::has_table(conn, "home_intervals")? {
+        return Ok(Home::default());
+    }
+    let intervals = conn
+        .prepare("SELECT id, start, end, label FROM home_intervals ORDER BY id")?
+        .query_map([], |r| {
+            Ok(PrivateInterval {
+                id: r.get(0)?,
+                start: r.get(1)?,
+                end: r.get(2)?,
+                label: r.get(3)?,
+                replaces: None,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let running = conn
+        .query_row("SELECT start, label FROM home_running", [], |r| {
+            Ok(RunningTimer {
+                start: r.get(0)?,
+                label: r.get(1)?,
+                replaces: None,
+            })
+        })
+        .optional()?;
+    Ok(Home {
+        running,
+        intervals,
+        next_id: read_next_id(conn, "home_next_id")?,
+        kind: PhantomData,
     })
 }
 
@@ -398,7 +487,8 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
     conn.execute_batch(
         "DELETE FROM lunch; DELETE FROM entered; DELETE FROM private_intervals; \
          DELETE FROM private_running; DELETE FROM account; \
-         DELETE FROM meta WHERE key = 'private_next_id';",
+         DELETE FROM home_intervals; DELETE FROM home_running; \
+         DELETE FROM meta WHERE key IN ('private_next_id', 'home_next_id');",
     )?;
     let mut st = conn.prepare("INSERT INTO lunch (day, start, minutes) VALUES (?1, ?2, ?3)")?;
     for (day, l) in &state.lunch {
@@ -441,6 +531,21 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
     conn.execute(
         "INSERT INTO meta (key, value) VALUES ('private_next_id', ?1)",
         [state.private.next_id.to_string()],
+    )?;
+    let mut st =
+        conn.prepare("INSERT INTO home_intervals (id, start, end, label) VALUES (?1, ?2, ?3, ?4)")?;
+    for i in &state.home.intervals {
+        st.execute(params![i.id, i.start, i.end, i.label])?;
+    }
+    if let Some(r) = &state.home.running {
+        conn.execute(
+            "INSERT INTO home_running (one, start, label) VALUES (1, ?1, ?2)",
+            params![r.start, r.label],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('home_next_id', ?1)",
+        [state.home.next_id.to_string()],
     )?;
     if let Some(a) = &state.account {
         conn.execute(
@@ -719,6 +824,45 @@ mod tests {
         assert_eq!(p.intervals.iter().map(|i| i.id).collect::<Vec<_>>(), [2]);
         p.start(at("2026-11-07 10:00"), None, None).unwrap();
         assert_eq!(p.stop(at("2026-11-07 11:00")).unwrap().id, 3);
+    }
+
+    #[test]
+    fn home_timer_round_trips_and_names_its_intervals() {
+        let dir = temp_dir("state-home");
+        let path = dir.join(crate::db::FILE_NAME);
+        let t = |s| parse_time(s).unwrap();
+        State::update(&path, |s| {
+            s.home.start(at("2026-11-03 08:01"), None, None)?;
+            s.home.stop(at("2026-11-03 12:00"))?;
+            s.home
+                .start(at("2026-11-04 13:00"), Some("Rapport".into()), None)?;
+            s.home.edit(1, t("08:00"), t("11:30")).map(|_| ())
+        })
+        .unwrap()
+        .unwrap();
+        let loaded = State::load(&path).unwrap();
+        assert_eq!(
+            loaded.home.intervals,
+            vec![PrivateInterval {
+                id: 1,
+                start: at("2026-11-03 08:00"),
+                end: at("2026-11-03 11:30"),
+                label: HOME_LABEL.into(),
+                replaces: None,
+            }]
+        );
+        assert_eq!(loaded.home.running.as_ref().unwrap().label, "Rapport");
+        assert!(loaded.private.intervals.is_empty() && loaded.private.running.is_none());
+
+        let mut home = loaded.home;
+        assert_eq!(
+            home.remove(9).unwrap_err().to_string(),
+            "no home-working interval with id 9"
+        );
+        assert!(home.start(at("2026-11-04 14:00"), None, None).is_err());
+        assert_eq!(home.stop(at("2026-11-04 15:00")).unwrap().id, 2);
+        assert_eq!(home.remove(1).unwrap().id, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

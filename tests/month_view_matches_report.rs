@@ -39,10 +39,11 @@ fn example_dir() -> PathBuf {
     dir
 }
 
-/// A day's date, norm, worked hours and difference as `report` prints them.
+/// A day's date, norm, worked hours and difference as `report` prints them
+/// (worked and difference empty on the days after today).
 type DayNumbers = (NaiveDate, String, String, String);
 
-/// The numbers of each day row of `report`'s output, and the three totals.
+/// The numbers of each day row of `report`'s output, and the four totals.
 fn report_numbers(out: &str) -> (Vec<DayNumbers>, Vec<String>) {
     let mut days = Vec::new();
     let mut totals = Vec::new();
@@ -55,21 +56,20 @@ fn report_numbers(out: &str) -> (Vec<DayNumbers>, Vec<String>) {
             let num = |t: &str| t.parse::<f64>().is_ok() && t.contains('.');
             let n = 2 + tokens[2..].iter().position(|t| num(t)).unwrap();
             // Worked is the number right before the signed difference.
-            let w = n
-                + 1
-                + tokens[n + 1..]
-                    .windows(2)
-                    .position(|p| num(p[0]) && num(p[1]) && p[1].starts_with(['+', '-']))
-                    .unwrap();
-            days.push((
-                date,
-                tokens[n].to_string(),
-                tokens[w].to_string(),
-                tokens[w + 1].to_string(),
-            ));
-        } else if let Some(rest) = ["Norm hours:", "Worked hours:", "Difference:"]
-            .iter()
-            .find_map(|p| line.strip_prefix(p))
+            let w = tokens[n + 1..]
+                .windows(2)
+                .position(|p| num(p[0]) && num(p[1]) && p[1].starts_with(['+', '-']))
+                .map(|i| n + 1 + i);
+            let at = |i: Option<usize>| i.map(|i| tokens[i].to_string()).unwrap_or_default();
+            days.push((date, tokens[n].to_string(), at(w), at(w.map(|w| w + 1))));
+        } else if let Some(rest) = [
+            "Norm hours to date:",
+            "Worked hours to date:",
+            "Difference to date:",
+            "Norm hours in month:",
+        ]
+        .iter()
+        .find_map(|p| line.strip_prefix(p))
         {
             totals.push(rest.trim().to_string());
         }
@@ -99,9 +99,9 @@ fn month_view_matches_report_for_the_example_data() {
 
     let cfg = Config::load(&config).unwrap();
     let month = Month::parse("2026-10").unwrap();
-    // Today late in the month: the calendar reaches into November for the
-    // coming private appointments, which must not change October.
-    let today = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+    // The CLI's today; the calendar reaches 14 days past it for the coming
+    // private appointments, which must not change October.
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
     let now = cfg
         .timezone
         .from_local_datetime(&NaiveDateTime::new(today, chrono::NaiveTime::MIN))
@@ -115,11 +115,13 @@ fn month_view_matches_report_for_the_example_data() {
         .days
         .iter()
         .map(|d| {
+            let past = d.date <= today;
+            let shown = |s: String| if past { s } else { String::new() };
             (
                 d.date,
                 format!("{:.2}", d.norm_hours),
-                format!("{:.2}", d.worked_hours),
-                format!("{:+.2}", d.difference()),
+                shown(format!("{:.2}", d.worked_hours)),
+                shown(format!("{:+.2}", d.difference())),
             )
         })
         .collect();
@@ -130,6 +132,7 @@ fn month_view_matches_report_for_the_example_data() {
             format!("{:.2}", r.norm_total()),
             format!("{:.2}", r.worked_total()),
             format!("{:+.2}", r.worked_total() - r.norm_total()),
+            format!("{:.2}", r.month_norm_total()),
         ],
         want_totals.as_slice()
     );

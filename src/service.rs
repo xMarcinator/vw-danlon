@@ -3,7 +3,7 @@
 //! the vacation overview, and the Min Volkswagen account access and sync.
 //! Nothing here prints or prompts; warnings come back as values.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use crate::config::{Config, MileageConfig};
 use crate::connected_cars::{self, TokenStore, Vehicle};
 use crate::db;
 use crate::mileage::{self, MileageMonth, Status};
-use crate::month::{self, Month, MonthReport, TimedEntry};
+use crate::month::{self, EntryKind, Month, MonthReport, TimedEntry};
 use crate::state::{self, EventChoice, Private, RunningTimer, State};
 use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
@@ -154,39 +154,40 @@ pub fn refresh_calendar(cfg: &Config) -> Result<Option<(DateTime<Utc>, bool)>> {
 }
 
 /// The calendar's timed entries, classified with the configured private
-/// words and lunch title.
+/// words, lunch title and home-working words and address.
 pub fn timed_entries<'a>(cfg: &Config, cal: &'a [Occurrence]) -> Vec<TimedEntry<'a>> {
     let private_words = cfg
         .calendar
         .as_ref()
         .map(|c| c.private_keywords.as_slice())
         .unwrap_or_default();
-    month::timed_entries(cal, private_words, &cfg.lunch.title)
+    let mut entries = month::timed_entries(cal, private_words, &cfg.lunch.title);
+    for e in &mut entries {
+        if e.kind == EntryKind::Work && month::is_home_working(cfg, e.summary, e.location) {
+            e.kind = EntryKind::Home;
+        }
+    }
+    entries
 }
 
 /// The month's work calendar and norm hours, without trips or the state
-/// file.
+/// file; the totals are the whole month's.
 pub fn norm_month(cfg: &Config, month: Month, cal: &[Occurrence]) -> MonthReport {
-    month::build(cfg, month, &[], cal, &BTreeMap::new(), &[])
+    month::build(cfg, month, &[], cal, &State::default(), NaiveDate::MAX)
 }
 
-/// The month's days, with the lunch overrides and recorded private time
-/// from the state file.
+/// The month's days with totals up to and including `today`, with the
+/// lunch overrides and recorded private and home-working time from the
+/// database.
 pub fn build_month(
     cfg: &Config,
     month: Month,
     trips: &[Trip],
     cal: &[Occurrence],
+    today: NaiveDate,
 ) -> Result<MonthReport> {
     let state = State::load(&cfg.database)?;
-    Ok(month::build(
-        cfg,
-        month,
-        trips,
-        cal,
-        &state.lunch,
-        &state.private.intervals,
-    ))
+    Ok(month::build(cfg, month, trips, cal, &state, today))
 }
 
 /// The month's mileage, when the config has a `[mileage]` section.
@@ -255,15 +256,17 @@ pub struct ChecklistView {
     pub entered: BTreeSet<NaiveDate>,
 }
 
-/// The month's registrations and ticks, as `checklist <month>` prints them.
-/// `cal` runs from 1 January through the month (see [`calendar`]).
+/// The month's registrations and ticks, as `checklist <month>` prints them
+/// on `today`. `cal` runs from 1 January through the month (see
+/// [`calendar`]).
 pub fn checklist_view(
     cfg: &Config,
     month: Month,
     trips: &[Trip],
     cal: &[Occurrence],
+    today: NaiveDate,
 ) -> Result<ChecklistView> {
-    let report = build_month(cfg, month, trips, cal)?;
+    let report = build_month(cfg, month, trips, cal, today)?;
     let mileage = mileage_for(cfg, month, trips, cal)?;
     Ok(ChecklistView {
         days: checklist_days(cfg, &report, trips, mileage.as_ref(), cal),
@@ -288,13 +291,18 @@ pub fn set_entered(
     }
 }
 
-/// The private timer when it has been running so long at `now` that it was
-/// likely forgotten.
-pub fn forgotten_timer(cfg: &Config, now: NaiveDateTime) -> Result<Option<RunningTimer>> {
-    Ok(State::load(&cfg.database)?
-        .private
-        .running
-        .filter(|r| r.forgotten(now)))
+/// The private and the home-working timer, each when it has been running
+/// so long at `now` that it was likely forgotten.
+pub fn forgotten_timers(
+    cfg: &Config,
+    now: NaiveDateTime,
+) -> Result<(Option<RunningTimer>, Option<RunningTimer>)> {
+    let state = State::load(&cfg.database)?;
+    let forgotten = |r: Option<RunningTimer>| r.filter(|r| r.forgotten(now));
+    Ok((
+        forgotten(state.private.running),
+        forgotten(state.home.running),
+    ))
 }
 
 /// How many days after today the Month screen lists coming private
@@ -343,9 +351,9 @@ pub fn month_view(
         .filter(|o| occurrence_date(o) <= last)
         .cloned()
         .collect();
-    let report = build_month(cfg, month, trips, &up_to)?;
-    let mileage = mileage_for(cfg, month, trips, &up_to)?;
     let today = now.date_naive();
+    let report = build_month(cfg, month, trips, &up_to, today)?;
+    let mileage = mileage_for(cfg, month, trips, &up_to)?;
     let private = private_time(
         &timed_entries(cfg, cal),
         &State::load(&cfg.database)?.private,
@@ -1041,7 +1049,7 @@ mod tests {
         add_manual_trip(&cfg, date, &form("07:30", "08:00", "Hjem", "Kontorvej 1")).unwrap();
         let worked = || {
             let trips = load_trips(&cfg, None, month).unwrap();
-            let report = build_month(&cfg, month, &trips, &[]).unwrap();
+            let report = build_month(&cfg, month, &trips, &[], date).unwrap();
             let d = report.days.iter().find(|d| d.date == date).unwrap();
             (d.worked_hours, d.lunch.source)
         };
