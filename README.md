@@ -15,20 +15,50 @@ holidays.
 ```sh
 cp config.example.toml config.toml   # once, then edit
 
-cargo run -- report    2026-10 -t trips.csv                    # check first
-cargo run -- timesheet 2026-10 -t trips.csv -o arbejdstid-2026-10.csv
-cargo run -- logbook   2026-10 -t trips.csv -o korebog-2026-10.csv
-cargo run -- export    2026-10 -t trips.csv -o danlon-2026-10.txt
+cargo run -- trips import ~/Downloads/export.xlsx              # see "Trips from Min Volkswagen"
+cargo run -- report    2026-10                                 # check first
+cargo run -- timesheet 2026-10 -o arbejdstid-2026-10.csv
+cargo run -- logbook   2026-10 -o korebog-2026-10.csv
+cargo run -- export    2026-10 -o danlon-2026-10.txt
 ```
 
 1. Print `korebog-…csv`, check it, and sign it as employer. The signed
    control is a condition for the allowance being tax-free.
 2. Import `danlon-…txt` in Danløn under **Lønberegning → Indlæs fra fil**,
-   or send it directly with `export 2026-10 -t trips.csv --send` (see below).
+   or send it directly with `export 2026-10 --send` (see below).
 3. Keep `arbejdstid-…csv` and `korebog-…csv` for at least 5 years.
 
-Keep all trips for the year in one file. The 20,000 km rate threshold is
-counted from 1 January.
+Without `-t`, the commands use the trips stored by `trips import`. Pass
+`-t trips.csv` (or a `.json` or `.xlsx` export) to use a file instead. Keep
+all trips for the year: the 20,000 km rate threshold is counted from
+1 January.
+
+## Trips from Min Volkswagen
+
+1. In the Min Volkswagen app, open **Ture → Historik** and tap the share
+   icon. The app gives an Excel file (.xlsx) with the trips of the chosen
+   period.
+2. Run `cargo run -- trips import export.xlsx`. It prints how many trips
+   were added, how many were already imported, and the period covered.
+
+The trips are stored in `trips.json` beside the config. Overlapping exports
+are merged: a trip with the same start time and start odometer is added
+once, so exporting a bit more than needed is safe. The driver's name and
+licence plate in the export are not stored.
+
+The export often leaves out house numbers ("Lysbrohøjen, Lysbro"). An
+address without a house number matches a known address on the same street
+and postal code or town. For a sure match, optionally give the coordinates
+of home and the workplace (as copied from a map):
+
+```toml
+[places]
+home = "56.1890, 10.1820"
+workplace = "56.1572, 10.2107"
+radius_m = 150          # default
+```
+
+A trip ending within `radius_m` of one counts as arriving there.
 
 ## Danish rules applied
 
@@ -179,7 +209,7 @@ be switched on or off.
 
 ## Trips file
 
-CSV or JSON with the fields:
+Instead of an export, `-t` takes a CSV or JSON file with the fields:
 
 | field | required | example |
 |---|---|---|
@@ -204,7 +234,7 @@ Danløn, and asks before sending.
 ```sh
 export DANLON_REFRESH_TOKEN=…        # or danlon.api.refresh_token_file
 cargo run -- danlon info              # company, employees, pay codes, waiting pay parts
-cargo run -- export 2026-10 -t trips.csv --send
+cargo run -- export 2026-10 --send
 cargo run -- danlon delete <id>       # undo, before running payroll
 ```
 

@@ -5,12 +5,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
-use crate::trips::{ExportTrip, Position};
+use crate::trips::{ExportTrip, Position, Trip};
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -80,6 +80,19 @@ pub fn import(
     Ok((merged, period))
 }
 
+/// The stored trips, for commands run without `-t`. An empty or missing
+/// store is an error naming `trips import`.
+pub fn stored_trips(store: &Path, tz: Tz) -> Result<Vec<Trip>> {
+    let trips = TripStore::load(store)?.trips(tz);
+    if trips.is_empty() {
+        bail!(
+            "no stored trips in {}; run `trips import <export.xlsx>` or pass -t <file>",
+            store.display()
+        );
+    }
+    Ok(trips)
+}
+
 impl TripStore {
     /// Reads the store; a missing file is an empty store.
     pub fn load(path: &Path) -> Result<Self> {
@@ -96,6 +109,27 @@ impl TripStore {
                 path.display()
             )
         })
+    }
+
+    /// The stored trips in `tz`, sorted by start, ready for the reports.
+    pub fn trips(&self, tz: Tz) -> Vec<Trip> {
+        let mut trips: Vec<Trip> = self
+            .trips
+            .iter()
+            .map(|t| Trip {
+                start: t.start.with_timezone(&tz),
+                end: t.end.with_timezone(&tz),
+                distance_km: t.distance_km,
+                from: t.from.clone(),
+                to: t.to.clone(),
+                purpose: String::new(),
+                business: None,
+                start_pos: t.start_pos,
+                end_pos: t.end_pos,
+            })
+            .collect();
+        trips.sort_by_key(|t| t.start);
+        trips
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -166,8 +200,19 @@ mod tests {
         let stored = TripStore::load(&store).unwrap().trips;
         assert_eq!(stored.len(), 3);
         assert!(stored.windows(2).all(|w| w[0].start < w[1].start));
+        let direct = crate::trips::load(&b, TZ).unwrap();
+        let trips = stored_trips(&store, TZ).unwrap();
+        assert_eq!(&trips[1..], &direct[..]);
         let text = std::fs::read_to_string(&store).unwrap();
         assert!(!text.contains("Test Testesen") && !text.contains("AB 12 345"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn no_stored_trips_names_trips_import() {
+        let dir = temp_dir("store-none");
+        let err = stored_trips(&dir.join("trips.json"), TZ).unwrap_err();
+        assert!(err.to_string().contains("trips import"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -13,7 +13,7 @@ use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::{OffsetName, Tz};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Trip {
     pub start: DateTime<Tz>,
     pub end: DateTime<Tz>,

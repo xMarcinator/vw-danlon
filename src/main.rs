@@ -49,31 +49,34 @@ enum Command {
     Report {
         month: String,
         /// Trips file (.csv, .json or a Min Volkswagen .xlsx export), may
-        /// contain the whole year.
+        /// contain the whole year. Default: the trips stored by `trips import`.
         #[arg(short, long)]
-        trips: PathBuf,
+        trips: Option<PathBuf>,
     },
     /// Write the working-time record (arbejdstidsregistrering) for a month.
     Timesheet {
         month: String,
+        /// Trips file (default: the trips stored by `trips import`).
         #[arg(short, long)]
-        trips: PathBuf,
+        trips: Option<PathBuf>,
         #[arg(short, long)]
         out: PathBuf,
     },
     /// Write the mileage logbook (kørselsregnskab) for a month.
     Logbook {
         month: String,
+        /// Trips file (default: the trips stored by `trips import`).
         #[arg(short, long)]
-        trips: PathBuf,
+        trips: Option<PathBuf>,
         #[arg(short, long)]
         out: PathBuf,
     },
     /// Write the Danløn import file for a month, or send it with --send.
     Export {
         month: String,
+        /// Trips file (default: the trips stored by `trips import`).
         #[arg(short, long)]
-        trips: PathBuf,
+        trips: Option<PathBuf>,
         /// Import file to write.
         #[arg(short, long, required_unless_present = "send")]
         out: Option<PathBuf>,
@@ -195,7 +198,7 @@ fn main() -> Result<()> {
         }
         Command::Report { month, trips } => {
             let month = Month::parse(&month)?;
-            let trips = trips::load(&trips, cfg.timezone)?;
+            let trips = load_trips(&cfg, trips.as_deref())?;
             let cal = calendar(&cfg, month)?;
             let report = build_month(&cfg, month, &trips, &cal)?;
             print_days(&report, true);
@@ -217,7 +220,7 @@ fn main() -> Result<()> {
         }
         Command::Timesheet { month, trips, out } => {
             let month = Month::parse(&month)?;
-            let trips = trips::load(&trips, cfg.timezone)?;
+            let trips = load_trips(&cfg, trips.as_deref())?;
             let report = build_month(&cfg, month, &trips, &calendar(&cfg, month)?)?;
             timesheet::write(&cfg, &report, create(&out)?)?;
             println!("Wrote {}", out.display());
@@ -228,7 +231,7 @@ fn main() -> Result<()> {
                 .as_ref()
                 .context("no [mileage] section in config")?;
             let month = Month::parse(&month)?;
-            let trips = trips::load(&trips, cfg.timezone)?;
+            let trips = load_trips(&cfg, trips.as_deref())?;
             let cal = calendar(&cfg, month)?;
             let m = compute_mileage(&cfg, mcfg, month, &trips, &cal)?;
             mileage::write_logbook(mcfg, &m, create(&out)?)?;
@@ -243,7 +246,7 @@ fn main() -> Result<()> {
             yes,
         } => {
             let month = Month::parse(&month)?;
-            let trips = trips::load(&trips, cfg.timezone)?;
+            let trips = load_trips(&cfg, trips.as_deref())?;
             let cal = calendar(&cfg, month)?;
             let report = build_month(&cfg, month, &trips, &cal)?;
             let mil = mileage_for(&cfg, month, &trips, &cal)?;
@@ -287,6 +290,14 @@ fn main() -> Result<()> {
         } => import_trips(&cfg, &file)?,
     }
     Ok(())
+}
+
+/// Trips from `-t`, else from the trip store.
+fn load_trips(cfg: &Config, file: Option<&Path>) -> Result<Vec<Trip>> {
+    if let Some(file) = file {
+        return trips::load(file, cfg.timezone);
+    }
+    trip_store::stored_trips(&cfg.trip_store, cfg.timezone)
 }
 
 fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
