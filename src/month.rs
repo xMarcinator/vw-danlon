@@ -74,7 +74,9 @@ pub struct Day {
     pub off_reason: Option<String>,
     /// Work addresses for the day (calendar locations or the default).
     pub work_locations: Vec<String>,
-    /// Periods at a work address.
+    /// Private appointments (not company time), already left out of `segments`.
+    pub appointments: Vec<Span>,
+    /// Periods at a work address, minus private appointments.
     pub segments: Vec<Span>,
     /// Start of the first and end of the last period at work.
     pub first_start: Option<DateTime<Tz>>,
@@ -153,9 +155,15 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
         .as_ref()
         .and_then(|c| c.default_location.clone());
     let match_addresses = cfg.calendar.is_some();
+    let private_words: &[String] = cfg
+        .calendar
+        .as_ref()
+        .map(|c| c.private_keywords.as_slice())
+        .unwrap_or_default();
 
     // Planned working time per date, from timed calendar events.
     let mut planned: BTreeMap<NaiveDate, Vec<Span>> = BTreeMap::new();
+    let mut appointments: BTreeMap<NaiveDate, Vec<(Span, &str)>> = BTreeMap::new();
     let mut locations: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
     let mut missing_location: BTreeMap<NaiveDate, String> = BTreeMap::new();
     for occ in calendar {
@@ -172,6 +180,15 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
                 summary,
                 location,
             } => {
+                if classify(summary, private_words) == EntryKind::Private {
+                    for span in split_at_midnight(*start, *end, tz) {
+                        appointments
+                            .entry(span.0.date_naive())
+                            .or_default()
+                            .push((span, summary));
+                    }
+                    continue;
+                }
                 let day_locations = locations.entry(start.date_naive()).or_default();
                 if location.trim().is_empty() {
                     missing_location.insert(start.date_naive(), summary.clone());
@@ -181,20 +198,8 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
                 if !norm_from_calendar {
                     continue;
                 }
-                // Split events crossing midnight onto each date they cover.
-                let mut s = *start;
-                while s < *end {
-                    let next_midnight = tz
-                        .from_local_datetime(
-                            &(s.date_naive() + Duration::days(1))
-                                .and_hms_opt(0, 0, 0)
-                                .unwrap(),
-                        )
-                        .earliest()
-                        .unwrap_or(*end);
-                    let e = (*end).min(next_midnight);
-                    planned.entry(s.date_naive()).or_default().push((s, e));
-                    s = e;
+                for span in split_at_midnight(*start, *end, tz) {
+                    planned.entry(span.0.date_naive()).or_default().push(span);
                 }
             }
         }
@@ -269,6 +274,21 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
                 note = Some(format!("kalenderpost uden adresse: {summary}"));
             }
 
+            let day_appointments = appointments.get(&date).map(Vec::as_slice).unwrap_or(&[]);
+            for ((s, e), summary) in day_appointments {
+                let text = format!(
+                    "{summary} {}–{} · private",
+                    s.format("%H:%M"),
+                    e.format("%H:%M")
+                );
+                note = Some(match note {
+                    Some(n) => format!("{n}; {text}"),
+                    None => text,
+                });
+            }
+            let appointments: Vec<Span> = day_appointments.iter().map(|(span, _)| *span).collect();
+            let segments = subtract(&segments, &appointments);
+
             let minutes: i64 = segments.iter().map(|(s, e)| (*e - *s).num_minutes()).sum();
             let (worked_hours, break_minutes) = worked(minutes, cfg);
             Day {
@@ -279,6 +299,7 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
                 work_locations,
                 first_start: segments.first().map(|s| s.0),
                 last_end: segments.last().map(|s| s.1),
+                appointments,
                 segments,
                 note,
                 break_minutes,
@@ -288,6 +309,78 @@ pub fn build(cfg: &Config, month: Month, trips: &[Trip], calendar: &[Occurrence]
         .collect();
 
     MonthReport { month, days }
+}
+
+/// What a timed calendar entry is.
+#[derive(Debug, PartialEq, Eq)]
+enum EntryKind {
+    /// Planned working time at the entry's address.
+    Work,
+    /// A private appointment (e.g. the doctor): not company time.
+    Private,
+}
+
+/// Classifies a timed calendar entry by its title. A configured word matches
+/// a whole word of the title, case-insensitively ("Lægemiddelfirma" is not
+/// "Læge").
+fn classify(summary: &str, private_words: &[String]) -> EntryKind {
+    let words = |s: &str| -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let title = words(summary);
+    let private = private_words.iter().any(|k| {
+        let k = words(k);
+        !k.is_empty() && title.windows(k.len()).any(|w| w == k.as_slice())
+    });
+    if private {
+        EntryKind::Private
+    } else {
+        EntryKind::Work
+    }
+}
+
+/// Splits a span crossing midnight into one span per date it covers.
+fn split_at_midnight(start: DateTime<Tz>, end: DateTime<Tz>, tz: Tz) -> Vec<Span> {
+    let mut spans = Vec::new();
+    let mut s = start;
+    while s < end {
+        let next_midnight = tz
+            .from_local_datetime(
+                &(s.date_naive() + Duration::days(1))
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .earliest()
+            .unwrap_or(end);
+        let e = end.min(next_midnight);
+        spans.push((s, e));
+        s = e;
+    }
+    spans
+}
+
+/// `spans` with every part covered by one of `windows` removed. Overlapping
+/// windows remove a time only once.
+fn subtract(spans: &[Span], windows: &[Span]) -> Vec<Span> {
+    let mut out = spans.to_vec();
+    for (ws, we) in windows {
+        out = out
+            .into_iter()
+            .flat_map(|(s, e)| {
+                if *we <= s || *ws >= e {
+                    return vec![(s, e)];
+                }
+                [(s, *ws), (*we, e)]
+                    .into_iter()
+                    .filter(|(a, b)| a < b)
+                    .collect()
+            })
+            .collect();
+    }
+    out
 }
 
 /// Periods at a work address: from a trip arriving at one of `locations`
@@ -429,6 +522,7 @@ mod tests {
             source: String::new(),
             norm_from_calendar: true,
             days_off_keywords: vec!["ferie".into()],
+            private_keywords: vec![],
             name: None,
             default_location: None,
         });
@@ -478,6 +572,7 @@ END:VEVENT
             source: String::new(),
             norm_from_calendar: true,
             days_off_keywords: vec![],
+            private_keywords: vec![],
             name: None,
             default_location: Some("Kontorvej 1, 8000 Aarhus C".into()),
         });
@@ -580,6 +675,7 @@ END:VEVENT
             source: String::new(),
             norm_from_calendar: true,
             days_off_keywords: vec![],
+            private_keywords: vec![],
             name: None,
             default_location: None,
         });
@@ -612,6 +708,116 @@ END:VEVENT
         assert_eq!(r.days[5].periods_text(), "08:00–15:00");
         assert_eq!(r.days[6].periods_text(), "08:00–16:30");
         assert_eq!(r.days[6].note, None);
+    }
+
+    #[test]
+    fn private_appointments_are_not_company_time() {
+        // `private_keywords` defaults to ["Læge", "Tandlæge", "Fysioterapeut"].
+        let mut cfg = cfg("[calendar]\nsource = \"\"");
+        cfg.periods.unpaid_break_minutes = 0;
+        let ics = "BEGIN:VEVENT
+UID:w
+SUMMARY:Kontor
+LOCATION:Kontorvej 1\\, 8000 Aarhus C
+DTSTART;TZID=Europe/Copenhagen:20261005T080000
+DTEND;TZID=Europe/Copenhagen:20261005T160000
+RRULE:FREQ=DAILY;COUNT=4
+END:VEVENT
+BEGIN:VEVENT
+UID:l
+SUMMARY:Læge
+LOCATION:Lægehuset\\, Bygade 2\\, 8000 Aarhus C
+DTSTART;TZID=Europe/Copenhagen:20261005T100000
+DTEND;TZID=Europe/Copenhagen:20261005T111500
+END:VEVENT
+BEGIN:VEVENT
+UID:m
+SUMMARY:Lægemiddelfirma
+LOCATION:Industrivej 9\\, 8000 Aarhus C
+DTSTART;TZID=Europe/Copenhagen:20261006T090000
+DTEND;TZID=Europe/Copenhagen:20261006T100000
+END:VEVENT
+BEGIN:VEVENT
+UID:n
+SUMMARY:Læge
+DTSTART;TZID=Europe/Copenhagen:20261007T100000
+DTEND;TZID=Europe/Copenhagen:20261007T110000
+END:VEVENT
+BEGIN:VEVENT
+UID:t
+SUMMARY:tandlæge
+DTSTART;TZID=Europe/Copenhagen:20261008T100000
+DTEND;TZID=Europe/Copenhagen:20261008T110000
+END:VEVENT
+BEGIN:VEVENT
+UID:u
+SUMMARY:Læge
+DTSTART;TZID=Europe/Copenhagen:20261008T103000
+DTEND;TZID=Europe/Copenhagen:20261008T113000
+END:VEVENT
+BEGIN:VEVENT
+UID:f
+SUMMARY:Fysioterapeut
+DTSTART;TZID=Europe/Copenhagen:20261009T230000
+DTEND;TZID=Europe/Copenhagen:20261010T010000
+END:VEVENT
+";
+        let m = Month::parse("2026-10").unwrap();
+        let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
+        let (home, office) = ("Hjem", "Kontorvej 1, 8000 Aarhus");
+        let trips = vec![
+            located_trip(&cfg, "2026-10-05 07:40", "2026-10-05 07:58", home, office),
+            located_trip(&cfg, "2026-10-05 16:00", "2026-10-05 16:20", office, home),
+            located_trip(&cfg, "2026-10-08 07:40", "2026-10-08 08:00", home, office),
+            located_trip(&cfg, "2026-10-08 16:00", "2026-10-08 16:20", office, home),
+        ];
+        let r = build(&cfg, m, &trips, &occ);
+
+        // Monday: 07:58–16:00 minus Læge 10:00–11:15; norm stays 8 h.
+        let mon = &r.days[4];
+        assert_eq!(mon.periods_text(), "07:58–10:00, 11:15–16:00");
+        assert_eq!(mon.worked_hours, 407.0 / 60.0);
+        assert_eq!(format!("{:.2}", mon.worked_hours), "6.78");
+        assert_eq!(mon.norm_hours, 8.0);
+        assert_eq!(mon.work_locations, vec!["Kontorvej 1, 8000 Aarhus C"]);
+        assert_eq!(mon.remark(), "Læge 10:00–11:15 · private");
+
+        // "Lægemiddelfirma" is a work entry: its address and hours count.
+        let tue = &r.days[5];
+        assert_eq!(tue.norm_hours, 9.0);
+        assert!(
+            tue.work_locations
+                .contains(&"Industrivej 9, 8000 Aarhus C".into())
+        );
+        assert!(tue.appointments.is_empty());
+
+        // An appointment without address gives no missing-address warning.
+        assert_eq!(
+            r.days[6].note.as_deref(),
+            Some("Læge 10:00–11:00 · private")
+        );
+
+        // Overlapping appointments 10:00–11:00 and 10:30–11:30 deduct 90 min once.
+        let thu = &r.days[7];
+        assert_eq!(thu.worked_hours, 6.5);
+        assert_eq!(thu.norm_hours, 8.0);
+
+        // Across midnight: split onto each date.
+        let at = |d: &Day| -> Vec<String> {
+            d.appointments
+                .iter()
+                .map(|(s, e)| format!("{}–{}", s.format("%d %H:%M"), e.format("%d %H:%M")))
+                .collect()
+        };
+        assert_eq!(at(&r.days[8]), vec!["09 23:00–10 00:00"]);
+        assert_eq!(at(&r.days[9]), vec!["10 00:00–10 01:00"]);
+        assert_eq!(r.days[9].norm_hours, 0.0);
+
+        // An empty word list disables the feature.
+        cfg.calendar.as_mut().unwrap().private_keywords.clear();
+        let r = build(&cfg, m, &trips, &occ);
+        assert_eq!(r.days[4].worked_hours, 482.0 / 60.0);
+        assert!(r.days[4].appointments.is_empty());
     }
 
     #[test]

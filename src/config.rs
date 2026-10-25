@@ -91,6 +91,12 @@ fn yes() -> bool {
     true
 }
 
+fn default_private_keywords() -> Vec<String> {
+    ["Læge", "Tandlæge", "Fysioterapeut"]
+        .map(String::from)
+        .to_vec()
+}
+
 impl Default for HolidayConfig {
     fn default() -> Self {
         HolidayConfig {
@@ -115,6 +121,11 @@ pub struct CalendarConfig {
     /// words (case-insensitive) count as days off.
     #[serde(default)]
     pub days_off_keywords: Vec<String>,
+    /// Timed events whose title contains one of these words (whole word,
+    /// case-insensitive) are private appointments: not company time, no work
+    /// address and no planned hours. An empty list disables this.
+    #[serde(default = "default_private_keywords")]
+    pub private_keywords: Vec<String>,
     /// Expected calendar name (X-WR-CALNAME). Guards against pointing the
     /// share link at the wrong calendar.
     pub name: Option<String>,
