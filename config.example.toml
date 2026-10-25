@@ -75,6 +75,16 @@ threshold_km = 20000
 # home_name = "Hjem"
 # workplace_name = "Kontoret"
 
+# Vacation (samtidighedsferie) from all-day calendar events; see `vacation`.
+# An all-day event whose title contains a word (any case, also inside a longer
+# word: "Juleferie") is vacation; only its working days count.
+# [vacation]
+# keywords = ["Ferie"]
+# feriefridag_keywords = ["Feriefridag"]   # wins over keywords
+# employment_start = 2026-05-01            # earning starts here; unset: from 1 Sep
+# feriefridage = 5                         # per holiday year, from the contract
+# days_per_month = 2.08                    # days earned per full month
+
 [danlon]
 # "none": Danløn reports its own Normtimer (160,33 for 37 h/week), which is
 #         what Skat expects for full-time monthly salaried employees.

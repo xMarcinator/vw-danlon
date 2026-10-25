@@ -23,6 +23,7 @@ cargo run -- trips import ~/Downloads/export.xlsx              # see "Trips from
 #   or: cargo run -- trips sync                                # see "Trip sync from the account"
 cargo run -- report    2026-10                                 # check first
 cargo run -- checklist 2026-10                                 # see "Danløn app checklist"
+cargo run -- vacation                                          # see "Vacation"
 cargo run -- timesheet 2026-10 -o arbejdstid-2026-10.csv
 cargo run -- logbook   2026-10 -o korebog-2026-10.csv
 cargo run -- export    2026-10 -o danlon-2026-10.txt
@@ -170,10 +171,79 @@ cargo run -- checklist mark 2026-11-18
 cargo run -- checklist unmark 2026-11-18     # undo
 ```
 
-Days with nothing to enter (weekends, holidays, days off) and days that need
+Days with nothing to enter (weekends, holidays, vacation, days off) and days that need
 their trips fixed first cannot be ticked; `mark` says why. `mark` takes
 `-t` like `report`. The checklist never contacts Danløn and writes nothing
 but `state.json`.
+
+## Vacation
+
+Register vacation in the calendar, as all-day events; there is nothing to
+register in the tool itself.
+
+- An all-day event whose title contains a word from `[vacation]` `keywords`
+  (default `Ferie`) is vacation. The word may be part of a longer one, in any
+  case: "Juleferie" and "Efterårsferie" count.
+- A title containing a word from `feriefridag_keywords` (default
+  `Feriefridag`) is a feriefridag instead; it wins over `keywords`.
+- Only the working days in the event count: days with planned hours that are
+  not a weekend or a public holiday. A two-week event over Christmas counts
+  only the working days in it. An event with no working days counts 0 and is
+  listed with "no working days".
+- Vacation days are days off with norm 0 and the reason `Ferie` (or
+  `Feriefridag`). The checklist shows them as "nothing to enter"; vacation
+  is not entered in the Danløn app.
+
+`vacation` shows the balance under the Danish rules for samtidighedsferie
+(ferieloven):
+
+- Vacation is earned per holiday year (ferieår), 1 September to 31 August,
+  at 2,08 days per month of employment. A partial month, from the employment
+  start, earns 0,07 days per calendar day.
+- Days earned in a month can be taken from the following month. Taking them
+  earlier is forskudsferie, and the period says so.
+- Each holiday year's days must be used by 31 December of the following
+  year (ferieafholdelsesperioden), so in September to December two holiday
+  years are open at once. Taken and planned days are drawn from the oldest
+  holiday year first.
+- Days neither taken nor planned by the use-by date are shown as expiring.
+  They can only be transferred by agreement with the employer, which the
+  tool does not track.
+- Feriefridage (from the contract, `feriefridage`, default 5) are counted
+  separately per holiday year.
+
+```sh
+cargo run -- vacation
+```
+
+```text
+Vacation · employed since 1 May 2026 · 2,08 days a month
+
+2025/26 · earned 8,32 · taken 5,00 · planned 0,00 · left 3,32 · use by 31 Dec 2026
+2026/27 · earned 2,08 (24,96 by 31 Aug 2027) · taken 0,00 · planned 0,00 · left 24,96 · use by 31 Dec 2027
+
+Periods (oldest days are used first)
+  19 Oct 2026 – 23 Oct 2026 · Efterårsferie · 5 working days · taken · 5,00 from 2025/26 (3,32 left)
+
+Feriefridage 2026/27 · taken 0 · planned 0 · 5 of 5 left
+
+warning: 3,32 days from 2025/26 expire on 31 Dec 2026
+```
+
+Each open holiday year shows the days earned so far (and by its end), taken,
+planned, left and the use-by date; each period shows its working days and
+the holiday year it draws from. Set the start of employment so earning
+starts there:
+
+```toml
+[vacation]
+employment_start = 2026-05-01
+feriefridage = 5
+```
+
+Without `employment_start`, earning counts from 1 September of each holiday
+year and the overview says so. Half days, holiday pay and ferietillæg are
+not handled.
 
 ## Danish rules applied
 
@@ -227,7 +297,8 @@ the same name. The program stops if the link points at another calendar.
 
   An empty `private_keywords` list switches this off.
 - **All-day events** are ferie and fridage. These days get norm 0, also when
-  the title is a private word.
+  the title is a private word. A title with a word from `[vacation]`
+  `keywords` or `feriefridag_keywords` makes them vacation (see "Vacation").
 - `default_location` (optional) is used on days with no located entry.
 
 Share it: Settings → All settings → Calendars → (calendar) → *Share with
