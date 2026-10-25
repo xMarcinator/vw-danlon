@@ -1,0 +1,26 @@
+{
+  "branch_name": "fnt-25-optional-trip-sync-from-the-min",
+  "created_at": "2026-10-25T16:36:48.775517Z",
+  "depends_on_epics": [
+    "fnt-24-import-the-min-volkswagen-trip-export"
+  ],
+  "id": "fnt-25-optional-trip-sync-from-the-min",
+  "next_task": 1,
+  "plan_review_status": "unknown",
+  "plan_reviewed_at": null,
+  "spec_path": ".flow/specs/fnt-25-optional-trip-sync-from-the-min.md",
+  "status": "open",
+  "title": "Optional trip sync from the Min Volkswagen account",
+  "tracker": {
+    "baseHashFlow": null,
+    "baseHashTracker": null,
+    "depRelations": [],
+    "id": null,
+    "identifier": "FNT-25",
+    "lastSyncedAt": null,
+    "mergeBaseFlow": null,
+    "mergeBaseTracker": null,
+    "url": null
+  },
+  "updated_at": "2026-10-25T16:37:24.443429Z"
+}

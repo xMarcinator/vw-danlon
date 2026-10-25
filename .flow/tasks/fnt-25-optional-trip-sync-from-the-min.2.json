@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-25T16:37:24.102724Z",
+  "depends_on": [
+    "fnt-25-optional-trip-sync-from-the-min.1"
+  ],
+  "id": "fnt-25-optional-trip-sync-from-the-min.2",
+  "priority": null,
+  "spec": "fnt-25-optional-trip-sync-from-the-min",
+  "spec_path": ".flow/tasks/fnt-25-optional-trip-sync-from-the-min.2.md",
+  "status": "todo",
+  "title": "trips sync into the trip store; docs",
+  "updated_at": "2026-10-25T16:37:24.102724Z"
+}
