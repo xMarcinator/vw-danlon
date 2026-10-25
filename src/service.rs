@@ -438,6 +438,119 @@ pub fn change_private(
     s.save(&cfg.state_file)
 }
 
+/// A day's lunch break as the Day screen sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LunchChoice {
+    /// The default, or the calendar's lunch event: the override is removed.
+    Default,
+    /// No lunch that day.
+    None,
+    At {
+        start: NaiveTime,
+        minutes: u32,
+    },
+}
+
+/// Sets `date`'s lunch override as `lunch set|clear` does; the text says
+/// what was done.
+pub fn set_lunch(cfg: &Config, date: NaiveDate, choice: LunchChoice) -> Result<String> {
+    let path = &cfg.state_file;
+    Ok(match choice {
+        LunchChoice::Default => {
+            if State::update(path, |s| s.lunch.remove(&date))?.is_some() {
+                format!("{date}: lunch override cleared")
+            } else {
+                format!("{date}: no lunch override")
+            }
+        }
+        LunchChoice::None | LunchChoice::At { minutes: 0, .. } => {
+            let start = match choice {
+                LunchChoice::At { start, .. } => start,
+                _ => cfg.lunch.start,
+            };
+            State::update(path, |s| {
+                s.lunch
+                    .insert(date, state::LunchOverride { start, minutes: 0 })
+            })?;
+            format!("{date}: no lunch")
+        }
+        LunchChoice::At { start, minutes } => {
+            if start + Duration::minutes(minutes.into()) <= start {
+                anyhow::bail!(
+                    "a {minutes} min lunch from {} ends after midnight",
+                    start.format("%H:%M")
+                );
+            }
+            State::update(path, |s| {
+                s.lunch
+                    .insert(date, state::LunchOverride { start, minutes })
+            })?;
+            format!("{date}: lunch {} for {minutes} min", start.format("%H:%M"))
+        }
+    })
+}
+
+/// A trip typed in by hand, as the Day screen's form gives it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ManualTripForm {
+    pub start: String,
+    pub end: String,
+    pub from: String,
+    pub to: String,
+    /// Km with a decimal comma or point.
+    pub km: String,
+    pub purpose: String,
+}
+
+/// Adds the trip on `date` from `form` to the trip store, marked as added
+/// by hand (see [`trip_store::add_manual`]).
+pub fn add_manual_trip(cfg: &Config, date: NaiveDate, form: &ManualTripForm) -> Result<Trip> {
+    let at = |s: &str, what: &str| -> Result<DateTime<Tz>> {
+        let t = state::parse_time(s.trim()).with_context(|| format!("{what} time"))?;
+        date.and_time(t)
+            .and_local_timezone(cfg.timezone)
+            .earliest()
+            .with_context(|| {
+                format!(
+                    "{date} {} does not exist in {}",
+                    t.format("%H:%M"),
+                    cfg.timezone
+                )
+            })
+    };
+    let km = form.km.trim().replace(',', ".");
+    let distance_km = km
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("invalid km '{}'", form.km.trim()))?;
+    let trip = Trip {
+        start: at(&form.start, "start")?,
+        end: at(&form.end, "end")?,
+        distance_km: Some(distance_km),
+        from: form.from.trim().to_string(),
+        to: form.to.trim().to_string(),
+        purpose: form.purpose.trim().to_string(),
+        business: None,
+        start_pos: None,
+        end_pos: None,
+    };
+    trip_store::add_manual(&cfg.trip_store, &trip)?;
+    Ok(trip)
+}
+
+/// Deletes the trip added by hand that starts at `start`.
+pub fn delete_manual_trip(cfg: &Config, start: DateTime<Tz>) -> Result<()> {
+    trip_store::delete_manual(&cfg.trip_store, start.fixed_offset()).map(|_| ())
+}
+
+/// The start times of the trips added by hand, in the config's timezone.
+pub fn manual_trip_starts(cfg: &Config) -> Result<BTreeSet<DateTime<Tz>>> {
+    Ok(trip_store::TripStore::load(&cfg.trip_store)?
+        .manual_starts()
+        .into_iter()
+        .map(|t| t.with_timezone(&cfg.timezone))
+        .collect())
+}
+
 /// The trips starting on `date`, each with how the mileage counts it
 /// (`None` without a `[mileage]` section).
 pub fn day_trips<'a>(
@@ -805,6 +918,110 @@ mod tests {
             (i.label.as_str(), i.start, i.end),
             ("Post", at("2026-11-03 12:15"), at("2026-11-03 12:40"))
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn lunch_changes_and_manual_trips_reach_the_month() {
+        let dir = std::env::temp_dir().join(format!("vw-danlon-svc-lunch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = Config::from_text(
+            "employee_number = \"1\"\nworkplace = \"Kontorvej 1\"\n[danlon]\n",
+            &dir.join("config.toml"),
+        )
+        .unwrap();
+        let date = state::parse_date("2026-11-03").unwrap();
+        let month = Month {
+            year: 2026,
+            month: 11,
+        };
+        let form = |start: &str, end: &str, from: &str, to: &str| ManualTripForm {
+            start: start.into(),
+            end: end.into(),
+            from: from.into(),
+            to: to.into(),
+            km: "12,5".into(),
+            purpose: String::new(),
+        };
+        // Arrival only: the day has no departure yet.
+        add_manual_trip(&cfg, date, &form("07:30", "08:00", "Hjem", "Kontorvej 1")).unwrap();
+        let worked = || {
+            let trips = load_trips(&cfg, None).unwrap();
+            let report = build_month(&cfg, month, &trips, &[]).unwrap();
+            let d = report.days.iter().find(|d| d.date == date).unwrap();
+            (d.worked_hours, d.lunch.source)
+        };
+        add_manual_trip(&cfg, date, &form("16:00", "16:30", "Kontorvej 1", "Hjem")).unwrap();
+        // The default 30 min lunch is deducted.
+        let (base, source) = worked();
+        assert_eq!(source, month::LunchSource::Default);
+        assert!(base > 7.0, "{base}");
+        let starts = manual_trip_starts(&cfg).unwrap();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(load_trips(&cfg, None).unwrap()[0].distance_km, Some(12.5));
+
+        let t = |s| state::parse_time(s).unwrap();
+        assert_eq!(
+            set_lunch(&cfg, date, LunchChoice::None).unwrap(),
+            "2026-11-03: no lunch"
+        );
+        assert_eq!(worked(), (base + 0.5, month::LunchSource::Override));
+        assert_eq!(
+            set_lunch(
+                &cfg,
+                date,
+                LunchChoice::At {
+                    start: t("11:30"),
+                    minutes: 60
+                }
+            )
+            .unwrap(),
+            "2026-11-03: lunch 11:30 for 60 min"
+        );
+        assert_eq!(worked(), (base - 0.5, month::LunchSource::Override));
+        let err = set_lunch(
+            &cfg,
+            date,
+            LunchChoice::At {
+                start: t("23:30"),
+                minutes: 60,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "a 60 min lunch from 23:30 ends after midnight"
+        );
+        assert_eq!(
+            set_lunch(&cfg, date, LunchChoice::Default).unwrap(),
+            "2026-11-03: lunch override cleared"
+        );
+        assert_eq!(worked(), (base, month::LunchSource::Default));
+
+        for (bad, want) in [
+            (
+                form("7", "08:00", "A", "B"),
+                "start time: invalid time '7', expected HH:MM",
+            ),
+            (
+                ManualTripForm {
+                    km: "x".into(),
+                    ..form("09:00", "09:30", "A", "B")
+                },
+                "invalid km 'x'",
+            ),
+            (
+                form("10:00", "09:00", "A", "B"),
+                "the trip ends 09:00 before it starts 10:00",
+            ),
+        ] {
+            let err = add_manual_trip(&cfg, date, &bad).unwrap_err();
+            assert_eq!(format!("{err:#}"), want);
+        }
+
+        delete_manual_trip(&cfg, *starts.iter().next().unwrap()).unwrap();
+        assert_eq!(manual_trip_starts(&cfg).unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

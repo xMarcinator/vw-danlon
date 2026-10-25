@@ -1835,3 +1835,95 @@ table.logbook tr.total td {
     bottom: 84px;
   }
 }
+
+/* Day: the lunch editor and the add-trip form. */
+.panel.lunch .pt-edit,
+.panel.lunch .pt-status {
+  flex: 1 1 100%;
+}
+
+.lunch-edit {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  padding: 4px 0 0;
+}
+
+.trip-form {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 4px 16px 12px;
+}
+
+.trip-form .field:nth-child(6) {
+  grid-column: span 3;
+}
+
+.trip-form .span-all {
+  grid-column: 1 / -1;
+}
+
+.trip-manual {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (max-width: 767px) {
+  .trip-form {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    padding: 4px 14px 12px;
+  }
+
+  .trip-form .field:first-child {
+    grid-column: auto;
+  }
+
+  .trip-form .field:nth-child(3),
+  .trip-form .field:nth-child(4),
+  .trip-form .field:nth-child(6) {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Mileage: the logbook as it prints. */
+.print-bar {
+  justify-content: flex-start;
+}
+
+.print-sheet {
+  padding: 24px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow-x: auto;
+}
+
+@media print {
+  html,
+  body,
+  .app,
+  .main-col,
+  .content {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .sidebar,
+  .tabbar,
+  .topbar,
+  .no-print,
+  .content > h1,
+  .content > .screen-head {
+    display: none !important;
+  }
+
+  .print-sheet {
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+  }
+}

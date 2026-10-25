@@ -1,6 +1,7 @@
 //! The Danløn app checklist screen: per day, what to type into the Danløn
 //! app, as `checklist <month>` prints it, with the copy actions in a ⋯ menu
-//! and a tick per day. Nothing is sent to Danløn; ticks go to the state file.
+//! and a tick per day, and a button that opens the Danløn app (danlon.dk on
+//! the desktop). Nothing is sent to Danløn; ticks go to the state file.
 
 use std::collections::BTreeSet;
 
@@ -95,6 +96,9 @@ try {
 dioxus.send(ok);
 "#;
 
+/// An arrow out of a box.
+const OPEN_ICON: &str = "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6";
+
 /// Scrolls the opened ⋯ menu into view once it is drawn (on a phone it
 /// can open under the tab bar).
 const SHOW_MENU_JS: &str = "setTimeout(() => document.querySelector('.dl-menu')?.scrollIntoView({ block: 'nearest' }), 50);";
@@ -155,7 +159,16 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     Icon { d: "m9 6 6 6-6 6", size: 18 }
                 }
             }
-            span { class: "note", "Nothing is sent from here" }
+            span { class: "note grow", "Nothing is sent from here" }
+            button {
+                class: "small-btn primary-sm",
+                onclick: move |_| {
+                    let result = crate::platform::open_danlon().map_err(|e| format!("{e:#}"));
+                    message.set(Some(result));
+                },
+                Icon { d: OPEN_ICON, size: 15 }
+                "Open Danløn app"
+            }
         }
     };
     let loaded = loaded.read();

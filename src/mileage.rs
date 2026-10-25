@@ -293,6 +293,95 @@ pub fn write_logbook(cfg: &MileageConfig, m: &MileageMonth, mut w: impl Write) -
     Ok(())
 }
 
+/// The month's logbook (kørselsregnskab) as an HTML fragment for printing
+/// and signing: the same lines as [`write_logbook`], then signature lines
+/// for the driver and the employer. Classes start with `lb-`; see
+/// [`LOGBOOK_CSS`].
+pub fn logbook_html_body(cfg: &MileageConfig, m: &MileageMonth) -> String {
+    let n = |v: f64| format!("{v:.2}").replace('.', ",");
+    let mut rows = String::new();
+    for e in &m.entries {
+        rows.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"lb-r\">{}</td><td class=\"lb-r\">{}</td><td class=\"lb-r\">{}</td></tr>\n",
+            e.start.format("%d-%m-%Y"),
+            e.start.format("%H:%M"),
+            html_escape(&e.from),
+            html_escape(&e.to),
+            html_escape(&e.purpose),
+            n(e.km),
+            n(e.rate),
+            n(e.amount())
+        ));
+    }
+    if m.entries.is_empty() {
+        rows.push_str("<tr><td colspan=\"8\">Ingen erhvervskørsel i perioden</td></tr>\n");
+    }
+    let sign = |who: &str| {
+        format!(
+            "<div class=\"lb-sign\"><h2>{who}</h2><div class=\"lb-lines\">\
+             <div><span class=\"lb-line\"></span>Navn</div>\
+             <div><span class=\"lb-line\"></span>Dato</div>\
+             <div><span class=\"lb-line\"></span>Underskrift</div></div></div>\n"
+        )
+    };
+    format!(
+        "<article class=\"lb-sheet\">\n<h1>Kørselsregnskab {month}</h1>\n\
+         <dl class=\"lb-facts\"><dt>Navn</dt><dd>{name}</dd><dt>Reg.nr.</dt><dd>{plate}</dd>\
+         <dt>Erhvervskørte km i år før perioden</dt><dd>{before}</dd>\
+         <dt>Satser {year}</dt><dd>{low} kr/km op til {threshold} km, {high} kr/km derover</dd></dl>\n\
+         <table class=\"lb-table\"><thead><tr><th>Dato</th><th>Afgang</th><th>Fra</th><th>Til</th><th>Formål</th>\
+         <th class=\"lb-r\">Km</th><th class=\"lb-r\">Sats</th><th class=\"lb-r\">Beløb</th></tr></thead>\n<tbody>\n{rows}</tbody>\n\
+         <tfoot><tr><td colspan=\"5\">I alt</td><td class=\"lb-r\">{km}</td><td></td><td class=\"lb-r\">{amount}</td></tr></tfoot></table>\n\
+         {driver}{employer}</article>\n",
+        month = m.month,
+        name = html_escape(&cfg.driver_name),
+        plate = html_escape(&cfg.registration_number),
+        before = n(m.km_before),
+        year = m.rate.year,
+        low = n(m.rate.low),
+        threshold = m.rate.threshold_km,
+        high = n(m.rate.high),
+        km = n(m.total_km()),
+        amount = n(m.total_amount()),
+        driver = sign("Medarbejder"),
+        employer = sign("Kontrolleret og godkendt af arbejdsgiver"),
+    )
+}
+
+/// The styles of [`logbook_html_body`], for screen and print.
+pub const LOGBOOK_CSS: &str = "\
+.lb-sheet{font-family:'IBM Plex Sans',Arial,sans-serif;color:#111;background:#fff;font-size:12px;line-height:1.4}\
+.lb-sheet h1{font-size:18px;margin:0 0 8px}\
+.lb-sheet h2{font-size:12px;margin:0 0 18px;font-weight:600}\
+.lb-facts{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;margin:0 0 12px}\
+.lb-facts dt{color:#555}.lb-facts dd{margin:0}\
+.lb-table{width:100%;border-collapse:collapse;margin-bottom:24px}\
+.lb-table th,.lb-table td{border-bottom:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:top}\
+.lb-table thead th{border-bottom:1.5px solid #111}\
+.lb-table tfoot td{font-weight:600;border-top:1.5px solid #111;border-bottom:0}\
+.lb-r,.lb-table td:nth-child(-n+2){white-space:nowrap}.lb-r{text-align:right!important}\
+.lb-sign{margin-top:18px;break-inside:avoid}\
+.lb-lines{display:grid;grid-template-columns:2fr 1fr 2fr;gap:16px}\
+.lb-lines div{color:#555;font-size:11px}\
+.lb-line{display:block;border-bottom:1px solid #111;height:28px;margin-bottom:3px}";
+
+/// The logbook as a standalone HTML page, to share or print.
+pub fn logbook_html(cfg: &MileageConfig, m: &MileageMonth) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"da\"><head><meta charset=\"utf-8\"><title>Kørselsregnskab {}</title>\
+         <style>body{{margin:24px}}{LOGBOOK_CSS}</style></head><body>\n{}</body></html>\n",
+        m.month,
+        logbook_html_body(cfg, m)
+    )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn csv_field(s: &str) -> String {
     if s.contains([';', '"', '\n']) {
         format!("\"{}\"", s.replace('"', "\"\""))
@@ -509,6 +598,24 @@ mod tests {
         let logbook = String::from_utf8(logbook).unwrap();
         assert!(!logbook.contains("Torvet") && !logbook.contains("Apotek"));
         assert!(logbook.contains("Kunde B"));
+
+        // The printable logbook has the same trips, escaped, and the
+        // signature lines.
+        let mut c = c;
+        c.driver_name = "Test <Testesen>".into();
+        let html = logbook_html(&c, &m);
+        assert!(
+            html.contains("<td>Kunde B</td><td>Service</td><td class=\"lb-r\">10,00</td>"),
+            "{html}"
+        );
+        assert!(html.contains("Test &lt;Testesen&gt;") && !html.contains("Torvet"));
+        assert!(html.contains("Kørselsregnskab 2026-10"));
+        assert_eq!(
+            html.matches("<span class=\"lb-line\"></span>Underskrift")
+                .count(),
+            2
+        );
+        assert!(html.contains("Kontrolleret og godkendt af arbejdsgiver"));
     }
 
     #[test]

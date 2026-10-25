@@ -1,6 +1,9 @@
 //! The Mileage logbook screen: a month's business trips at the year's
 //! rates and the trips not reimbursed, as `logbook` computes them, and the
-//! logbook file for signature. Without a `[mileage]` section it sets one up.
+//! logbook for signature: a print view with signature lines (printed on the
+//! desktop, shared on Android) and the CSV file (written beside the config
+//! on the desktop, shared on Android). Without a `[mileage]` section it sets
+//! one up.
 
 use dioxus::prelude::*;
 use vw_danlon::calendar::Occurrence;
@@ -84,21 +87,44 @@ fn skipped(m: &MileageMonth) -> Skipped {
     s
 }
 
-/// Writes the month's logbook beside the config, as `logbook -o` does.
-fn save_logbook(setup: &Setup, cfg: &Config, m: &MileageMonth) -> anyhow::Result<String> {
+/// The month's logbook CSV, as `logbook -o` writes it.
+fn logbook_csv(cfg: &Config, m: &MileageMonth) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context;
     let mcfg = cfg.mileage.as_ref().context("no [mileage] section")?;
-    let path = setup.dir.join(format!("logbook-{}.csv", m.month));
     let mut out = Vec::new();
     mileage::write_logbook(mcfg, m, &mut out)?;
-    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
+    Ok(out)
+}
+
+/// Writes the month's logbook CSV beside the config.
+#[cfg(not(target_os = "android"))]
+fn save_logbook(setup: &Setup, cfg: &Config, m: &MileageMonth) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let path = setup.dir.join(format!("logbook-{}.csv", m.month));
+    std::fs::write(&path, logbook_csv(cfg, m)?)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(format!("Wrote {}", path.display()))
+}
+
+/// Shares the month's logbook CSV through the share sheet; the app's own
+/// folder can't be reached from other apps.
+#[cfg(target_os = "android")]
+fn save_logbook(_setup: &Setup, cfg: &Config, m: &MileageMonth) -> anyhow::Result<String> {
+    let csv = String::from_utf8(logbook_csv(cfg, m)?)?;
+    crate::platform::share(
+        &format!("Kørselsregnskab {}", m.month),
+        "text/plain",
+        &csv,
+        None,
+    )?;
+    Ok("Shared the logbook CSV".into())
 }
 
 #[component]
 pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut month = use_signal(|| this_month(&setup.peek()));
     let mut message = use_signal(|| None::<Result<String, String>>);
+    let mut printing = use_signal(|| false);
     let loaded = use_resource(move || {
         let m = month();
         let cfg = setup.read().config.clone();
@@ -124,6 +150,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     "aria-label": "Previous month",
                     onclick: move |_| {
                         message.set(None);
+                        printing.set(false);
                         month.set(step(m, -1));
                     },
                     Icon { d: "m15 6-6 6 6 6", size: 18 }
@@ -134,6 +161,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     "aria-label": "Next month",
                     onclick: move |_| {
                         message.set(None);
+                        printing.set(false);
                         month.set(step(m, 1));
                     },
                     Icon { d: "m9 6 6 6-6 6", size: 18 }
@@ -186,6 +214,20 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             };
         }
     };
+    if printing() {
+        let Some(mcfg) = cfg.mileage.as_ref() else {
+            return rsx! {};
+        };
+        return rsx! {
+            {head}
+            PrintView {
+                month: m,
+                body: mileage::logbook_html_body(mcfg, &mil),
+                page: mileage::logbook_html(mcfg, &mil),
+                on_close: move |_| printing.set(false),
+            }
+        };
+    }
     let year_km = mil.km_before + mil.total_km();
     let threshold = mil.rate.threshold_km;
     let low_km = year_km.min(threshold);
@@ -341,10 +383,57 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     let result = save_logbook(&setup.peek(), &cfg, &mil).map_err(|e| format!("{e:#}"));
                     message.set(Some(result));
                 },
-                Icon { d: "M12 3v12M7 10l5 5 5-5M4 21h16", size: 15 }
-                "Logbook CSV for signature"
+                Icon { d: CSV_ICON, size: 15 }
+                "Logbook CSV"
+            }
+            button {
+                class: "small-btn primary-sm",
+                onclick: move |_| {
+                    message.set(None);
+                    printing.set(true);
+                },
+                Icon { d: PRINT_ICON, size: 15 }
+                "Print for signature"
             }
         }
+    }
+}
+
+/// A download arrow; on Android, where the CSV is shared, a share arrow.
+#[cfg(not(target_os = "android"))]
+const CSV_ICON: &str = "M12 3v12M7 10l5 5 5-5M4 21h16";
+#[cfg(target_os = "android")]
+const CSV_ICON: &str = "M4 12v8h16v-8M12 3v13M7 8l5-5 5 5";
+const PRINT_ICON: &str = "M6 9V3h12v6M6 18H4v-7h16v7h-2M8 14h8v7H8z";
+
+/// The logbook as it prints, with signature lines, and the button that
+/// prints it (shares it on Android; see [`crate::platform::print_page`]).
+#[component]
+fn PrintView(month: Month, body: String, page: String, on_close: EventHandler<()>) -> Element {
+    let mut message = use_signal(|| None::<Result<String, String>>);
+    rsx! {
+        style { {mileage::LOGBOOK_CSS} }
+        div { class: "actions no-print print-bar",
+            button { class: "small-btn", onclick: move |_| on_close.call(()), "Back to the logbook" }
+            span { class: "grow" }
+            match message() {
+                None => rsx! {},
+                Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
+                Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
+            }
+            button {
+                class: "small-btn primary-sm",
+                onclick: move |_| {
+                    let title = format!("Kørselsregnskab {month}");
+                    let result = crate::platform::print_page(&title, &page)
+                        .map_err(|e| format!("{e:#}"));
+                    message.set(result.transpose());
+                },
+                Icon { d: PRINT_ICON, size: 15 }
+                "{crate::platform::PRINT_LABEL}"
+            }
+        }
+        div { class: "print-sheet", dangerous_inner_html: "{body}" }
     }
 }
 

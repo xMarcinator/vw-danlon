@@ -1,7 +1,10 @@
 //! Trips imported from Min Volkswagen exports or synced from the account,
-//! merged in one JSON file beside the config. A trip is identified by its start time and start
-//! odometer reading, so overlapping exports add each trip once. Driver name
-//! and licence plate are never stored.
+//! merged in one JSON file beside the config, and trips added by hand. A
+//! trip is identified by its start time and start odometer reading, so
+//! overlapping exports add each trip once; a trip added by hand has no
+//! odometer and is identified by its start minute, so a later import of the
+//! same trip does not double it. Driver name and licence plate are never
+//! stored.
 
 use std::path::Path;
 
@@ -35,12 +38,22 @@ pub struct StoredTrip {
     pub purpose: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub business: Option<bool>,
+    /// Added by hand in the app; only these can be deleted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
 }
 
 impl StoredTrip {
     fn same_trip(&self, other: &StoredTrip) -> bool {
+        if self.manual || other.manual {
+            return same_minute(self.start, other.start);
+        }
         self.start == other.start && self.start_odometer == other.start_odometer
     }
+}
+
+fn same_minute(a: DateTime<FixedOffset>, b: DateTime<FixedOffset>) -> bool {
+    a.timestamp().div_euclid(60) == b.timestamp().div_euclid(60)
 }
 
 impl From<&ExportTrip> for StoredTrip {
@@ -57,8 +70,65 @@ impl From<&ExportTrip> for StoredTrip {
             end_pos: t.end_pos,
             purpose: t.purpose.clone(),
             business: t.business,
+            manual: false,
         }
     }
+}
+
+/// Adds `trip` to the store at `store` as a trip added by hand. Refused
+/// when a stored trip starts the same minute, or the trip ends before it
+/// starts.
+pub fn add_manual(store: &Path, trip: &Trip) -> Result<()> {
+    if trip.end <= trip.start {
+        bail!(
+            "the trip ends {} before it starts {}",
+            trip.end.format("%H:%M"),
+            trip.start.format("%H:%M")
+        );
+    }
+    if trip.from.trim().is_empty() || trip.to.trim().is_empty() {
+        bail!("from and to are needed");
+    }
+    if trip.distance_km.is_some_and(|k| k.is_nan() || k < 0.0) {
+        bail!("km must be 0 or more");
+    }
+    let mut trips = TripStore::load(store)?;
+    let mut new = StoredTrip::from(&ExportTrip {
+        trip: trip.clone(),
+        start_odometer: None,
+    });
+    new.manual = true;
+    if let Some(s) = trips.trips.iter().find(|s| s.same_trip(&new)) {
+        bail!(
+            "a trip starting {} is already stored ({} → {})",
+            s.start.format("%Y-%m-%d %H:%M"),
+            s.from,
+            s.to
+        );
+    }
+    trips.trips.push(new);
+    trips.trips.sort_by_key(|t| t.start);
+    trips.save(store)
+}
+
+/// Deletes the trip added by hand that starts at `start`'s minute and
+/// returns it. Imported and synced trips are refused.
+pub fn delete_manual(store: &Path, start: DateTime<FixedOffset>) -> Result<StoredTrip> {
+    let mut trips = TripStore::load(store)?;
+    let at = start.format("%Y-%m-%d %H:%M");
+    let Some(i) = trips
+        .trips
+        .iter()
+        .position(|t| same_minute(t.start, start) && t.manual)
+    else {
+        if trips.trips.iter().any(|t| same_minute(t.start, start)) {
+            bail!("the trip starting {at} was imported; only trips added by hand can be deleted");
+        }
+        bail!("no trip starting {at} is stored");
+    };
+    let removed = trips.trips.remove(i);
+    trips.save(store)?;
+    Ok(removed)
 }
 
 /// What an import changed.
@@ -214,6 +284,15 @@ impl TripStore {
                 path.display()
             )
         })
+    }
+
+    /// The start times of the trips added by hand.
+    pub fn manual_starts(&self) -> Vec<DateTime<FixedOffset>> {
+        self.trips
+            .iter()
+            .filter(|t| t.manual)
+            .map(|t| t.start)
+            .collect()
     }
 
     /// The stored trips in `tz`, sorted by start, ready for the reports.
@@ -441,6 +520,81 @@ mod tests {
             4,
             "nothing added"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_manual_trip_is_added_once_and_only_it_can_be_deleted() {
+        let dir = temp_dir("store-manual");
+        let store = dir.join("trips.json");
+        // A file written before trips could be added by hand still loads.
+        let (old, _) = import_bytes(
+            &store,
+            "trips.csv",
+            b"start,end,distance_km,from,to\n2026-09-21 07:00,2026-09-21 07:30,10,Hjem,Kunde A\n",
+            TZ,
+        )
+        .unwrap();
+        assert_eq!(old.added, 1);
+        assert!(!std::fs::read_to_string(&store).unwrap().contains("manual"));
+
+        let mut manual = trip(22, 8, 0, 0.0).trip;
+        manual.purpose = "Service Kunde B".into();
+        add_manual(&store, &manual).unwrap();
+        let err = add_manual(&store, &manual).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("a trip starting 2026-09-22 08:00 is already stored"),
+            "{err}"
+        );
+        for (change, want) in [
+            (
+                (|t: &mut Trip| t.end = t.start) as fn(&mut Trip),
+                "the trip ends 08:00 before it starts 08:00",
+            ),
+            (|t: &mut Trip| t.to = " ".into(), "from and to are needed"),
+            (
+                |t: &mut Trip| t.distance_km = Some(-1.0),
+                "km must be 0 or more",
+            ),
+        ] {
+            let mut bad = trip(23, 8, 0, 0.0).trip;
+            change(&mut bad);
+            assert_eq!(add_manual(&store, &bad).unwrap_err().to_string(), want);
+        }
+
+        // The export later has the same trip, a few seconds off and with an
+        // odometer reading: it is not added again.
+        let mut exported = trip(22, 8, 0, 4321.0);
+        exported.trip.start += chrono::Duration::seconds(20);
+        let mut store_now = TripStore::load(&store).unwrap();
+        assert_eq!(
+            store_now.merge(&[exported]),
+            Merged {
+                added: 0,
+                already: 1
+            }
+        );
+        let stored = TripStore::load(&store).unwrap();
+        assert_eq!(stored.trips.len(), 2);
+        assert_eq!(stored.manual_starts(), [manual.start.fixed_offset()]);
+        assert_eq!(stored.trips(TZ)[1].purpose, "Service Kunde B");
+
+        let imported = stored.trips[0].start;
+        let err = delete_manual(&store, imported).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only trips added by hand can be deleted"),
+            "{err}"
+        );
+        let removed = delete_manual(&store, manual.start.fixed_offset()).unwrap();
+        assert!(removed.manual);
+        let err = delete_manual(&store, manual.start.fixed_offset()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no trip starting 2026-09-22 08:00 is stored"
+        );
+        assert_eq!(TripStore::load(&store).unwrap().trips.len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

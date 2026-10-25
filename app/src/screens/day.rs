@@ -1,17 +1,20 @@
 //! The Day screen: the day's numbers, a timeline of planned time, time at
 //! work, private time, lunch and driving, the lunch break and where it
-//! comes from, the private time (recorded intervals editable) and the
-//! trips.
+//! comes from (changeable), the private time (recorded intervals editable)
+//! and the trips, where a missing trip can be added by hand.
 
 use chrono::{NaiveDate, NaiveDateTime};
 use dioxus::prelude::*;
 use vw_danlon::config::Config;
 use vw_danlon::mileage::Status;
 use vw_danlon::month::{Day, LunchSource};
-use vw_danlon::service::{self, MonthView, PrivateItem, PrivateState};
+use vw_danlon::service::{self, LunchChoice, ManualTripForm, MonthView, PrivateItem, PrivateState};
 use vw_danlon::state::State;
 
-use super::{Action, Loaded, PrivateList, diff_class, hm, hours, kroner, signed};
+use super::{
+    Action, Loaded, Message, Panel, PrivateList, diff_class, hm, hours, kroner, message_for,
+    signed, status,
+};
 use crate::Icon;
 
 pub struct DayArgs<'a> {
@@ -20,9 +23,11 @@ pub struct DayArgs<'a> {
     pub loaded: &'a Loaded,
     pub date: NaiveDate,
     pub now: NaiveDateTime,
-    pub message: Option<Result<String, String>>,
-    pub on_action: Callback<Action>,
+    pub message: Message,
+    pub on_action: Callback<Action, bool>,
     pub on_back: Callback<()>,
+    /// Whether the add-trip form is open.
+    pub adding: Signal<bool>,
 }
 
 fn lunch_source(s: LunchSource) -> &'static str {
@@ -70,6 +75,7 @@ pub fn render(a: DayArgs) -> Element {
         message,
         on_action,
         on_back,
+        mut adding,
     } = a;
     let Some(d) = view.report.days.iter().find(|d| d.date == date) else {
         return rsx! {};
@@ -171,16 +177,20 @@ pub fn render(a: DayArgs) -> Element {
 
         {timeline(d, &private.items, &trips, now)}
 
-        section { class: "panel pad lunch", "aria-labelledby": "lunch-h",
-            h2 { id: "lunch-h", "Lunch break" }
-            span { class: "mono", "{lunch_window}" }
-            if lunch_minutes > 0 {
-                span { class: "muted", "{lunch_minutes} min" }
-            }
-            span { class: "chip", "{lunch_source(d.lunch.source)}" }
-            span { class: "note grow",
-                "Only lunch inside your time at work is deducted. A “{cfg.lunch.title}” event in the calendar sets another time."
-            }
+        LunchPanel {
+            date,
+            window: lunch_window,
+            minutes: lunch_minutes,
+            source: lunch_source(d.lunch.source),
+            title: cfg.lunch.title.clone(),
+            start: d
+                            .lunch
+                .window
+                .map(|(s, _)| s.format("%H:%M").to_string())
+                .unwrap_or_else(|| cfg.lunch.start.format("%H:%M").to_string()),
+            default_minutes: cfg.lunch.minutes,
+            message: message_for(&message, Panel::Lunch),
+            on_action,
         }
 
         section { class: "panel", "aria-labelledby": "priv-h",
@@ -188,11 +198,7 @@ pub fn render(a: DayArgs) -> Element {
                 h2 { id: "priv-h", "Private time" }
                 span { class: "note", "Not company time. Recorded time replaces the planned window it was started for." }
             }
-            match message {
-                Some(Ok(text)) => rsx! { div { class: "pt-status info", role: "status", "{text}" } },
-                Some(Err(text)) => rsx! { div { class: "pt-status bad", role: "alert", "{text}" } },
-                None => rsx! {},
-            }
+            {status(message_for(&message, Panel::Private))}
             if private.items.is_empty() {
                 p { class: "empty", "No private appointments or recorded private time." }
             } else {
@@ -210,7 +216,28 @@ pub fn render(a: DayArgs) -> Element {
         section { class: "panel", "aria-labelledby": "trips-h",
             div { class: "panel-head",
                 h2 { id: "trips-h", "Trips" }
-                span { class: "note", "The first arrival at and the last departure from a calendar address are business trips" }
+                span { class: "note grow", "The first arrival at and the last departure from a calendar address are business trips" }
+                button {
+                    class: "small-btn",
+                    "aria-expanded": if adding() { "true" } else { "false" },
+                    onclick: move |_| adding.set(!adding()),
+                    Icon { d: "M12 5v14M5 12h14", size: 15 }
+                    "Add missing trip"
+                }
+            }
+            {status(message_for(&message, Panel::Trips))}
+            if adding() {
+                TripForm {
+                    date,
+                    on_action: move |a| {
+                        let done = on_action.call(a);
+                        if done {
+                            adding.set(false);
+                        }
+                        done
+                    },
+                    on_cancel: move |_| adding.set(false),
+                }
             }
             if trips.is_empty() {
                 p { class: "empty", "No trips this day." }
@@ -227,6 +254,9 @@ pub fn render(a: DayArgs) -> Element {
                                 Some(Status::Incomplete(why)) => why.to_string(),
                                 _ => t.purpose.clone(),
                             };
+                            let start = t.start;
+                            let at = start.format("%H:%M").to_string();
+                            let manual = loaded.manual.contains(&start);
                             rsx! {
                                 li { class: "trip",
                                     span { class: "mono small nowrap",
@@ -244,6 +274,19 @@ pub fn render(a: DayArgs) -> Element {
                                         }
                                     }
                                     span { class: "muted", "{purpose}" }
+                                    if manual {
+                                        span { class: "trip-manual",
+                                            span { class: "chip info", "Added by you" }
+                                            button {
+                                                class: "small-btn danger",
+                                                "aria-label": "Delete the trip at {at}",
+                                                onclick: move |_| {
+                                                    on_action.call(Action::DeleteTrip(start));
+                                                },
+                                                "Delete"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -394,6 +437,179 @@ fn timeline(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// The lunch break, where it comes from, and its editor: a time and length,
+/// no lunch, or back to the default.
+#[component]
+fn LunchPanel(
+    date: NaiveDate,
+    window: String,
+    minutes: i64,
+    source: &'static str,
+    title: String,
+    start: String,
+    default_minutes: u32,
+    message: Option<Result<String, String>>,
+    on_action: Callback<Action, bool>,
+) -> Element {
+    let mut editing = use_signal(|| false);
+    let mut start_in = use_signal(|| start.clone());
+    let mut minutes_in = use_signal(|| {
+        if minutes > 0 {
+            minutes
+        } else {
+            default_minutes.into()
+        }
+        .to_string()
+    });
+    // Closes the editor when the change was made.
+    let mut run = move |a: Action| {
+        if on_action.call(a) {
+            editing.set(false);
+        }
+    };
+    rsx! {
+        section { class: "panel pad lunch", "aria-labelledby": "lunch-h",
+            h2 { id: "lunch-h", "Lunch break" }
+            span { class: "mono", "{window}" }
+            if minutes > 0 {
+                span { class: "muted", "{minutes} min" }
+            }
+            span { class: "chip", "{source}" }
+            span { class: "note grow",
+                "Only lunch inside your time at work is deducted. A “{title}” event in the calendar sets another time."
+            }
+            button {
+                class: "small-btn",
+                "aria-expanded": if editing() { "true" } else { "false" },
+                onclick: move |_| {
+                    if !editing() {
+                        start_in.set(start.clone());
+                    }
+                    editing.set(!editing());
+                },
+                "Change"
+            }
+            if editing() {
+                div { class: "pt-edit lunch-edit",
+                    div { class: "field",
+                        label { r#for: "lunch-start", "Start" }
+                        input {
+                            id: "lunch-start",
+                            r#type: "time",
+                            value: "{start_in}",
+                            oninput: move |e| start_in.set(e.value()),
+                        }
+                    }
+                    div { class: "field",
+                        label { r#for: "lunch-min", "Minutes" }
+                        input {
+                            id: "lunch-min",
+                            r#type: "number",
+                            min: "0",
+                            step: "5",
+                            inputmode: "numeric",
+                            value: "{minutes_in}",
+                            oninput: move |e| minutes_in.set(e.value()),
+                        }
+                    }
+                    div { class: "pt-edit-actions",
+                        button {
+                            class: "small-btn",
+                            onclick: move |_| run(Action::Lunch(date, LunchChoice::None)),
+                            "No lunch"
+                        }
+                        button {
+                            class: "small-btn",
+                            onclick: move |_| run(Action::Lunch(date, LunchChoice::Default)),
+                            "Use default"
+                        }
+                        span { class: "grow" }
+                        button {
+                            class: "small-btn",
+                            onclick: move |_| editing.set(false),
+                            "Cancel"
+                        }
+                        button {
+                            class: "small-btn primary-sm",
+                            onclick: move |_| {
+                                run(Action::LunchAt {
+                                    date,
+                                    start: start_in(),
+                                    minutes: minutes_in(),
+                                })
+                            },
+                            "Save"
+                        }
+                    }
+                }
+            }
+            {status(message)}
+        }
+    }
+}
+
+/// A trip typed in by hand: when, from and to, km and purpose.
+#[component]
+fn TripForm(
+    date: NaiveDate,
+    on_action: Callback<Action, bool>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    let mut form = use_signal(ManualTripForm::default);
+    let field = move |id: &'static str,
+                      label: &'static str,
+                      kind: &'static str,
+                      get: fn(&ManualTripForm) -> &String,
+                      set: fn(&mut ManualTripForm, String)| {
+        rsx! {
+            div { class: "field",
+                label { r#for: "{id}", "{label}" }
+                input {
+                    id: "{id}",
+                    r#type: "{kind}",
+                    value: "{get(&form.read())}",
+                    oninput: move |e| set(&mut form.write(), e.value()),
+                }
+            }
+        }
+    };
+    rsx! {
+        div {
+            class: "pt-edit trip-form",
+            role: "group",
+            "aria-label": "Add a missing trip",
+            {field("trip-start", "Start", "time", |f| &f.start, |f, v| f.start = v)}
+            {field("trip-end", "End", "time", |f| &f.end, |f, v| f.end = v)}
+            {field("trip-from", "From", "text", |f| &f.from, |f, v| f.from = v)}
+            {field("trip-to", "To", "text", |f| &f.to, |f, v| f.to = v)}
+            {field("trip-km", "Km", "text", |f| &f.km, |f, v| f.km = v)}
+            {
+                field(
+                    "trip-purpose",
+                    "Purpose (optional)",
+                    "text",
+                    |f| &f.purpose,
+                    |f, v| f.purpose = v,
+                )
+            }
+            span { class: "note span-all",
+                "Added by you and marked so: a later import or sync of the same trip (same start minute) does not add it twice."
+            }
+            div { class: "pt-edit-actions",
+                span { class: "grow" }
+                button { class: "small-btn", onclick: move |_| on_cancel.call(()), "Cancel" }
+                button {
+                    class: "small-btn primary-sm",
+                    onclick: move |_| {
+                        on_action.call(Action::AddTrip(date, form()));
+                    },
+                    "Add trip"
                 }
             }
         }

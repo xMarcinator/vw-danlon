@@ -1,5 +1,6 @@
 //! The data screens and what they share: number formats, the month's data
-//! loaded off the UI thread, and the private-time list with its actions.
+//! loaded off the UI thread, and the changes the Month and Day screens make
+//! (private time, lunch, trips added by hand).
 
 pub mod danlon;
 pub mod day;
@@ -7,13 +8,15 @@ pub mod mileage;
 pub mod month;
 pub mod vacation;
 
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use chrono_tz::Tz;
 use dioxus::prelude::*;
 use vw_danlon::calendar::Occurrence;
 use vw_danlon::config::Config;
-use vw_danlon::service::{self, PrivateItem, PrivateState};
+use vw_danlon::service::{self, LunchChoice, ManualTripForm, PrivateItem, PrivateState};
 use vw_danlon::state::{self, EventChoice, State};
 use vw_danlon::trips::Trip;
 
@@ -72,6 +75,8 @@ pub fn now(cfg: &Config) -> DateTime<Tz> {
 #[derive(Clone)]
 pub struct Loaded {
     pub trips: Vec<Trip>,
+    /// The start times of the trips added by hand.
+    pub manual: BTreeSet<DateTime<Tz>>,
     pub occurrences: Vec<Occurrence>,
     pub calendar_warning: Option<String>,
     pub fetched_at: NaiveDateTime,
@@ -83,9 +88,11 @@ pub async fn load(cfg: Config, month: vw_danlon::month::Month) -> Result<Loaded,
     tokio::task::spawn_blocking(move || -> Result<Loaded> {
         let now = now(&cfg);
         let trips = service::load_trips(&cfg, None)?;
+        let manual = service::manual_trip_starts(&cfg)?;
         let cal = service::month_calendar(&cfg, month, now.date_naive())?;
         Ok(Loaded {
             trips,
+            manual,
             occurrences: cal.occurrences,
             calendar_warning: cal.warning,
             fetched_at: now.naive_local(),
@@ -96,7 +103,7 @@ pub async fn load(cfg: Config, month: vw_danlon::month::Month) -> Result<Loaded,
     .map_err(|e| format!("{e:#}"))
 }
 
-/// A change to the private time.
+/// A change made on the Month or Day screen.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Start the timer linked to that day's private appointment with this
@@ -110,6 +117,55 @@ pub enum Action {
         end: String,
     },
     Delete(u32),
+    /// No lunch that day, or back to the default.
+    Lunch(NaiveDate, LunchChoice),
+    /// Lunch from `start` for `minutes`, as typed.
+    LunchAt {
+        date: NaiveDate,
+        start: String,
+        minutes: String,
+    },
+    AddTrip(NaiveDate, ManualTripForm),
+    /// Delete the trip added by hand starting then.
+    DeleteTrip(DateTime<Tz>),
+}
+
+/// The part of a screen an action's message belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    Private,
+    Lunch,
+    Trips,
+}
+
+impl Action {
+    pub fn panel(&self) -> Panel {
+        match self {
+            Action::Lunch(..) | Action::LunchAt { .. } => Panel::Lunch,
+            Action::AddTrip(..) | Action::DeleteTrip(_) => Panel::Trips,
+            _ => Panel::Private,
+        }
+    }
+}
+
+/// What the last action said, and where.
+pub type Message = Option<(Panel, Result<String, String>)>;
+
+/// The message for `panel`, if the last action was there.
+pub fn message_for(message: &Message, panel: Panel) -> Option<Result<String, String>> {
+    message
+        .as_ref()
+        .filter(|(p, _)| *p == panel)
+        .map(|(_, m)| m.clone())
+}
+
+/// The status line of a panel.
+pub fn status(message: Option<Result<String, String>>) -> Element {
+    match message {
+        Some(Ok(text)) => rsx! { div { class: "pt-status info", role: "status", "{text}" } },
+        Some(Err(text)) => rsx! { div { class: "pt-status bad", role: "alert", "{text}" } },
+        None => rsx! {},
+    }
 }
 
 /// Runs `action`; the text says what was done.
@@ -154,6 +210,33 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
         Action::Delete(id) => {
             let i = State::update(&cfg.state_file, |s| s.private.remove(*id))??;
             format!("Deleted {} {}–{}", i.label, hm(i.start), hm(i.end))
+        }
+        Action::Lunch(date, choice) => service::set_lunch(cfg, *date, *choice)?,
+        Action::LunchAt {
+            date,
+            start,
+            minutes,
+        } => {
+            let start = state::parse_time(start.trim())?;
+            let minutes: u32 = minutes
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid minutes '{}'", minutes.trim()))?;
+            service::set_lunch(cfg, *date, LunchChoice::At { start, minutes })?
+        }
+        Action::AddTrip(date, form) => {
+            let t = service::add_manual_trip(cfg, *date, form)?;
+            format!(
+                "Added {}–{} {} → {}",
+                t.start.format("%H:%M"),
+                t.end.format("%H:%M"),
+                t.from,
+                t.to
+            )
+        }
+        Action::DeleteTrip(start) => {
+            service::delete_manual_trip(cfg, *start)?;
+            format!("Deleted the trip at {}", start.format("%H:%M"))
         }
     })
 }
@@ -210,7 +293,7 @@ pub fn PrivateList(
     items: Vec<PrivateItem>,
     current: Option<usize>,
     today: NaiveDate,
-    on_action: EventHandler<Action>,
+    on_action: Callback<Action, bool>,
 ) -> Element {
     let mut editing = use_signal(|| None::<u32>);
     rsx! {
@@ -258,9 +341,12 @@ pub fn PrivateList(
                                     label,
                                     start: hm(start),
                                     end: hm(end),
+                                    // A refused change keeps the editor open
+                                    // with what was typed.
                                     on_action: move |a| {
-                                        editing.set(None);
-                                        on_action.call(a);
+                                        if on_action.call(a) {
+                                            editing.set(None);
+                                        }
                                     },
                                     on_cancel: move |_| editing.set(None),
                                 }

@@ -4,6 +4,7 @@
 use dioxus::prelude::*;
 
 mod import;
+mod platform;
 mod screens;
 mod secrets;
 mod settings;

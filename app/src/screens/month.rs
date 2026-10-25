@@ -9,7 +9,10 @@ use vw_danlon::month::{Day, Month, OffReason};
 use vw_danlon::service::{self, PrivateState, PrivateTime};
 use vw_danlon::timesheet::weekday_da;
 
-use super::{Action, PrivateList, apply, diff_class, hm, hours, kroner, signed};
+use super::{
+    Action, Message, Panel, PrivateList, apply, diff_class, hm, hours, kroner, message_for, signed,
+    status,
+};
 use crate::setup::Setup;
 use crate::{Icon, Screen};
 
@@ -74,8 +77,9 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut open_day = use_signal(|| None::<NaiveDate>);
     let mut version = use_signal(|| 0u32);
     let expanded = use_signal(|| false);
-    let mut message = use_signal(|| None::<Result<String, String>>);
-    let loaded = use_resource(move || {
+    let mut message = use_signal(|| None as Message);
+    let mut adding = use_signal(|| false);
+    let mut loaded = use_resource(move || {
         let m = month();
         let cfg = setup.read().config.clone();
         async move {
@@ -88,19 +92,27 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     // Opening or leaving a day clears the last private-time message.
     let go = use_callback(move |d: Option<NaiveDate>| {
         message.set(None);
+        adding.set(false);
         open_day.set(d);
         document::eval("document.querySelector('.content')?.scrollTo(0, 0)");
     });
-    let on_action = use_callback(move |a: Action| {
+    // True when the action was done; a refused one leaves its editor open.
+    let on_action = use_callback(move |a: Action| -> bool {
         let Some(cfg) = setup.peek().config.clone() else {
-            return;
+            return false;
         };
         let result = match &*loaded.peek() {
             Some(Ok(l)) => apply(&cfg, &l.occurrences, &a).map_err(|e| format!("{e:#}")),
             _ => Err("the month is still loading".to_string()),
         };
-        message.set(Some(result));
+        let done = result.is_ok();
+        if done && a.panel() == Panel::Trips {
+            // The trips are reread; the day stays open.
+            loaded.restart();
+        }
+        message.set(Some((a.panel(), result)));
         version += 1;
+        done
     });
 
     let Some(cfg) = setup.read().config.clone() else {
@@ -149,6 +161,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             message: message(),
             on_action,
             on_back: Callback::new(move |_| go.call(None)),
+            adding,
         });
     }
 
@@ -262,7 +275,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             now: now.naive_local(),
             tz: cfg.timezone,
             expanded,
-            message: message(),
+            message: message_for(&message(), Panel::Private),
             on_action,
         }
 
@@ -444,7 +457,7 @@ fn PrivateCard(
     tz: Tz,
     expanded: Signal<bool>,
     message: Option<Result<String, String>>,
-    on_action: Callback<Action>,
+    on_action: Callback<Action, bool>,
 ) -> Element {
     let open = expanded();
     let current = private.current.map(|i| private.items[i].clone());
@@ -491,14 +504,18 @@ fn PrivateCard(
                     button {
                         class: "pt-btn stop",
                         "aria-pressed": "true",
-                        onclick: move |_| on_action.call(Action::Stop),
+                        onclick: move |_| {
+                            on_action.call(Action::Stop);
+                        },
                         "Stop"
                     }
                 } else {
                     button {
                         class: "pt-btn",
                         "aria-pressed": "false",
-                        onclick: move |_| on_action.call(Action::Start(link.clone())),
+                        onclick: move |_| {
+                            on_action.call(Action::Start(link.clone()));
+                        },
                         "Start"
                     }
                 }
@@ -520,11 +537,7 @@ fn PrivateCard(
                     tz,
                 }
             }
-            match message {
-                Some(Ok(text)) => rsx! { div { class: "pt-status info", role: "status", "{text}" } },
-                Some(Err(text)) => rsx! { div { class: "pt-status bad", role: "alert", "{text}" } },
-                None => rsx! {},
-            }
+            {status(message)}
             if open {
                 ul { id: "pt-list", class: "pt-list",
                     PrivateList {
@@ -537,7 +550,9 @@ fn PrivateCard(
                         button {
                             class: "pt-plain",
                             disabled: is_running,
-                            onclick: move |_| on_action.call(Action::Start(None)),
+                            onclick: move |_| {
+                                on_action.call(Action::Start(None));
+                            },
                             Icon { d: "M12 5v14M5 12h14", size: 16 }
                             "Start without an event"
                         }

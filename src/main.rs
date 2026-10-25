@@ -501,34 +501,24 @@ fn checklist_days(
 }
 
 fn lunch(cfg: &Config, action: LunchAction) -> Result<()> {
-    let path = &cfg.state_file;
-    match action {
+    let (date, choice) = match action {
         LunchAction::Set {
             date,
             start,
             minutes,
-        } => {
-            let date = state::parse_date(&date)?;
-            let start = state::parse_time(&start)?;
-            state::State::update(path, |s| {
-                s.lunch
-                    .insert(date, state::LunchOverride { start, minutes })
-            })?;
-            if minutes == 0 {
-                println!("{date}: no lunch");
-            } else {
-                println!("{date}: lunch {} for {minutes} min", start.format("%H:%M"));
-            }
-        }
-        LunchAction::Clear { date } => {
-            let date = state::parse_date(&date)?;
-            if state::State::update(path, |s| s.lunch.remove(&date))?.is_some() {
-                println!("{date}: lunch override cleared");
-            } else {
-                println!("{date}: no lunch override");
-            }
-        }
-    }
+        } => (
+            date,
+            service::LunchChoice::At {
+                start: state::parse_time(&start)?,
+                minutes,
+            },
+        ),
+        LunchAction::Clear { date } => (date, service::LunchChoice::Default),
+    };
+    println!(
+        "{}",
+        service::set_lunch(cfg, state::parse_date(&date)?, choice)?
+    );
     Ok(())
 }
 
