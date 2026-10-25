@@ -11,7 +11,7 @@ Move trips, state (ticks, lunch, private and home-working intervals, trip overri
 - Use rusqlite with the bundled feature (builds for Android).
 - Migration of existing data (user: "could you include a migration function in the app so the current old data is transfered over"):
   - automatic: on first start the library imports trips.json and state.json next to the config into SQLite (lossless, JSON kept as .bak);
-  - in the app (Settings → Data → "Import old data"): desktop picks the old folder (e.g. the project folder with config.toml, trips.json, state.json) and copies config, trips, state and secrets-file option into the app's data folder; Android imports a backup file;
+  - in the app (Settings → Data → "Import old data"): desktop picks the old folder (e.g. the project folder with config.toml, trips.json, state.json) and copies config, trips, state and secrets-file option into the app's data folder, then deletes the old folder's trips.json and state.json once the import is verified (user: "when the data is imported delete the old file"); config.toml and secret files stay; Android imports a backup file;
   - `backup export <file>` (CLI and a Settings button) writes one file with config (without secrets), trips and state, so the phone can import the computer's data; the calendar link and device token are not included and must be re-entered.
 - Keep the public library API so CLI output stays byte-identical (re-run the FNT-21.1 harness at scratchpad/fnt21-harness).
 
