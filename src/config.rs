@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::{NaiveTime, Weekday};
-use serde::Deserialize;
+use chrono::{NaiveDate, NaiveTime, Weekday};
+use serde::{Deserialize, Deserializer};
 
 use crate::address::Places;
 use crate::trips::Position;
@@ -32,6 +32,8 @@ pub struct Config {
     pub mileage: Option<MileageConfig>,
     #[serde(default)]
     pub checklist: ChecklistConfig,
+    #[serde(default)]
+    pub vacation: VacationConfig,
     /// The Min Volkswagen account (Connected Cars) for `trips sync`.
     pub connected_cars: Option<ConnectedCarsConfig>,
     pub danlon: DanlonConfig,
@@ -138,7 +140,8 @@ pub struct CalendarConfig {
     #[serde(default = "yes")]
     pub norm_from_calendar: bool,
     /// If non-empty, only all-day events whose title contains one of these
-    /// words (case-insensitive) count as days off.
+    /// words (case-insensitive) count as days off. Vacation and feriefridag
+    /// events (`[vacation]`) always do.
     #[serde(default)]
     pub days_off_keywords: Vec<String>,
     /// Timed events whose title contains one of these words (whole word,
@@ -261,6 +264,77 @@ impl Default for ChecklistConfig {
             workplace_name: default_workplace_name(),
         }
     }
+}
+
+/// Vacation (samtidighedsferie) from all-day calendar events.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VacationConfig {
+    /// All-day events whose title contains one of these words
+    /// (case-insensitive) are vacation, e.g. "Ferie" also matches "Juleferie".
+    #[serde(default = "default_vacation_keywords")]
+    pub keywords: Vec<String>,
+    /// All-day events whose title contains one of these words are
+    /// feriefridage; they win over `keywords`.
+    #[serde(default = "default_feriefridag_keywords")]
+    pub feriefridag_keywords: Vec<String>,
+    /// First day of employment (YYYY-MM-DD); vacation is earned from here.
+    #[serde(default, deserialize_with = "optional_date")]
+    pub employment_start: Option<NaiveDate>,
+    /// Feriefridage per holiday year (from the contract).
+    #[serde(default = "default_feriefridage")]
+    pub feriefridage: u32,
+    /// Vacation days earned per full month of employment.
+    #[serde(default = "default_days_per_month")]
+    pub days_per_month: f64,
+}
+
+fn default_vacation_keywords() -> Vec<String> {
+    vec!["Ferie".into()]
+}
+
+fn default_feriefridag_keywords() -> Vec<String> {
+    vec!["Feriefridag".into()]
+}
+
+fn default_feriefridage() -> u32 {
+    5
+}
+
+fn default_days_per_month() -> f64 {
+    2.08
+}
+
+impl Default for VacationConfig {
+    fn default() -> Self {
+        VacationConfig {
+            keywords: default_vacation_keywords(),
+            feriefridag_keywords: default_feriefridag_keywords(),
+            employment_start: None,
+            feriefridage: default_feriefridage(),
+            days_per_month: default_days_per_month(),
+        }
+    }
+}
+
+impl VacationConfig {
+    /// `days_per_month` in hundredths of a day (2,08 → 208).
+    pub fn hundredths_per_month(&self) -> i64 {
+        (self.days_per_month * 100.0).round() as i64
+    }
+}
+
+/// A date written as a TOML date (`2026-05-01`) or a string ("2026-05-01").
+fn optional_date<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NaiveDate>, D::Error> {
+    use serde::de::Error;
+    let text = match toml::Value::deserialize(d)? {
+        toml::Value::Datetime(dt) => dt.to_string(),
+        toml::Value::String(s) => s,
+        other => return Err(D::Error::custom(format!("expected a date, got {other}"))),
+    };
+    NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| D::Error::custom(format!("expected a date as YYYY-MM-DD, got {text:?}")))
 }
 
 /// The Min Volkswagen account, read through the Connected Cars backend. The
@@ -469,6 +543,9 @@ impl Config {
         if self.mileage.is_some() && self.danlon.mileage_lonart.is_none() {
             bail!("[mileage] requires danlon.mileage_lonart");
         }
+        if self.vacation.days_per_month.is_nan() || self.vacation.days_per_month <= 0.0 {
+            bail!("vacation.days_per_month must be a positive number of days");
+        }
         Ok(())
     }
 }
@@ -495,6 +572,30 @@ mod tests {
         let err =
             Config::parse(&format!("{base}[periods]\nunpaid_break_minutes = 30\n")).unwrap_err();
         assert!(err.to_string().contains("[lunch]"), "{err}");
+    }
+
+    #[test]
+    fn vacation_defaults_and_employment_start() {
+        let base = "employee_number = \"1\"\n[danlon]\n";
+        let v = Config::parse(base).unwrap().vacation;
+        assert_eq!(
+            (v.keywords.clone(), v.feriefridag_keywords.clone()),
+            (vec!["Ferie".to_string()], vec!["Feriefridag".to_string()])
+        );
+        assert_eq!(
+            (v.employment_start, v.feriefridage, v.hundredths_per_month()),
+            (None, 5, 208)
+        );
+
+        let may = NaiveDate::from_ymd_opt(2026, 5, 1);
+        for start in ["2026-05-01", "\"2026-05-01\""] {
+            let cfg =
+                Config::parse(&format!("{base}[vacation]\nemployment_start = {start}\n")).unwrap();
+            assert_eq!(cfg.vacation.employment_start, may);
+        }
+        let err = Config::parse(&format!("{base}[vacation]\nemployment_start = \"1 May\"\n"))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("YYYY-MM-DD"), "{err:#}");
     }
 
     #[test]

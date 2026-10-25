@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Weekday};
 use chrono_tz::Tz;
 
 use crate::address::{self, Places};
@@ -72,8 +72,8 @@ pub struct Day {
     pub norm_hours: f64,
     /// Planned working time from the calendar (first start, last end).
     pub planned: Option<Span>,
-    /// Why this is not a working day (holiday name or calendar entry).
-    pub off_reason: Option<String>,
+    /// Why this is not a working day.
+    pub off_reason: Option<OffReason>,
     /// Work addresses for the day (calendar locations or the default).
     pub work_locations: Vec<String>,
     /// Private appointments and recorded private time (not company time),
@@ -89,6 +89,86 @@ pub struct Day {
     /// The day's lunch break, deducted where it overlaps `segments`.
     pub lunch: Lunch,
     pub worked_hours: f64,
+}
+
+/// Why a day is not a working day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OffReason {
+    /// A public holiday or contractual day off, by name.
+    Holiday(&'static str),
+    /// Inside a vacation or feriefridag event in the calendar.
+    Leave {
+        kind: LeaveKind,
+        /// The calendar event's title.
+        title: String,
+        /// Whether the day would have been a working day, i.e. counts as a
+        /// vacation day: a weekday with planned hours (or `[work_week]` hours
+        /// without the calendar norm) that is not a public holiday.
+        working_day: bool,
+    },
+    /// Another all-day calendar event, by title.
+    Other(String),
+}
+
+impl std::fmt::Display for OffReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OffReason::Holiday(name) => f.write_str(name),
+            OffReason::Leave { kind, .. } => kind.fmt(f),
+            OffReason::Other(title) => f.write_str(title),
+        }
+    }
+}
+
+/// The kinds of leave taken from a balance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LeaveKind {
+    Ferie,
+    Feriefridag,
+}
+
+impl std::fmt::Display for LeaveKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LeaveKind::Ferie => "Ferie",
+            LeaveKind::Feriefridag => "Feriefridag",
+        })
+    }
+}
+
+/// What an all-day calendar event is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllDayKind {
+    Leave(LeaveKind),
+    /// A day off for another reason (matches `days_off_keywords`).
+    Other,
+}
+
+/// Classifies an all-day event by its title: a feriefridag word, then a
+/// vacation word, then the calendar's days-off keywords (empty: every other
+/// all-day event is a day off). Words match anywhere in the title,
+/// case-insensitively ("Ferie" matches "Juleferie"). `None`: not a day off.
+pub fn classify_all_day(cfg: &Config, summary: &str) -> Option<AllDayKind> {
+    let title = summary.to_lowercase();
+    let has = |words: &[String]| {
+        words
+            .iter()
+            .map(|w| w.trim().to_lowercase())
+            .any(|w| !w.is_empty() && title.contains(&w))
+    };
+    let v = &cfg.vacation;
+    if has(&v.feriefridag_keywords) {
+        return Some(AllDayKind::Leave(LeaveKind::Feriefridag));
+    }
+    if has(&v.keywords) {
+        return Some(AllDayKind::Leave(LeaveKind::Ferie));
+    }
+    let keywords = cfg
+        .calendar
+        .as_ref()
+        .map(|c| c.days_off_keywords.as_slice())
+        .unwrap_or_default();
+    (keywords.is_empty() || has(keywords)).then_some(AllDayKind::Other)
 }
 
 /// A day's lunch break and where it comes from.
@@ -144,11 +224,14 @@ impl Day {
 
     /// Day-off reason and anything that needs checking.
     pub fn remark(&self) -> String {
-        [self.off_reason.as_deref(), self.note.as_deref()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("; ")
+        [
+            self.off_reason.as_ref().map(ToString::to_string),
+            self.note.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ")
     }
 }
 
@@ -187,20 +270,12 @@ pub fn build(
 ) -> MonthReport {
     let tz = cfg.timezone;
 
-    let mut off: HashMap<NaiveDate, String> = holidays::days_off(month.year, &cfg.holidays)
+    // Public holidays first: a vacation event over a holiday does not make
+    // the holiday a vacation day.
+    let mut off: HashMap<NaiveDate, OffReason> = holidays::days_off(month.year, &cfg.holidays)
         .into_iter()
-        .map(|(d, name)| (d, name.to_string()))
+        .map(|(d, name)| (d, OffReason::Holiday(name)))
         .collect();
-    let keywords: Vec<String> = cfg
-        .calendar
-        .as_ref()
-        .map(|c| {
-            c.days_off_keywords
-                .iter()
-                .map(|k| k.to_lowercase())
-                .collect()
-        })
-        .unwrap_or_default();
     let norm_from_calendar = cfg.calendar.as_ref().is_some_and(|c| c.norm_from_calendar);
     let default_location = cfg
         .calendar
@@ -222,10 +297,16 @@ pub fn build(
     for occ in calendar {
         match occ {
             Occurrence::AllDay { date, summary } => {
-                let lower = summary.to_lowercase();
-                if keywords.is_empty() || keywords.iter().any(|k| lower.contains(k)) {
-                    off.entry(*date).or_insert_with(|| summary.clone());
-                }
+                let reason = match classify_all_day(cfg, summary) {
+                    Some(AllDayKind::Leave(kind)) => OffReason::Leave {
+                        kind,
+                        title: summary.clone(),
+                        working_day: false,
+                    },
+                    Some(AllDayKind::Other) => OffReason::Other(summary.clone()),
+                    None => continue,
+                };
+                off.entry(*date).or_insert(reason);
             }
             Occurrence::Timed {
                 start,
@@ -307,8 +388,20 @@ pub fn build(
     let days = month
         .days()
         .map(|date| {
-            let off_reason = off.get(&date).cloned();
             let day_plan = planned.get(&date).map(Vec::as_slice).unwrap_or(&[]);
+            let off_reason = off.get(&date).cloned().map(|reason| match reason {
+                OffReason::Leave { kind, title, .. } => OffReason::Leave {
+                    kind,
+                    title,
+                    working_day: !matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
+                        && if norm_from_calendar {
+                            !day_plan.is_empty()
+                        } else {
+                            cfg.work_week.hours(date.weekday()) > 0.0
+                        },
+                },
+                other => other,
+            });
             let lunch = match (lunch_overrides.get(&date), lunch_events.get(&date)) {
                 (Some(o), _) => Lunch {
                     window: window(date, o.start, o.minutes, tz),
@@ -758,11 +851,82 @@ END:VEVENT
         // Mon–Thu 08:00–16:00 from 5 Oct minus the default lunch = 7,5 h: weeks of
         // 5, 12, 26 Oct = 12 days; 19–22 Oct are ferie.
         assert_eq!(r.norm_total(), 12.0 * 7.5);
-        assert_eq!(r.days[18].off_reason.as_deref(), Some("Efterårsferie"));
+        // "Efterårsferie" contains the vacation word "Ferie".
+        assert_eq!(
+            r.days[18].off_reason,
+            Some(OffReason::Leave {
+                kind: LeaveKind::Ferie,
+                title: "Efterårsferie".into(),
+                working_day: true,
+            })
+        );
+        assert_eq!(r.days[18].off_reason.as_ref().unwrap().to_string(), "Ferie");
+        // Friday 23 Oct has no planned hours, so it is no vacation day.
+        assert!(matches!(
+            r.days[22].off_reason,
+            Some(OffReason::Leave {
+                working_day: false,
+                ..
+            })
+        ));
         // "Tandlæge" does not match the keywords, so the 26th stays a workday.
         assert_eq!(r.days[25].norm_hours, 7.5);
         // Fridays have no planned time.
         assert_eq!(r.days[8].norm_hours, 0.0);
+    }
+
+    #[test]
+    fn vacation_days_have_norm_0_and_reason_ferie() {
+        let mut cfg = cfg("[calendar]\nsource = \"\"\ndays_off_keywords = [\"fri\"]");
+        cfg.lunch.minutes = 0;
+        let ics = "BEGIN:VEVENT
+UID:w
+SUMMARY:Kontor
+DTSTART;TZID=Europe/Copenhagen:20261005T080000
+DTEND;TZID=Europe/Copenhagen:20261005T160000
+RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
+END:VEVENT
+BEGIN:VEVENT
+UID:f
+SUMMARY:ferie
+DTSTART;VALUE=DATE:20261009
+DTEND;VALUE=DATE:20261013
+END:VEVENT
+BEGIN:VEVENT
+UID:d
+SUMMARY:Feriefridag
+DTSTART;VALUE=DATE:20261016
+END:VEVENT
+BEGIN:VEVENT
+UID:o
+SUMMARY:Kursus
+DTSTART;VALUE=DATE:20261020
+END:VEVENT
+";
+        let m = Month::parse("2026-10").unwrap();
+        let occ = calendar::occurrences(ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
+        let r = build(&cfg, m, &[], &occ, &BTreeMap::new(), &[]);
+        let day = |n: usize| &r.days[n - 1];
+        // Fri 9 – Mon 12 Oct, also outside the days-off keywords.
+        for n in [9, 10, 11, 12] {
+            assert_eq!(day(n).norm_hours, 0.0);
+            assert_eq!(day(n).off_reason.as_ref().unwrap().to_string(), "Ferie");
+            assert_eq!(day(n).planned, None);
+        }
+        let working = |n: usize| match &day(n).off_reason {
+            Some(OffReason::Leave { working_day, .. }) => *working_day,
+            other => panic!("{other:?}"),
+        };
+        assert!(working(9) && working(12));
+        assert!(!working(10) && !working(11));
+        assert_eq!(
+            day(16).off_reason.as_ref().unwrap().to_string(),
+            "Feriefridag"
+        );
+        assert_eq!(day(16).norm_hours, 0.0);
+        // Not a vacation word and not a days-off keyword: a working day.
+        assert_eq!(day(20).off_reason, None);
+        assert_eq!(day(20).norm_hours, 8.0);
     }
 
     fn located_trip(cfg: &Config, s: &str, e: &str, from: &str, to: &str) -> Trip {

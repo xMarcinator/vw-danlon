@@ -11,6 +11,7 @@ mod state;
 mod timesheet;
 mod trip_store;
 mod trips;
+mod vacation;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -116,6 +117,9 @@ enum Command {
         #[command(subcommand)]
         action: TripsAction,
     },
+    /// Vacation from the calendar: earned, taken, planned and left per open
+    /// holiday year, and each period with the year it draws from.
+    Vacation,
 }
 
 #[derive(Subcommand)]
@@ -314,6 +318,7 @@ fn main() -> Result<()> {
             TripsAction::Import { file } => import_trips(&cfg, &file)?,
             TripsAction::Sync { from } => sync_trips(&cfg, from.as_deref())?,
         },
+        Command::Vacation => print_vacation(&cfg)?,
     }
     Ok(())
 }
@@ -769,6 +774,11 @@ fn interval_text(i: &state::PrivateInterval) -> String {
 /// months are needed for the year's mileage total.
 fn calendar(cfg: &Config, month: Month) -> Result<Vec<Occurrence>> {
     let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
+    calendar_between(cfg, year_start, month.last_day())
+}
+
+/// Calendar occurrences from `from` to `to`.
+fn calendar_between(cfg: &Config, from: NaiveDate, to: NaiveDate) -> Result<Vec<Occurrence>> {
     Ok(match &cfg.calendar {
         Some(cal) => {
             let text = calendar::fetch(&cal.source)?;
@@ -783,7 +793,7 @@ fn calendar(cfg: &Config, month: Month) -> Result<Vec<Occurrence>> {
                     }
                 }
             }
-            calendar::occurrences(&text, cfg.timezone, year_start, month.last_day())?
+            calendar::occurrences(&text, cfg.timezone, from, to)?
         }
         None => Vec::new(),
     })
@@ -920,6 +930,36 @@ fn print_days(r: &MonthReport, with_trips: bool) {
             r.worked_total() - r.norm_total()
         );
     }
+}
+
+/// The vacation overview: the calendar from the oldest open holiday year's
+/// start to the newest one's use-by date.
+fn print_vacation(cfg: &Config) -> Result<()> {
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
+    let open = vacation::open_years(today);
+    let from = open[0].first_day();
+    let to = open[open.len() - 1].use_by();
+    let cal = calendar_between(cfg, from, to)?;
+    let mut days = Vec::new();
+    let mut month = Month {
+        year: from.year(),
+        month: from.month(),
+    };
+    while month.first_day() <= to {
+        days.extend(month::build(cfg, month, &[], &cal, &BTreeMap::new(), &[]).days);
+        let next = month.last_day() + chrono::Duration::days(1);
+        month = Month {
+            year: next.year(),
+            month: next.month(),
+        };
+    }
+    let rules = vacation::Rules::from_config(cfg);
+    let leave = vacation::leave_days(cfg, &cal, &days);
+    print!(
+        "{}",
+        vacation::render(&rules, &vacation::overview(&rules, &leave, today))
+    );
+    Ok(())
 }
 
 fn print_mileage(m: &MileageMonth) {

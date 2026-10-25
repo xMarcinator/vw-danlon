@@ -221,7 +221,7 @@ fn status(day: &Day, driving: bool) -> Status {
         || (day.off_reason.is_none() && !weekend);
     let nothing = || {
         let reason = match &day.off_reason {
-            Some(reason) => reason.clone(),
+            Some(reason) => reason.to_string(),
             None if weekend => "weekend".into(),
             None => "ingen arbejdstid".into(),
         };
