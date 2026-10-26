@@ -116,6 +116,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut trips_status = use_signal(|| None::<Result<String, String>>);
     let mut account_status = use_signal(|| None::<Result<String, String>>);
     let mut busy = use_signal(|| false);
+    let mut trip_sync = use_context::<Signal<crate::screens::TripSync>>();
     let mut email = use_signal(|| match &setup.peek().account {
         AccountStatus::NoToken { email } => email.clone(),
         _ => setup
@@ -260,7 +261,11 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         });
     };
     let sync_now = move |_| {
+        if trip_sync.peek().syncing {
+            return;
+        }
         busy.set(true);
+        trip_sync.write().syncing = true;
         account_status.set(Some(Ok("Syncing…".into())));
         spawn(async move {
             let result = in_background(setup, |cfg, store| {
@@ -268,6 +273,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 setup::sync_account(cfg, store, today)
             })
             .await;
+            trip_sync.write().syncing = false;
             reload(setup);
             account_status.set(Some(result.map(|s| synced_text(&s))));
             busy.set(false);
@@ -594,7 +600,12 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         }
                     }
                     if connected {
-                        button { class: "small-btn", disabled: busy(), onclick: sync_now, "Sync now" }
+                        button {
+                            class: "small-btn",
+                            disabled: busy() || trip_sync.read().syncing,
+                            onclick: sync_now,
+                            if trip_sync.read().syncing { "Syncing…" } else { "Sync now" }
+                        }
                         button { class: "small-btn", disabled: busy(), onclick: disconnect, "Disconnect" }
                     }
                 }
@@ -631,7 +642,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
                 }
                 span { class: "note",
-                    "Fetches your trips with a device token kept in {store}; your password is never stored. Uses the app’s own unofficial access, so it can stop working when the app changes; the export above always works."
+                    "Syncs by itself when the app opens or comes back, and every 15 minutes while it is open; Sync now fetches at once. Uses a device token kept in {store}; your password is never stored. Uses the app’s own unofficial access, so it can stop working when the app changes; the export above always works."
                 }
             }
         }

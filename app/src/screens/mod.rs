@@ -134,6 +134,65 @@ pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Sign
     }
 }
 
+/// The account trip sync the app runs by itself, shared with Settings so
+/// Sync now and the automatic sync never run at once.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TripSync {
+    pub syncing: bool,
+}
+
+/// How often the app syncs trips from the account while it runs.
+pub const TRIP_SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long an automatic trip sync may take before it is given up.
+const TRIP_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Syncs trips from a connected account when the app starts and every
+/// [`TRIP_SYNC_EVERY`] while it runs. As with the calendar, a tick missed
+/// while the app was in the background is not caught up: coming back gives
+/// one sync at once.
+pub async fn sync_trips_now_and_then(setup: Signal<crate::setup::Setup>, sync: Signal<TripSync>) {
+    let mut every = tokio::time::interval(TRIP_SYNC_EVERY);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        every.tick().await;
+        sync_trips(setup, sync).await;
+    }
+}
+
+/// One automatic sync, off the UI thread. Only a connected account is
+/// synced; the screens reload only when trips were added. A failure is
+/// left for Sync now in Settings to show: the account line there says when
+/// the last sync was.
+pub async fn sync_trips(mut setup: Signal<crate::setup::Setup>, mut sync: Signal<TripSync>) {
+    let (cfg, store, dir) = {
+        let s = setup.peek();
+        if !matches!(s.account, crate::setup::AccountStatus::Connected { .. }) {
+            return;
+        }
+        let Some(cfg) = s.config.clone() else {
+            return;
+        };
+        (cfg, s.secret_store(), s.dir.clone())
+    };
+    if sync.peek().syncing {
+        return;
+    }
+    sync.write().syncing = true;
+    let job = tokio::task::spawn_blocking(move || {
+        let today = now(&cfg).date_naive();
+        crate::setup::sync_account(&cfg, store.as_ref(), today)
+    });
+    let added = match tokio::time::timeout(TRIP_SYNC_TIMEOUT, job).await {
+        Ok(Ok(Ok(outcome))) => outcome.synced.merged.added,
+        _ => 0,
+    };
+    sync.write().syncing = false;
+    if added > 0 {
+        setup.set(crate::setup::Setup::load(Ok(dir)));
+    }
+}
+
 /// How old the kept calendar is, for the screens: "fetched 14:02", or
 /// "fetched 3 days ago".
 pub fn calendar_age(fetched_at: DateTime<Utc>, now: DateTime<Tz>) -> String {

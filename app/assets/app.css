@@ -1008,10 +1008,95 @@ table.days tr.flagged {
   flex-shrink: 0;
 }
 
-.small-btn.next-start.running {
-  border-color: var(--warn-line);
-  background: var(--warn-bg);
-  color: var(--warn);
+.next-row .pt-title {
+  gap: 1px;
+  padding: 4px 0;
+}
+
+.next-line {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.next-sub {
+  font-size: 12px;
+  color: var(--sub);
+}
+
+/* The narrow work card: status over the full width (it wraps), then the
+   buttons in their own row, Stop work as a link at the bottom. */
+.work-card > .pt-head {
+  align-items: flex-start;
+  padding: 12px 14px 0;
+}
+
+.work-card > .pt-head .pt-dot {
+  margin-top: 4px;
+}
+
+.work-card > .pt-head .pt-title {
+  gap: 2px;
+}
+
+.work-card > .pt-head .pt-title b {
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.work-card > .pt-head + .pt-status {
+  margin-top: 10px;
+}
+
+.card-actions {
+  gap: 8px;
+  padding: 12px 14px 14px;
+}
+
+.card-actions .pt-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.pt-btn.secondary {
+  border: 1px solid var(--acc);
+  background: var(--surf);
+  color: var(--acc-text);
+}
+
+.card-earlier {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
+.card-earlier input {
+  font-size: 14px;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--text);
+}
+
+.card-stop {
+  border-top: 1px solid var(--row);
+  padding: 2px 4px;
+}
+
+.link-btn.bad {
+  font: inherit;
+  font-size: 14px;
+  min-height: 44px;
+  padding: 0 10px;
+  border: none;
+  background: none;
+  color: var(--bad);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
 }
 
 .work-pill {
@@ -1113,8 +1198,18 @@ table.days tr.flagged {
 }
 
 @media (max-width: 719px) {
-  .pt-head.narrow-only {
+  .pt-head.narrow-only,
+  .card-actions.narrow-only,
+  .card-earlier.narrow-only {
     display: flex !important;
+  }
+
+  .card-stop.narrow-only {
+    display: block !important;
+  }
+
+  .work-card > .pt-status {
+    margin-bottom: 0;
   }
 }
 

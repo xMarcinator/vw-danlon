@@ -780,10 +780,11 @@ fn work_head(w: &WorkToday, place: &str, now: NaiveDateTime) -> WorkHead {
     }
 }
 
-/// Today's work: Start work, the split button Private time ▾ while working
-/// (by trip or the home timer), or Stop private; the next private
-/// appointment with its own Start, and today's private list under the
-/// chevron. On a wide screen the head is the header's [`WorkPill`].
+/// Today's work: on a narrow screen the status over the full width, then
+/// its buttons in a row of their own ([`CardActions`]) and Stop work as a
+/// link at the bottom; the next private appointment with its own Start, and
+/// today's private list under the chevron. On a wide screen the head and
+/// buttons are the header's [`WorkPill`].
 #[component]
 fn WorkCard(
     work: WorkToday,
@@ -862,15 +863,27 @@ fn WorkCard(
         "bad" => "work-card late",
         _ => "work-card",
     };
+    let working = matches!(
+        work.state,
+        WorkState::AtWork { .. } | WorkState::Home { .. }
+    );
+    let stop = if !working {
+        None
+    } else if work.actions.contains(&WorkAction::StopWork) {
+        Some(("Stop working from home", Action::HomeStop))
+    } else if work.actions.contains(&WorkAction::LeaveWork) {
+        Some(("Stop work (left early)", Action::LeaveWork))
+    } else {
+        None
+    };
     rsx! {
         section { class: "{card_class}", "aria-label": "Work today",
             div { class: "pt-head narrow-only",
                 span { class: "pt-dot {head.tone}", "aria-hidden": "true" }
                 span { class: "pt-title",
-                    span { class: "pt-kicker ellipsis", "{head.kicker}" }
-                    b { class: "ellipsis {head.tone}", "{head.title}" }
+                    span { class: "pt-kicker", "{head.kicker}" }
+                    b { class: "{head.tone}", "{head.title}" }
                 }
-                WorkButtons { work: work.clone(), pill: false, on_action }
             }
             if let Some((label, since, end)) = auto {
                 AutoStatus {
@@ -884,30 +897,41 @@ fn WorkCard(
             } else if let Some((text, class)) = status {
                 div { class: "pt-status {class}", role: "status", "{text}" }
             }
+            CardActions { work: work.clone(), now: live, on_action }
             {status_line(message)}
             div { class: "next-row",
                 span { class: "pt-title",
-                    span { class: "pt-kicker", if private_now.is_some() { "Private time now" } else { "Next private" } }
-                    span { class: "ellipsis",
-                        if let Some((label, since, _)) = &private_now {
-                            b { "{label}" }
-                            " · since {hm(since.naive_local())}"
-                        } else if let Some(n) = &next {
-                            b { "{n.label}" }
-                            {
-                                let (s, e) = n.planned.unwrap_or((n.start(), n.start()));
-                                let when = super::when(s, Some(e), today).replacen("Today", "today", 1);
-                                let auto_text = if auto_start && next_today { " · starts automatically" } else { "" };
-                                rsx! { " · {when}{auto_text}" }
-                            }
-                        } else {
-                            span { class: "muted", "No private appointments coming" }
+                    if let Some((label, since, _)) = &private_now {
+                        span { class: "pt-kicker", "Running now" }
+                        span { class: "next-line", b { "{label}" } }
+                        {
+                            let planned = running_replaces
+                                .map(|(s, e)| format!(" · planned {}–{}", hm(s), hm(e)))
+                                .unwrap_or_default();
+                            rsx! { span { class: "next-sub", "Since {hm(since.naive_local())}{planned}" } }
                         }
+                    } else if let Some(n) = &next {
+                        span { class: "pt-kicker", if next_today { "Next private · today" } else { "Next private" } }
+                        {
+                            let (s, e) = n.planned.unwrap_or((n.start(), n.start()));
+                            let when = if next_today {
+                                format!("{}–{}", hm(s), hm(e))
+                            } else {
+                                super::when(s, Some(e), today)
+                            };
+                            rsx! {
+                                span { class: "next-line", b { "{n.label}" } " · {when}" }
+                                if auto_start && next_today {
+                                    span { class: "next-sub", "Starts automatically at {hm(s)}" }
+                                }
+                            }
+                        }
+                    } else {
+                        span { class: "pt-kicker", "Next private" }
+                        span { class: "muted", "No private appointments coming" }
                     }
                 }
-                if private_now.is_some() {
-                    button { class: "small-btn next-start running", disabled: true, "Running" }
-                } else if let Some(n) = next.as_ref().filter(|_| next_today) {
+                if let Some(n) = next.as_ref().filter(|_| next_today && private_now.is_none()) {
                     {
                         let title = n.label.clone();
                         rsx! {
@@ -946,6 +970,99 @@ fn WorkCard(
                             today,
                             auto_start,
                             on_action,
+                        }
+                    }
+                }
+            }
+            if let Some((label, action)) = stop {
+                div { class: "card-stop narrow-only",
+                    button {
+                        class: "link-btn bad",
+                        onclick: move |_| {
+                            on_action.call(action.clone());
+                        },
+                        "{label}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The work card's buttons on a narrow screen, in a row of their own under
+/// the status so neither is cut off: Start work, Stop private time, or
+/// Start private time and Started earlier… (its time field opens in place,
+/// not in a menu over the list).
+#[component]
+fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, bool>) -> Element {
+    let mut earlier = use_signal(|| false);
+    let mut at = use_signal(String::new);
+    match &work.state {
+        WorkState::NotWorking { .. } => rsx! {
+            if work.actions.contains(&WorkAction::StartWork) {
+                div { class: "card-actions narrow-only",
+                    button {
+                        class: "pt-btn",
+                        onclick: move |_| {
+                            on_action.call(Action::HomeStart);
+                        },
+                        "Start work"
+                    }
+                }
+            }
+        },
+        WorkState::Private { .. } => rsx! {
+            div { class: "card-actions narrow-only",
+                button {
+                    class: "pt-btn stop",
+                    onclick: move |_| {
+                        on_action.call(Action::Stop);
+                    },
+                    "Stop private time"
+                }
+            }
+        },
+        WorkState::AtWork { .. } | WorkState::Home { .. } => {
+            let open = earlier();
+            rsx! {
+                div { class: "card-actions narrow-only",
+                    button {
+                        class: "pt-btn",
+                        onclick: move |_| {
+                            earlier.set(false);
+                            on_action.call(Action::Start(None));
+                        },
+                        "Start private time"
+                    }
+                    button {
+                        class: "pt-btn secondary",
+                        "aria-expanded": if open { "true" } else { "false" },
+                        "aria-controls": "pt-earlier-row",
+                        onclick: move |_| {
+                            at.set(hm(now));
+                            earlier.set(!open);
+                        },
+                        "Started earlier…"
+                    }
+                }
+                if open {
+                    div { id: "pt-earlier-row", class: "card-earlier narrow-only",
+                        label { r#for: "pt-earlier-card", "Started at" }
+                        input {
+                            id: "pt-earlier-card",
+                            r#type: "time",
+                            value: "{at}",
+                            oninput: move |e| at.set(e.value()),
+                        }
+                        button { class: "small-btn", onclick: move |_| earlier.set(false), "Cancel" }
+                        button {
+                            class: "small-btn primary-sm",
+                            onclick: move |_| {
+                                if on_action.call(Action::StartAt(at())) {
+                                    earlier.set(false);
+                                }
+                            },
+                            "Start"
                         }
                     }
                 }

@@ -157,6 +157,9 @@ fn App() -> Element {
     let cal_sync = use_context_provider(|| Signal::new(screens::CalendarSync::default()));
     // The screens show the kept calendar; it is refreshed now and then.
     use_future(move || screens::refresh_calendar_now_and_then(setup, cal_sync));
+    // Trips from a connected account, so an arrival shows without Sync now.
+    let trip_sync = use_context_provider(|| Signal::new(screens::TripSync::default()));
+    use_future(move || screens::sync_trips_now_and_then(setup, trip_sync));
     let theme = setup.read().settings.theme;
     let current = screen();
 
