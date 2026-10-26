@@ -35,9 +35,17 @@ All config structs use `deny_unknown_fields`; add new keys with defaults. Test h
 - [ ] `cargo test` passes
 
 ## Done summary
-TBD
+Timed calendar events whose title has a `calendar.private_keywords` word (default Læge, Tandlæge, Fysioterapeut; whole word, case-insensitive) are private appointments: they add no work address, norm or missing-address warning, are split at midnight onto `Day.appointments`, are subtracted from the work periods before break and rounding, and show in the note as `Læge 10:00–11:15 · private`. Tests: `private_appointment_is_not_a_work_entry` (R1: address not used, no norm, no missing-address warning, all-day stays a day off, Lægemiddelfirma no match, empty list disables) and `private_appointment_is_subtracted_from_worked_time` (R2/R4/R5: 07:58–16:00 minus 10:00–11:15 = 407 min (6,78 h), norm 8 h kept, overlaps deducted once, no overlap no deduction, midnight split, note text).
 
+Follow-up: `Day.appointments` is not read outside tests yet, so the bin build shows one dead_code warning. fnt-17.2 (trip classification) is meant to read it.
+Checked by hand: `report 2026-10` with a Læge 10:00–11:15 event added to examples/arbejdstid.ics shows 08:12–10:00, 11:15–11:30, … and the note.
+baseline: green (conductor handoff at cf8f129, cargo test 23 passed)
+Tier: (not provided in dispatch) (model: claude-opus-5-5)
+
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 033d0f09b8cb328e846af4b7d37fde042bfd4dea
+- Tests: cargo test (25 passed)
 - PRs:
