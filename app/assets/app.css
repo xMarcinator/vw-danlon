@@ -576,31 +576,6 @@ body {
   font-weight: 600;
 }
 
-.month-nav {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  flex-grow: 1;
-}
-
-.month-nav h1 {
-  margin: 0 8px;
-}
-
-.nav-btn {
-  width: 36px;
-  height: 36px;
-  border: 1px solid var(--ctl);
-  border-radius: 8px;
-  background: var(--surf);
-  color: var(--text);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-
 /* The period selector every page starts with: ‹ title › on top, then the
    views and Today, enabled only away from the current period. */
 .period-head {
@@ -1824,18 +1799,6 @@ table.days tr.flagged {
     display: flex !important;
   }
 
-  .month-nav h1 {
-    flex-grow: 1;
-    text-align: center;
-  }
-
-  .month-nav .nav-btn {
-    width: 44px;
-    height: 44px;
-    border: none;
-    background: none;
-  }
-
   .kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
@@ -2043,12 +2006,6 @@ label.small-btn:focus-within {
 }
 
 /* Mileage. */
-.month-title {
-  margin: 0 8px;
-  font-size: 18px;
-  font-weight: 600;
-}
-
 .kpi.span2 {
   grid-column: span 2;
   gap: 8px;
@@ -2509,6 +2466,7 @@ table.logbook tr.total td {
   .topbar,
   .no-print,
   .content > h1,
+  .content > .period-head,
   .content > .screen-head {
     display: none !important;
   }
@@ -3019,7 +2977,6 @@ table.rates td:first-child {
   background: var(--row);
 }
 
-.nav-btn:active,
 .small-btn:not(.primary-sm):active,
 .ts-btn:not(.primary):active,
 .add-time:active,

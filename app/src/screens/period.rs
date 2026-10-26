@@ -1,15 +1,19 @@
 //! The period selector the pages share: ‹ the period's title and a sub line
-//! ›, then the views to choose from (Day · Week · Month on Hours) and Today,
-//! which is enabled only when another period is shown. A page that steps
-//! whole years shows a note instead of the views. And Hours' period: the
+//! ›, then the views to choose from (Day · Week · Month on Hours, Week ·
+//! Month on Mileage and Danløn) and Today, which is enabled only when
+//! another period is shown. A page that steps whole years (Vacation, Mileage
+//! → Fradrag) shows a note instead of the views. And each page's period: the
 //! view and the date it is anchored on, kept while the app runs.
 
 use chrono::{Datelike, Duration, NaiveDate};
 use dioxus::prelude::*;
 use vw_danlon::month::Month;
+use vw_danlon::vacation::HolidayYear;
 
 use super::month::{month_title, step};
-use super::week::{first_week, monday_of, month_of, week_range, week_title};
+use super::week::{
+    first_week, monday_of, month_of, sunday_of, week_months, week_range, week_title,
+};
 use crate::Icon;
 
 /// What a page shows: a day, an ISO week or a month.
@@ -39,18 +43,23 @@ impl View {
     }
 }
 
-/// The period Hours shows: the view and a date in it (the day, the week's
+/// The views of Hours.
+pub const HOURS_VIEWS: [View; 3] = [View::Day, View::Week, View::Month];
+/// The views of Mileage and Danløn.
+pub const WEEK_MONTH: [View; 2] = [View::Week, View::Month];
+
+/// The period a page shows: the view and a date in it (the day, the week's
 /// Monday or the month's first day).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HoursPeriod {
+pub struct Period {
     pub view: View,
     pub anchor: NaiveDate,
 }
 
-impl HoursPeriod {
+impl Period {
     /// The month of `today`, as Hours opens.
     pub fn new(today: NaiveDate) -> Self {
-        HoursPeriod {
+        Period {
             view: View::Month,
             anchor: month_of(today).first_day(),
         }
@@ -62,9 +71,42 @@ impl HoursPeriod {
         month_of(self.anchor)
     }
 
+    /// How a page's text names the period: "Thursday 19 Nov", "week 48",
+    /// "November 2026".
+    pub fn name(&self) -> String {
+        match self.view {
+            View::Day => self.anchor.format("%A %-d %b").to_string(),
+            View::Week => format!("week {}", self.monday().iso_week().week()),
+            View::Month => month_title(self.month()),
+        }
+    }
+
     /// The Monday of the week shown (in Week view).
     pub fn monday(&self) -> NaiveDate {
         monday_of(self.anchor)
+    }
+
+    /// The first and the last day shown.
+    pub fn days(&self) -> (NaiveDate, NaiveDate) {
+        match self.view {
+            View::Day => (self.anchor, self.anchor),
+            View::Week => (self.monday(), sunday_of(self.monday())),
+            View::Month => (self.month().first_day(), self.month().last_day()),
+        }
+    }
+
+    pub fn contains(&self, d: NaiveDate) -> bool {
+        let (first, last) = self.days();
+        first <= d && d <= last
+    }
+
+    /// The months the period's days come from: its month, and the week's
+    /// Sunday's when that is another one.
+    pub fn months(&self) -> (Month, Option<Month>) {
+        match self.view {
+            View::Week => week_months(self.monday()),
+            View::Day | View::Month => (self.month(), None),
+        }
     }
 
     /// Whether the period shown holds `today`.
@@ -83,7 +125,7 @@ impl HoursPeriod {
             View::Week => self.monday() + Duration::days(7 * i64::from(by)),
             View::Month => step(self.month(), by).first_day(),
         };
-        HoursPeriod { anchor, ..self }
+        Period { anchor, ..self }
     }
 
     /// The current period, in the same view.
@@ -93,7 +135,7 @@ impl HoursPeriod {
             View::Week => monday_of(today),
             View::Month => month_of(today).first_day(),
         };
-        HoursPeriod { anchor, ..self }
+        Period { anchor, ..self }
     }
 
     /// Another view of the period shown: the one holding today when the
@@ -117,12 +159,12 @@ impl HoursPeriod {
             },
             View::Month => self.month().first_day(),
         };
-        HoursPeriod { view: to, anchor }
+        Period { view: to, anchor }
     }
 
     /// One day, in Day view.
     pub fn day(date: NaiveDate) -> Self {
-        HoursPeriod {
+        Period {
             view: View::Day,
             anchor: date,
         }
@@ -233,13 +275,14 @@ pub fn PeriodBar(
     }
 }
 
-/// The selector for Hours: Day · Week · Month over `period`; `on_change`
-/// gets each new period.
+/// The selector over `period` with the choice of `views`; `on_change` gets
+/// each new period.
 #[component]
-pub fn HoursBar(
-    period: HoursPeriod,
+pub fn PeriodPicker(
+    period: Period,
     today: NaiveDate,
-    on_change: Callback<HoursPeriod>,
+    views: Vec<View>,
+    on_change: Callback<Period>,
 ) -> Element {
     let (title, sub) = period.title(today);
     rsx! {
@@ -247,13 +290,89 @@ pub fn HoursBar(
             title,
             sub,
             unit: period.view.unit(),
-            views: vec![View::Day, View::Week, View::Month],
+            views,
             shown: Some(period.view),
             note: None,
             current: period.is_current(today),
             on_step: move |by: i32| on_change.call(period.step(by)),
             on_pick: move |to: View| on_change.call(period.pick(to, today)),
             on_today: move |_| on_change.call(period.today(today)),
+        }
+    }
+}
+
+/// The selector of a page that steps whole years, `year` of them: the note
+/// takes the place of the views.
+#[component]
+pub fn YearBar(
+    title: String,
+    sub: String,
+    unit: &'static str,
+    note: &'static str,
+    current: bool,
+    on_step: Callback<i32>,
+    on_today: Callback<()>,
+) -> Element {
+    rsx! {
+        PeriodBar {
+            title,
+            sub,
+            unit,
+            views: Vec::new(),
+            shown: None,
+            note: Some(note.to_string()),
+            current,
+            on_step,
+            on_pick: move |_| {},
+            on_today,
+        }
+    }
+}
+
+/// Mileage → Fradrag's title and sub line: "2026" / "Calendar year · so
+/// far", "2025" / "Calendar year".
+pub fn calendar_year_title(year: i32, today: NaiveDate) -> (String, String) {
+    let sub = if year == today.year() {
+        "Calendar year · so far"
+    } else {
+        "Calendar year"
+    };
+    (year.to_string(), sub.to_string())
+}
+
+/// Vacation's title and sub line: "2026/27" / "Holiday year · 1 Sep – 31
+/// Aug" for the year earning now, else "2025/26" / "Holiday year · use by
+/// 31 Dec 2026".
+pub fn holiday_year_title(year: HolidayYear, today: NaiveDate) -> (String, String) {
+    let sub = if year == HolidayYear::containing(today) {
+        "Holiday year · 1 Sep – 31 Aug".to_string()
+    } else {
+        format!(
+            "Holiday year · use by {}",
+            year.use_by().format("%-d %b %Y")
+        )
+    };
+    (year.to_string(), sub)
+}
+
+/// The periods of the other pages, kept while the app runs, like Hours'.
+#[derive(Clone, Copy)]
+pub struct PagePeriods {
+    pub mileage: Signal<Period>,
+    pub danlon: Signal<Period>,
+    /// Mileage → Fradrag's calendar year.
+    pub fradrag: Signal<i32>,
+    pub vacation: Signal<HolidayYear>,
+}
+
+impl PagePeriods {
+    /// This month, this year and the holiday year earning now.
+    pub fn new(today: NaiveDate) -> Self {
+        PagePeriods {
+            mileage: Signal::new(Period::new(today)),
+            danlon: Signal::new(Period::new(today)),
+            fradrag: Signal::new(today.year()),
+            vacation: Signal::new(HolidayYear::containing(today)),
         }
     }
 }
@@ -270,7 +389,7 @@ mod tests {
 
     #[test]
     fn hours_opens_on_this_month() {
-        let p = HoursPeriod::new(d(TODAY));
+        let p = Period::new(d(TODAY));
         assert_eq!(p.view, View::Month);
         assert_eq!(p.anchor, d("2026-11-01"));
         assert!(p.is_current(d(TODAY)));
@@ -283,8 +402,8 @@ mod tests {
     #[test]
     fn day_opens_on_today_and_the_arrows_step_days() {
         let today = d(TODAY);
-        let p = HoursPeriod::new(today).pick(View::Day, today);
-        assert_eq!(p, HoursPeriod::day(today));
+        let p = Period::new(today).pick(View::Day, today);
+        assert_eq!(p, Period::day(today));
         assert!(p.is_current(today));
         assert_eq!(
             p.title(today),
@@ -299,16 +418,13 @@ mod tests {
         );
         assert_eq!(back.today(today), p);
         // A day across the month and the year.
-        assert_eq!(
-            HoursPeriod::day(d("2026-12-31")).step(1).anchor,
-            d("2027-01-01")
-        );
+        assert_eq!(Period::day(d("2026-12-31")).step(1).anchor, d("2027-01-01"));
     }
 
     #[test]
     fn the_arrows_step_weeks_and_months() {
         let today = d(TODAY);
-        let week = HoursPeriod::new(today).pick(View::Week, today);
+        let week = Period::new(today).pick(View::Week, today);
         assert_eq!(week.anchor, d("2026-11-23"));
         assert_eq!(
             week.title(today),
@@ -319,33 +435,74 @@ mod tests {
         assert!(!prev.is_current(today));
         assert_eq!(prev.today(today), week);
 
-        let month = HoursPeriod::new(today).step(-1);
+        let month = Period::new(today).step(-1);
         assert_eq!(month.month(), month_of(d("2026-10-01")));
         assert_eq!(month.title(today), ("October 2026".into(), String::new()));
-        assert_eq!(HoursPeriod::new(today).step(2).anchor, d("2027-01-01"));
-        assert_eq!(month.today(today), HoursPeriod::new(today));
+        assert_eq!(Period::new(today).step(2).anchor, d("2027-01-01"));
+        assert_eq!(month.today(today), Period::new(today));
     }
 
     #[test]
     fn switching_view_keeps_the_period() {
         let today = d(TODAY);
         // Another month: its first day, its first week.
-        let oct = HoursPeriod::new(today).step(-1);
+        let oct = Period::new(today).step(-1);
         assert_eq!(oct.pick(View::Day, today).anchor, d("2026-10-01"));
         assert_eq!(oct.pick(View::Week, today).anchor, d("2026-10-05"));
         assert_eq!(oct.pick(View::Week, today).pick(View::Month, today), oct);
         // Another week: its Monday; a day: its week and month.
-        let w47 = HoursPeriod::day(d("2026-11-19"));
+        let w47 = Period::day(d("2026-11-19"));
         assert_eq!(w47.pick(View::Week, today).anchor, d("2026-11-16"));
         assert_eq!(
             w47.pick(View::Week, today).pick(View::Day, today).anchor,
             d("2026-11-16")
         );
-        assert_eq!(w47.pick(View::Month, today), HoursPeriod::new(today));
+        assert_eq!(w47.pick(View::Month, today), Period::new(today));
         // This week to Day: today.
-        let this_week = HoursPeriod::new(today).pick(View::Week, today);
-        assert_eq!(this_week.pick(View::Day, today), HoursPeriod::day(today));
+        let this_week = Period::new(today).pick(View::Week, today);
+        assert_eq!(this_week.pick(View::Day, today), Period::day(today));
         // The same view changes nothing.
         assert_eq!(w47.pick(View::Day, today), w47);
+    }
+
+    #[test]
+    fn a_week_holds_its_days_and_months() {
+        let today = d(TODAY);
+        let month = Period::new(today);
+        assert_eq!(month.days(), (d("2026-11-01"), d("2026-11-30")));
+        assert_eq!(month.months(), (month_of(d("2026-11-01")), None));
+        // Week 49 runs into December: both months' data are needed.
+        let w49 = month.pick(View::Week, today).step(1);
+        assert_eq!(w49.days(), (d("2026-11-30"), d("2026-12-06")));
+        assert_eq!(
+            w49.months(),
+            (month_of(d("2026-11-01")), Some(month_of(d("2026-12-01"))))
+        );
+        assert!(w49.contains(d("2026-12-06")));
+        assert!(!w49.contains(d("2026-11-29")));
+        assert!(!w49.contains(d("2026-12-07")));
+        // Week · Month only: Week comes back to the same month.
+        assert_eq!(w49.pick(View::Month, today), month);
+    }
+
+    #[test]
+    fn year_pages_title_their_years() {
+        let today = d(TODAY);
+        assert_eq!(
+            calendar_year_title(2026, today),
+            ("2026".into(), "Calendar year · so far".into())
+        );
+        assert_eq!(
+            calendar_year_title(2025, today),
+            ("2025".into(), "Calendar year".into())
+        );
+        assert_eq!(
+            holiday_year_title(HolidayYear(2026), today),
+            ("2026/27".into(), "Holiday year · 1 Sep – 31 Aug".into())
+        );
+        assert_eq!(
+            holiday_year_title(HolidayYear(2025), today),
+            ("2025/26".into(), "Holiday year · use by 31 Dec 2026".into())
+        );
     }
 }

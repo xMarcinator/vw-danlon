@@ -15,17 +15,27 @@ use vw_danlon::service;
 
 use vw_danlon::trips::Trip;
 
-use super::month::{month_title, step, this_month};
+use super::period::{PagePeriods, Period, PeriodPicker, WEEK_MONTH};
 use crate::setup::Setup;
 use crate::{Icon, Screen};
 
-/// The trips and the calendar from 1 January through the month, fetched
-/// off the UI thread.
-async fn load(cfg: Config, month: Month) -> Result<(Vec<Trip>, Vec<Occurrence>), String> {
+/// A month's trips and calendar, from 1 January through the month.
+struct Loaded {
+    month: Month,
+    trips: Vec<Trip>,
+    cal: Vec<Occurrence>,
+}
+
+/// Fetched off the UI thread.
+async fn load(cfg: Config, month: Month) -> Result<Loaded, String> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let trips = service::load_trips(&cfg, None, month)?;
         let cal = service::calendar(&cfg, month, service::CalendarMode::Cached)?;
-        Ok((trips, cal.occurrences))
+        Ok(Loaded {
+            month,
+            trips,
+            cal: cal.occurrences,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -113,7 +123,9 @@ pub(super) async fn copy(text: String) -> bool {
 
 #[component]
 pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
-    let mut month = use_signal(|| this_month(&setup.peek()));
+    // The week or month shown, kept while the app runs.
+    let mut period = use_context::<PagePeriods>().danlon;
+    let months = use_memo(move || period().months());
     let mut show = use_signal(|| Show::ToEnter);
     // Bumped after a tick so the list rereads the state file.
     let mut ticks = use_signal(|| 0u32);
@@ -123,7 +135,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
     let loaded = use_resource(move || {
         let _ = cal_sync.read().version;
-        let m = month();
+        let m = months().0;
         let cfg = setup.read().config.clone();
         async move {
             match cfg {
@@ -132,35 +144,38 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
     });
+    // The week's second month, when its Sunday is in the next one.
+    let loaded2 = use_resource(move || {
+        let _ = cal_sync.read().version;
+        let m = months().1;
+        let cfg = setup.read().config.clone();
+        async move {
+            match (cfg, m) {
+                (Some(cfg), Some(m)) => Some(load(cfg, m).await),
+                _ => None,
+            }
+        }
+    });
     let Some(cfg) = setup.read().config.clone() else {
         return rsx! {};
     };
-    let m = month();
+    let selected = period();
+    let (m, m2) = months();
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
     let head = rsx! {
-        div { class: "screen-head",
-            div { class: "month-nav",
-                button {
-                    class: "nav-btn",
-                    "aria-label": "Previous month",
-                    onclick: move |_| {
-                        message.set(None);
-                        menu.set(None);
-                        month.set(step(m, -1));
-                    },
-                    Icon { d: "m15 6-6 6 6 6", size: 18 }
-                }
-                h2 { class: "month-title", "{month_title(m)}" }
-                button {
-                    class: "nav-btn",
-                    "aria-label": "Next month",
-                    onclick: move |_| {
-                        message.set(None);
-                        menu.set(None);
-                        month.set(step(m, 1));
-                    },
-                    Icon { d: "m9 6 6 6-6 6", size: 18 }
-                }
+        div { class: "period-head",
+            PeriodPicker {
+                period: selected,
+                today,
+                views: WEEK_MONTH.to_vec(),
+                on_change: move |next: Period| {
+                    message.set(None);
+                    menu.set(None);
+                    period.set(next);
+                },
             }
+        }
+        div { class: "screen-head",
             span { class: "note grow", "Nothing is sent from here" }
             button {
                 class: "small-btn primary-sm",
@@ -173,52 +188,65 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
     };
-    let loaded = loaded.read();
-    let (trips, cal) = match &*loaded {
-        None => {
-            return rsx! {
-                {head}
-                p { class: "placeholder", role: "status", "Loading {month_title(m)}…" }
-            };
-        }
-        Some(Err(e)) => {
-            return rsx! {
-                {head}
-                div { class: "alert", role: "alert",
-                    span { "aria-hidden": "true", style: "font-weight: 700", "!" }
-                    div {
-                        b { "The checklist can't be shown: " }
-                        "{e} "
-                        button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
-                    }
+    let name = selected.name();
+    let failed = |e: &str| {
+        rsx! {
+            {head.clone()}
+            div { class: "alert", role: "alert",
+                span { "aria-hidden": "true", style: "font-weight: 700", "!" }
+                div {
+                    b { "The checklist can't be shown: " }
+                    "{e} "
+                    button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
                 }
-            };
+            }
         }
-        Some(Ok(l)) => l,
+    };
+    let loading = || {
+        rsx! {
+            {head.clone()}
+            p { class: "placeholder", role: "status", "Loading {name}…" }
+        }
+    };
+    let loaded = loaded.read();
+    let l = match &*loaded {
+        Some(Ok(l)) if l.month == m => l,
+        Some(Err(e)) => return failed(e),
+        _ => return loading(),
+    };
+    let loaded2 = loaded2.read();
+    let l2 = match (&*loaded2, m2) {
+        (_, None) => None,
+        (Some(Some(Ok(l))), Some(m2)) if l.month == m2 => Some(l),
+        (Some(Some(Err(e))), Some(_)) => return failed(e),
+        _ => return loading(),
     };
     let _ = ticks();
-    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-    let view = match service::checklist_view(&cfg, m, trips, cal, today) {
-        Ok(v) => v,
-        Err(e) => {
-            return rsx! {
-                {head}
-                div { class: "alert", role: "alert", "{e:#}" }
-            };
+    // Each month's checklist as the month computes it, then the period's
+    // days of them.
+    let mut all_days: Vec<ChecklistDay> = Vec::new();
+    let mut entered = BTreeSet::new();
+    for l in std::iter::once(l).chain(l2) {
+        match service::checklist_view(&cfg, l.month, &l.trips, &l.cal, today) {
+            Ok(v) => {
+                all_days.extend(v.days.into_iter().filter(|d| selected.contains(d.date)));
+                entered = v.entered;
+            }
+            Err(e) => {
+                return rsx! {
+                    {head}
+                    div { class: "alert", role: "alert", "{e:#}" }
+                };
+            }
         }
-    };
-    let p = checklist::progress(&view.days, &view.entered);
+    }
+    let p = checklist::progress(&all_days, &entered);
     let pct = if p.days_total > 0 {
         p.days_done as f64 / p.days_total as f64 * 100.0
     } else {
         0.0
     };
-    let count = |s: Show| {
-        view.days
-            .iter()
-            .filter(|d| s.includes(d, &view.entered))
-            .count()
-    };
+    let count = |s: Show| all_days.iter().filter(|d| s.includes(d, &entered)).count();
     let tabs = [
         (
             Show::ToEnter,
@@ -228,18 +256,16 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         (Show::All, "All".to_string()),
     ];
     let current = show();
-    let next = view
-        .days
+    let next = all_days
         .iter()
-        .find(|d| d.status == Status::ToEnter && !view.entered.contains(&d.date))
+        .find(|d| d.status == Status::ToEnter && !entered.contains(&d.date))
         .map(|d| d.date);
-    let shown: Vec<(ChecklistDay, bool)> = view
-        .days
+    let shown: Vec<(ChecklistDay, bool)> = all_days
         .iter()
-        .filter(|d| current.includes(d, &view.entered))
-        .map(|d| (d.clone(), view.entered.contains(&d.date)))
+        .filter(|d| current.includes(d, &entered))
+        .map(|d| (d.clone(), entered.contains(&d.date)))
         .collect();
-    let days = view.days.clone();
+    let days = all_days.clone();
 
     rsx! {
         {head}
@@ -289,7 +315,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             if shown.is_empty() {
                 p { class: "empty",
                     match current {
-                        Show::ToEnter => format!("Nothing left to enter for {}.", month_title(m)),
+                        Show::ToEnter => format!("Nothing left to enter for {name}."),
                         Show::Entered => "No days ticked off yet.".to_string(),
                         Show::All => "No days.".to_string(),
                     }

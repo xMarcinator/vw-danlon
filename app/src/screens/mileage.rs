@@ -5,16 +5,20 @@
 //! on the desktop, shared on Android). Without a `[mileage]` section it sets
 //! one up.
 
+use chrono::Datelike;
 use dioxus::prelude::*;
 use vw_danlon::calendar::Occurrence;
 use vw_danlon::config::Config;
-use vw_danlon::mileage::{self, Driven, MileageMonth, Reason, Status};
+use vw_danlon::mileage::{self, Driven, Entry, MileageMonth, Reason, Status};
 use vw_danlon::month::Month;
 use vw_danlon::service;
 use vw_danlon::trips::Trip;
 
 use super::kroner;
-use super::month::{month_title, step, this_month};
+use super::month::month_title;
+use super::period::{
+    PagePeriods, Period, PeriodPicker, View, WEEK_MONTH, YearBar, calendar_year_title,
+};
 use crate::setup::{self, MileageForm, Setup};
 use crate::{Icon, Screen};
 
@@ -46,31 +50,92 @@ fn rate(v: f64) -> String {
     format!("{v:.2}").replace('.', ",")
 }
 
-/// What the logbook is built from, loaded off the UI thread: the trips and
-/// the calendar from 1 January through the month, and the year's
-/// befordringsfradrag estimate when it can be made.
+/// What a month's logbook is built from, loaded off the UI thread: the
+/// trips and the calendar from 1 January through the month.
 struct Loaded {
+    month: Month,
     trips: Vec<Trip>,
     cal: Vec<Occurrence>,
-    fradrag: Option<mileage::Fradrag>,
 }
 
 async fn load(cfg: Config, month: Month) -> Result<Loaded, String> {
     tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let trips = service::load_trips(&cfg, None, month)?;
         let cal = service::calendar(&cfg, month, service::CalendarMode::Cached)?;
-        let today = super::now(&cfg).date_naive();
-        // Information only: without home and workplace there is none.
-        let fradrag = service::fradrag(&cfg, month.year, today, service::CalendarMode::Cached).ok();
         Ok(Loaded {
+            month,
             trips,
             cal: cal.occurrences,
-            fradrag,
         })
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| format!("{e:#}"))
+}
+
+/// The year's befordringsfradrag estimate, when it can be made: without
+/// home and workplace there is none (it is information only).
+async fn load_fradrag(cfg: Config, year: i32) -> Option<mileage::Fradrag> {
+    tokio::task::spawn_blocking(move || {
+        let today = super::now(&cfg).date_naive();
+        service::fradrag(&cfg, year, today, service::CalendarMode::Cached).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The trips of the period shown: the month's, or the week's from its one
+/// or two months, each month computed as the monthly logbook computes it.
+#[derive(Default)]
+struct Shown {
+    entries: Vec<Entry>,
+    driving: Vec<Driven>,
+    skipped: Vec<(Trip, Status)>,
+}
+
+impl Shown {
+    fn of(months: &[&MileageMonth], period: &Period) -> Self {
+        let mut shown = Shown::default();
+        for m in months {
+            let within =
+                |start: &chrono::DateTime<chrono_tz::Tz>| period.contains(start.date_naive());
+            shown
+                .entries
+                .extend(m.entries.iter().filter(|e| within(&e.start)).cloned());
+            shown
+                .driving
+                .extend(m.driving.iter().filter(|d| within(&d.trip.start)).cloned());
+            shown
+                .skipped
+                .extend(m.skipped.iter().filter(|(t, _)| within(&t.start)).cloned());
+        }
+        shown
+    }
+
+    fn total_km(&self) -> f64 {
+        self.entries.iter().map(|e| e.km).fold(0.0, |a, b| a + b)
+    }
+
+    fn total_amount(&self) -> f64 {
+        self.entries
+            .iter()
+            .map(Entry::amount)
+            .fold(0.0, |a, b| a + b)
+    }
+}
+
+/// Business km in the year of `last` (the period's last month) up to the
+/// end of the period: the low-rate bar.
+fn year_km(last: &MileageMonth, period: &Period) -> f64 {
+    let end = period.days().1;
+    last.km_before
+        + last
+            .entries
+            .iter()
+            .filter(|e| e.start.date_naive() <= end)
+            .map(|e| e.km)
+            .fold(0.0, |a, b| a + b)
 }
 
 /// Which list the Mileage screen shows.
@@ -84,7 +149,6 @@ enum Tab {
 /// The year's commuting days by month, newest first: (month, days, notes
 /// on the days not counted).
 fn fradrag_months(f: &mileage::Fradrag) -> Vec<(Month, usize, String)> {
-    use chrono::Datelike;
     let month_of = |d: &chrono::NaiveDate| Month {
         year: d.year(),
         month: d.month(),
@@ -163,7 +227,7 @@ fn reason_text(r: &Reason) -> (&'static str, &'static str) {
 
 /// The km not reimbursed by rule, in the order first met: (rule, trips,
 /// km). The trips that need fixing are listed on their own.
-fn not_reimbursed(m: &MileageMonth) -> Vec<(Reason, usize, f64)> {
+fn not_reimbursed(m: &Shown) -> Vec<(Reason, usize, f64)> {
     let mut out: Vec<(Reason, usize, f64)> = Vec::new();
     for d in m.driving.iter().filter(|d| d.private_km() > 0.0) {
         let reason = d.private_reason();
@@ -186,7 +250,7 @@ fn not_reimbursed(m: &MileageMonth) -> Vec<(Reason, usize, f64)> {
 }
 
 /// The trips that need fixing, with why.
-fn to_fix(m: &MileageMonth) -> Vec<(String, &'static str)> {
+fn to_fix(m: &Shown) -> Vec<(String, &'static str)> {
     m.skipped
         .iter()
         .filter_map(|(t, status)| match status {
@@ -218,7 +282,7 @@ struct Row {
     amount: String,
 }
 
-fn rows(m: &MileageMonth, all: bool) -> Vec<Row> {
+fn rows(m: &Shown, all: bool) -> Vec<Row> {
     m.driving
         .iter()
         .filter(|d| all || d.km > 0.0)
@@ -294,7 +358,11 @@ fn save_logbook(_setup: &Setup, cfg: &Config, m: &MileageMonth) -> anyhow::Resul
 
 #[component]
 pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
-    let mut month = use_signal(|| this_month(&setup.peek()));
+    // The week or month shown and Fradrag's year, kept while the app runs.
+    let periods = use_context::<PagePeriods>();
+    let mut period = periods.mileage;
+    let mut fradrag_year = periods.fradrag;
+    let months = use_memo(move || period().months());
     let mut message = use_signal(|| None::<Result<String, String>>);
     let mut printing = use_signal(|| false);
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
@@ -302,12 +370,35 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut copied = use_signal(|| None::<String>);
     let loaded = use_resource(move || {
         let _ = cal_sync.read().version;
-        let m = month();
+        let m = months().0;
         let cfg = setup.read().config.clone();
         async move {
             match cfg {
                 Some(cfg) => load(cfg, m).await,
                 None => Err("no config".to_string()),
+            }
+        }
+    });
+    // The week's second month, when its Sunday is in the next one.
+    let loaded2 = use_resource(move || {
+        let _ = cal_sync.read().version;
+        let m = months().1;
+        let cfg = setup.read().config.clone();
+        async move {
+            match (cfg, m) {
+                (Some(cfg), Some(m)) => Some(load(cfg, m).await),
+                _ => None,
+            }
+        }
+    });
+    let fradrag = use_resource(move || {
+        let _ = cal_sync.read().version;
+        let year = fradrag_year();
+        let cfg = setup.read().config.clone();
+        async move {
+            match cfg {
+                Some(cfg) => load_fradrag(cfg, year).await,
+                None => None,
             }
         }
     });
@@ -317,30 +408,44 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     if cfg.mileage.is_none() {
         return rsx! { MileageSetup { setup } };
     }
-    let m = month();
-    let head = rsx! {
-        div { class: "screen-head",
-            div { class: "month-nav",
-                button {
-                    class: "nav-btn",
-                    "aria-label": "Previous month",
-                    onclick: move |_| {
-                        message.set(None);
-                        printing.set(false);
-                        month.set(step(m, -1));
+    let p = period();
+    let (m, m2) = months();
+    let shown = tab();
+    let today = super::now(&cfg).date_naive();
+    let head = if shown == Tab::Fradrag {
+        let year = fradrag_year();
+        let (title, sub) = calendar_year_title(year, today);
+        rsx! {
+            div { class: "period-head",
+                YearBar {
+                    title,
+                    sub,
+                    unit: "year",
+                    note: "Whole calendar years",
+                    current: year == today.year(),
+                    on_step: move |by: i32| {
+                        copied.set(None);
+                        fradrag_year += by;
                     },
-                    Icon { d: "m15 6-6 6 6 6", size: 18 }
+                    on_today: move |_| {
+                        copied.set(None);
+                        fradrag_year.set(today.year());
+                    },
                 }
-                h2 { class: "month-title", "{month_title(m)}" }
-                button {
-                    class: "nav-btn",
-                    "aria-label": "Next month",
-                    onclick: move |_| {
+            }
+        }
+    } else {
+        rsx! {
+            div { class: "period-head",
+                PeriodPicker {
+                    period: p,
+                    today,
+                    views: WEEK_MONTH.to_vec(),
+                    on_change: move |next: Period| {
                         message.set(None);
                         printing.set(false);
-                        month.set(step(m, 1));
+                        period.set(next);
                     },
-                    Icon { d: "m9 6 6 6-6 6", size: 18 }
                 }
             }
         }
@@ -358,36 +463,61 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         };
     }
     let mut reload = loaded;
-    let loaded = loaded.read();
-    let (trips, cal, fradrag) = match &*loaded {
-        None => {
-            return rsx! {
-                {head}
-                p { class: "placeholder", role: "status", "Loading {month_title(m)}…" }
-            };
-        }
-        Some(Err(e)) => {
-            return rsx! {
-                {head}
-                div { class: "alert", role: "alert",
-                    span { "aria-hidden": "true", style: "font-weight: 700", "!" }
-                    div {
-                        b { "The logbook can't be shown: " }
-                        "{e} "
-                        button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
-                    }
+    let mut reload2 = loaded2;
+    let failed = |e: &str| {
+        rsx! {
+            {head.clone()}
+            div { class: "alert", role: "alert",
+                span { "aria-hidden": "true", style: "font-weight: 700", "!" }
+                div {
+                    b { "The logbook can't be shown: " }
+                    "{e} "
+                    button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
                 }
-            };
+            }
         }
-        Some(Ok(l)) => (&l.trips, &l.cal, &l.fradrag),
     };
-    let mil = match service::mileage_for(&cfg, m, trips, cal) {
-        Ok(Some(mil)) => mil,
-        Ok(None) => return rsx! {},
+    let loading = || {
+        rsx! {
+            {head.clone()}
+            p { class: "placeholder", role: "status", "Loading {p.name()}…" }
+        }
+    };
+    let loaded = loaded.read();
+    let l = match &*loaded {
+        Some(Ok(l)) if l.month == m => l,
+        Some(Err(e)) => return failed(e),
+        _ => return loading(),
+    };
+    let loaded2 = loaded2.read();
+    let l2 = match (&*loaded2, m2) {
+        (_, None) => None,
+        (Some(Some(Ok(l))), Some(m2)) if l.month == m2 => Some(l),
+        (Some(Some(Err(e))), Some(_)) => return failed(e),
+        _ => return loading(),
+    };
+    let cal = &l.cal;
+    let compute = |l: &Loaded| match service::mileage_for(&cfg, l.month, &l.trips, &l.cal) {
+        Ok(Some(mil)) => Ok(mil),
+        Ok(None) => Err("no [mileage] section".to_string()),
+        Err(e) => Err(format!("{e:#}")),
+    };
+    // The month's logbook: what the CSV and the print hold.
+    let mil = match compute(l) {
+        Ok(mil) => mil,
         Err(e) => {
             return rsx! {
                 {head}
-                div { class: "alert", role: "alert", "{e:#}" }
+                div { class: "alert", role: "alert", "{e}" }
+            };
+        }
+    };
+    let mil2 = match l2.map(compute).transpose() {
+        Ok(mil2) => mil2,
+        Err(e) => {
+            return rsx! {
+                {head}
+                div { class: "alert", role: "alert", "{e}" }
             };
         }
     };
@@ -405,22 +535,26 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         };
     }
-    let year_km = mil.km_year_to_date();
-    let threshold = mil.rate.threshold_km;
+    let mut parts = vec![&mil];
+    parts.extend(mil2.as_ref());
+    let last = parts[parts.len() - 1];
+    let period_trips = Shown::of(&parts, &p);
+    let year_km = year_km(last, &p);
+    let threshold = last.rate.threshold_km;
     let low_km = year_km.min(threshold);
     let pct = if threshold > 0.0 {
         (low_km / threshold * 100.0).clamp(0.0, 100.0)
     } else {
         100.0
     };
-    let shown = tab();
     let show_all = shown == Tab::All;
-    let rows = rows(&mil, show_all);
-    let skipped = not_reimbursed(&mil);
-    let fix = to_fix(&mil);
+    let rows = rows(&period_trips, show_all);
+    let skipped = not_reimbursed(&period_trips);
+    let fix = to_fix(&period_trips);
     let skipped_trips: usize = skipped.iter().map(|(_, n, _)| n).sum();
-    let skipped_km: f64 = skipped.iter().map(|(_, _, k)| k).sum();
-    let today = super::now(&cfg).date_naive();
+    let skipped_km: f64 = skipped.iter().map(|(_, _, k)| k).fold(0.0, |a, b| a + b);
+    let name = p.name();
+    let month_name = month_title(m);
     let tabs = move |class: &'static str| {
         rsx! {
             div { class: "{class}", role: "tablist", "aria-label": "Show",
@@ -453,6 +587,9 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             Err(e) => message.set(Some(Err(format!("{e:#}")))),
         }
         reload.restart();
+        if m2.is_some() {
+            reload2.restart();
+        }
     };
 
     let workplace = service::effective_workplace(&cfg, cal, m);
@@ -495,19 +632,22 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         }
         {tabs("mileage-tabs narrow-only")}
         if shown == Tab::Fradrag {
-            {fradrag_view(fradrag.as_ref(), m.year, today, copied, tabs("seg-tabs wide-only"))}
+            match &*fradrag.read() {
+                None => rsx! { p { class: "placeholder", role: "status", "Loading {fradrag_year}…" } },
+                Some(f) => fradrag_view(f.as_ref(), fradrag_year(), today, copied, tabs("seg-tabs wide-only")),
+            }
         } else {
         div { class: "kpis mileage-kpis",
             section { class: "kpi",
-                h2 { "This month" }
-                span { class: "kpi-value", "{kroner(mil.total_amount())}" }
+                h2 { if p.view == View::Week { "This week" } else { "This month" } }
+                span { class: "kpi-value", "{kroner(period_trips.total_amount())}" }
                 span { class: "kpi-sub",
-                    "{km(mil.total_km())} km · {trips_text(mil.entries.len())}"
+                    "{km(period_trips.total_km())} km · {trips_text(period_trips.entries.len())}"
                 }
             }
             section { class: "kpi span2",
                 div { class: "kpi-row",
-                    h2 { "Business km in {m.year}" }
+                    h2 { "Business km in {last.month.year}" }
                     span { class: "small",
                         b { "{km(low_km)}" }
                         " of {whole_km(threshold)} km at the low rate"
@@ -523,7 +663,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     div { class: "bar-fill", style: "width: {pct:.1}%" }
                 }
                 span { class: "kpi-sub",
-                    "{rate(mil.rate.low)} kr/km to {whole_km(threshold)} km, then {rate(mil.rate.high)}"
+                    "{rate(last.rate.low)} kr/km to {whole_km(threshold)} km, then {rate(last.rate.high)}"
                 }
             }
         }
@@ -538,9 +678,9 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             if rows.is_empty() {
                 p { class: "empty",
                     if show_all {
-                        "No driving in {month_title(m)}."
+                        "No driving in {name}."
                     } else {
-                        "No reimbursable trips in {month_title(m)}."
+                        "No reimbursable trips in {name}."
                     }
                 }
             } else {
@@ -598,9 +738,9 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                             }
                             tr { class: "total",
                                 td { colspan: "6", "Total" }
-                                td { class: "r", "{km(mil.total_km())}" }
+                                td { class: "r", "{km(period_trips.total_km())}" }
                                 td {}
-                                td { class: "r", "{kroner(mil.total_amount()).trim_end_matches(\" kr\")}" }
+                                td { class: "r", "{kroner(period_trips.total_amount()).trim_end_matches(\" kr\")}" }
                             }
                         }
                     }
@@ -684,7 +824,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     message.set(Some(result));
                 },
                 Icon { d: CSV_ICON, size: 15 }
-                "Logbook CSV"
+                "Logbook CSV · {month_name}"
             }
             button {
                 class: "small-btn primary-sm",
@@ -693,7 +833,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     printing.set(true);
                 },
                 Icon { d: PRINT_ICON, size: 15 }
-                "Print for signature"
+                "Print {month_name} for signature"
             }
         }
     }
@@ -908,6 +1048,72 @@ fn MileageSetup(setup: Signal<Setup>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn month(year: i32, month: u32, km_before: f64, trips: &[(&str, f64)]) -> MileageMonth {
+        use chrono::TimeZone;
+        let tz = chrono_tz::Europe::Copenhagen;
+        MileageMonth {
+            month: Month { year, month },
+            rate: vw_danlon::config::MileageRate {
+                year,
+                low: 4.0,
+                high: 2.0,
+                threshold_km: 20_000.0,
+            },
+            km_before,
+            entries: trips
+                .iter()
+                .map(|(day, km)| {
+                    let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap();
+                    Entry {
+                        start: tz
+                            .from_local_datetime(&date.and_hms_opt(8, 0, 0).unwrap())
+                            .unwrap(),
+                        from: "Home".into(),
+                        to: "Client".into(),
+                        via: Vec::new(),
+                        purpose: "Client".into(),
+                        km: *km,
+                        rate: 4.0,
+                    }
+                })
+                .collect(),
+            skipped: Vec::new(),
+            driving: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_week_shows_its_trips_from_both_months() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 26).unwrap();
+        let nov = month(
+            2026,
+            11,
+            1000.0,
+            &[("2026-11-02", 10.0), ("2026-11-30", 20.0)],
+        );
+        let dec = month(
+            2026,
+            12,
+            1030.0,
+            &[("2026-12-06", 30.0), ("2026-12-07", 40.0)],
+        );
+        // Week 49: Monday 30 Nov – Sunday 6 Dec.
+        let w49 = Period::new(today).pick(View::Week, today).step(1);
+        let shown = Shown::of(&[&nov, &dec], &w49);
+        assert_eq!(shown.entries.len(), 2);
+        assert_eq!(shown.total_km(), 50.0);
+        assert_eq!(shown.total_amount(), 200.0);
+        // The year's km up to the Sunday.
+        assert_eq!(year_km(&dec, &w49), 1060.0);
+        // An empty week reads 0, not -0 (a float sum starts at -0.0).
+        let empty = Shown::of(&[&nov, &dec], &w49.step(2));
+        assert!(empty.total_km().is_sign_positive() && empty.total_amount().is_sign_positive());
+        // The month view is the whole month, as before.
+        let month_view = Period::new(today);
+        assert_eq!(Shown::of(&[&nov], &month_view).total_km(), 30.0);
+        assert_eq!(year_km(&nov, &month_view), nov.km_year_to_date());
+    }
 
     #[test]
     fn km_and_rates_read_like_the_mockup() {

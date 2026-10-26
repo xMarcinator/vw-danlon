@@ -1,28 +1,38 @@
 //! The Vacation screen: the open holiday years' balances, the feriefridage,
-//! days about to expire and every vacation period with the year it draws
-//! from, as `vacation` prints them.
+//! days about to expire and the chosen holiday year's vacation periods with
+//! the year each draws from, as `vacation` prints them. A closed holiday
+//! year is shown as it stood on its use-by date.
 
 use chrono::NaiveDate;
 use dioxus::prelude::*;
 use vw_danlon::config::Config;
 use vw_danlon::service::{self, VacationView};
-use vw_danlon::vacation::{Days, Period, PeriodStatus, Rules, YearBalance};
+use vw_danlon::vacation::{Days, HolidayYear, Period, PeriodStatus, Rules, YearBalance};
 
+use super::period::{PagePeriods, YearBar, holiday_year_title};
 use crate::setup::Setup;
 
 fn date(d: NaiveDate) -> String {
     d.format("%-d %b %Y").to_string()
 }
 
-/// The overview, fetched off the UI thread.
-async fn load(cfg: Config) -> Result<VacationView, String> {
-    tokio::task::spawn_blocking(move || {
-        let today = super::now(&cfg).date_naive();
-        service::vacation(&cfg, today, service::CalendarMode::Cached)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| format!("{e:#}"))
+/// The day a holiday year is seen from: today, or the use-by date of a
+/// year that is over.
+fn seen_on(year: HolidayYear, today: NaiveDate) -> NaiveDate {
+    today.min(year.use_by())
+}
+
+/// Whether the period falls (partly) in the holiday year, 1 Sep – 31 Aug.
+fn in_year(p: &Period, year: HolidayYear) -> bool {
+    p.first <= year.last_day() && p.last >= year.first_day()
+}
+
+/// The overview as on `day`, fetched off the UI thread.
+async fn load(cfg: Config, day: NaiveDate) -> Result<VacationView, String> {
+    tokio::task::spawn_blocking(move || service::vacation(&cfg, day, service::CalendarMode::Cached))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// "Concurrent holiday · employed since 1 May 2026 · 2,08 days a month".
@@ -142,13 +152,20 @@ fn quoted(words: &[String]) -> String {
 
 #[component]
 pub fn VacationScreen(setup: Signal<Setup>) -> Element {
+    // The holiday year shown, kept while the app runs.
+    let mut year = use_context::<PagePeriods>().vacation;
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
+    let day = use_memo(move || {
+        let today = super::month::today_of(&setup.read());
+        seen_on(year(), today)
+    });
     let loaded = use_resource(move || {
         let _ = cal_sync.read().version;
+        let day = day();
         let cfg = setup.read().config.clone();
         async move {
             match cfg {
-                Some(cfg) => load(cfg).await,
+                Some(cfg) => load(cfg, day).await.map(|v| (day, v)),
                 None => Err("no config".to_string()),
             }
         }
@@ -156,20 +173,46 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
     let Some(cfg) = setup.read().config.clone() else {
         return rsx! {};
     };
+    let shown = year();
+    let today = super::now(&cfg).date_naive();
+    let this_year = HolidayYear::containing(today);
+    let (title, sub) = holiday_year_title(shown, today);
+    let head = rsx! {
+        div { class: "period-head",
+            YearBar {
+                title,
+                sub,
+                unit: "holiday year",
+                note: "Whole holiday years",
+                current: shown == this_year,
+                on_step: move |by: i32| year.set(HolidayYear(shown.0 + by)),
+                on_today: move |_| year.set(this_year),
+            }
+        }
+    };
     let loaded = loaded.read();
     let v = match &*loaded {
-        None => return rsx! { p { class: "placeholder", role: "status", "Loading the calendar…" } },
+        Some(Ok((on, v))) if *on == day() => v,
         Some(Err(e)) => {
             return rsx! {
+                {head}
                 div { class: "alert", role: "alert",
                     span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                     div { b { "Vacation can't be shown: " } "{e}" }
                 }
             };
         }
-        Some(Ok(v)) => v,
+        _ => {
+            return rsx! {
+                {head}
+                p { class: "placeholder", role: "status", "Loading the calendar…" }
+            };
+        }
     };
+    // Days about to expire matter only as of today.
+    let as_of_today = day() == today;
     let o = &v.overview;
+    let periods: Vec<&Period> = o.periods.iter().filter(|p| in_year(p, shown)).collect();
     let mut cards: Vec<(String, String, String)> = o.years.iter().map(year_card).collect();
     let taken: i64 = o.years.iter().map(|y| y.taken.0).sum();
     let planned: i64 = o.years.iter().map(|y| y.planned.0).sum();
@@ -189,11 +232,15 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
     let fridag = quoted(&cfg.vacation.feriefridag_keywords);
 
     rsx! {
+        {head}
         span { class: "sub", "{rules_line(&v.rules)}" }
+        if !as_of_today {
+            span { class: "note", "As on {date(day())}, when the {shown} days could last be used." }
+        }
         if let Some(w) = &v.calendar_warning {
             div { class: "alert", role: "status", "{w}" }
         }
-        for e in o.expiring.iter() {
+        for e in o.expiring.iter().filter(|_| as_of_today) {
             div { class: "alert", role: "alert",
                 span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                 span {
@@ -217,11 +264,11 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
                     h2 { id: "v-list", "Holidays" }
                     span { class: "note", "oldest days are used first" }
                 }
-                if o.periods.is_empty() {
-                    p { class: "empty", "No vacation in the calendar." }
+                if periods.is_empty() {
+                    p { class: "empty", "No vacation in {shown} in the calendar." }
                 }
                 ul { class: "plain-list",
-                    for p in o.periods.iter() {
+                    for p in periods {
                         li { class: "period",
                             span { class: "period-text",
                                 b { "{p.title}" }
@@ -264,6 +311,31 @@ mod tests {
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn a_holiday_year_is_seen_on_today_or_its_use_by_date() {
+        let today = d("2026-11-26");
+        assert_eq!(seen_on(HolidayYear(2026), today), today);
+        assert_eq!(seen_on(HolidayYear(2025), today), today);
+        assert_eq!(seen_on(HolidayYear(2024), today), d("2025-12-31"));
+        let p = |first: &str, last: &str| Period {
+            kind: LeaveKind::Ferie,
+            title: "Ferie".into(),
+            first: d(first),
+            last: d(last),
+            working_days: 1,
+            status: PeriodStatus::Planned,
+            draws: Vec::new(),
+            forskud: false,
+            before_employment: Days(0),
+            feriefridage_left: None,
+        };
+        assert!(in_year(&p("2026-09-01", "2026-09-01"), HolidayYear(2026)));
+        assert!(!in_year(&p("2026-08-31", "2026-08-31"), HolidayYear(2026)));
+        // Across 1 September: in both years.
+        let across = p("2027-08-30", "2027-09-03");
+        assert!(in_year(&across, HolidayYear(2026)) && in_year(&across, HolidayYear(2027)));
     }
 
     #[test]

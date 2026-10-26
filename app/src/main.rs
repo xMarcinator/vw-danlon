@@ -76,14 +76,6 @@ impl Screen {
         }
     }
 
-    fn title(self) -> &'static str {
-        match self {
-            Screen::Mileage => "Mileage logbook",
-            Screen::Danlon => "Danløn app checklist",
-            s => s.label(),
-        }
-    }
-
     pub fn icon(self) -> &'static str {
         match self {
             Screen::Month => "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4",
@@ -180,15 +172,15 @@ fn App() -> Element {
     let trip_sync = use_context_provider(|| Signal::new(screens::TripSync::default()));
     use_future(move || screens::sync_trips_now_and_then(setup, trip_sync));
     let resumed = use_context_provider(|| Signal::new(screens::Resumed::default()));
-    // Hours' period: kept while the app runs, across the tabs.
-    use_context_provider(|| {
-        Signal::new(screens::period::HoursPeriod::new(screens::month::today_of(
-            &setup.peek(),
-        )))
-    });
+    // Each page's period: kept while the app runs, across the tabs.
+    let today = screens::month::today_of(&setup.peek());
+    use_context_provider(|| Signal::new(screens::period::Period::new(today)));
+    use_context_provider(|| screens::period::PagePeriods::new(today));
     use_future(move || screens::watch_resume(resumed));
     let theme = setup.read().settings.theme;
     let current = screen();
+    // The data pages start with the period selector, not a heading.
+    let headed = current == Screen::Settings;
 
     rsx! {
         document::Stylesheet { href: CSS }
@@ -196,12 +188,12 @@ fn App() -> Element {
         div { class: "app", "data-theme": theme.id(),
             Sidebar { screen, setup }
             div { class: "main-col",
-                header { class: if current == Screen::Month { "topbar hidden" } else { "topbar" },
-                    h1 { "{current.title()}" }
+                header { class: if headed { "topbar" } else { "topbar hidden" },
+                    h1 { "{current.label()}" }
                 }
                 main { class: if current == Screen::Month { "content full" } else { "content" },
-                    if current != Screen::Month {
-                        h1 { "{current.title()}" }
+                    if headed {
+                        h1 { "{current.label()}" }
                     }
                     if current == Screen::Settings {
                         settings::Settings { setup, screen }

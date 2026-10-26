@@ -11,8 +11,8 @@ use vw_danlon::mileage::MileageMonth;
 use vw_danlon::month::{Day, Month, OffReason};
 use vw_danlon::service::{PrivateItem, PrivateState, WorkAction, WorkState, WorkToday};
 
-use super::period::{HoursBar, HoursPeriod, View};
-use super::week::{self, in_week, month_of, week_mileage, week_months};
+use super::period::{HOURS_VIEWS, Period, PeriodPicker, View};
+use super::week::{self, in_week, week_mileage, week_months};
 use super::{
     Action, Computed, Loaded, Message, Panel, PrivateList, apply, diff_class, hm, hours, kroner,
     message_for, signed, status, weekday,
@@ -25,10 +25,6 @@ pub(crate) fn today_of(setup: &Setup) -> NaiveDate {
         Some(cfg) => super::now(cfg).date_naive(),
         None => chrono::Local::now().date_naive(),
     }
-}
-
-pub(super) fn this_month(setup: &Setup) -> Month {
-    month_of(today_of(setup))
 }
 
 pub(super) fn step(m: Month, by: i32) -> Month {
@@ -115,7 +111,7 @@ fn today_items(items: &[PrivateItem], today: NaiveDate) -> Vec<PrivateItem> {
 #[component]
 pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     // The day, week or month shown, kept while the app runs.
-    let mut period = use_context::<Signal<HoursPeriod>>();
+    let mut period = use_context::<Signal<Period>>();
     // The month it is loaded from: the day's, the week's Monday's or the
     // month shown.
     let month = use_memo(move || period().month());
@@ -206,7 +202,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     });
     // Another period clears the last private-time message and the open
     // forms.
-    let change = use_callback(move |p: HoursPeriod| {
+    let change = use_callback(move |p: Period| {
         message.set(None);
         adding.set(false);
         sheet.set(None);
@@ -214,7 +210,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         document::eval("document.querySelector('.content')?.scrollTo(0, 0)");
     });
     // A day in the list opens Day on that date.
-    let go = use_callback(move |d: NaiveDate| change.call(HoursPeriod::day(d)));
+    let go = use_callback(move |d: NaiveDate| change.call(Period::day(d)));
     // True when the action was done; a refused one leaves its editor open.
     // It runs with the calendar of the month of the day shown, or of
     // today: the week's second month when that is where it is.
@@ -264,7 +260,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let head = move || {
         rsx! {
             div { class: "period-head",
-                HoursBar { period: p, today: today_now, on_change: change }
+                PeriodPicker { period: p, today: today_now, views: HOURS_VIEWS.to_vec(), on_change: change }
                 button {
                     class: "primary-sm wide-only",
                     onclick: move |_| { let mut sc = screen; sc.set(Screen::Danlon) },
