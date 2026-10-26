@@ -149,9 +149,17 @@ jobs:
           if ! dx --version 2>/dev/null | grep -q "^dioxus $DX_VERSION"; then
             cargo binstall -y --force --locked "dioxus-cli@$DX_VERSION"
           fi
+      # Gradle downloads itself with a 10 s timeout here, which fails now
+      # and then on GitHub's runners: try up to three times.
       - name: Bundle with dx
         working-directory: app
-        run: dx bundle --platform android --release --target aarch64-linux-android --package-types apk
+        run: |
+          for attempt in 1 2 3; do
+            dx bundle --platform android --release --target aarch64-linux-android --package-types apk && exit 0
+            echo "::warning::dx bundle failed (attempt $attempt), retrying"
+            sleep 20
+          done
+          exit 1
       # dx 0.7 packages its Gradle *debug* variant (debuggable, unstripped
       # .so). Patch the generated project and build its release variant.
       - name: Prepare the generated Gradle project
