@@ -341,11 +341,10 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
-            let now = chrono::Utc::now()
-                .with_timezone(&cfg.timezone)
-                .naive_local();
-            print_calendar_time(&service::settle_private(&cfg, &cal, now)?);
-            let report = build_month(&cfg, month, &trips, &cal, today)?;
+            let now = chrono::Utc::now().with_timezone(&cfg.timezone);
+            print_calendar_time(&service::settle_private(&cfg, &cal, now.naive_local())?);
+            note_workplace(&cfg, &cal, month);
+            let report = build_month(&cfg, month, &trips, &cal, now)?;
             print_days(&report, true);
             if let Some(m) = mileage_for(&cfg, month, &trips, &cal)? {
                 print_mileage(&m);
@@ -387,6 +386,7 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = load_trips(&cfg, trips.as_deref(), month)?;
             let cal = calendar(&cfg, month)?;
+            note_workplace(&cfg, &cal, month);
             let m = service::compute_mileage(&cfg, mcfg, month, &trips, &cal)?;
             if all {
                 print_driving(&m);
@@ -979,6 +979,21 @@ fn interval_text(i: &state::PrivateInterval) -> String {
     )
 }
 
+/// A note when the workplace was detected from the calendar, and with
+/// `[mileage]` a warning when there is none.
+fn note_workplace(cfg: &Config, cal: &[Occurrence], month: Month) {
+    match service::effective_workplace(cfg, cal, month) {
+        Some((w, service::WorkplaceSource::Detected)) => eprintln!(
+            "note: fixed workplace detected from the calendar: {w}; set `workplace` in config.toml"
+        ),
+        Some((_, service::WorkplaceSource::Configured)) => {}
+        None if cfg.mileage.is_some() => eprintln!(
+            "warning: no fixed workplace is set and none found in the calendar; every calendar work address counts as a client visit — set `workplace` in config.toml"
+        ),
+        None => {}
+    }
+}
+
 fn create(path: &Path) -> Result<BufWriter<File>> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
     Ok(BufWriter::new(file))
@@ -999,7 +1014,12 @@ fn print_days(r: &MonthReport, with_trips: bool) {
     for d in &r.days {
         let day = timesheet::weekday_da(d.date.weekday());
         let remark = if d.date == r.today {
-            ["◀ today".to_string(), d.remark()]
+            let today = if d.so_far {
+                "◀ today (so far)"
+            } else {
+                "◀ today"
+            };
+            [today.to_string(), d.remark()]
                 .into_iter()
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
@@ -1031,7 +1051,7 @@ fn print_days(r: &MonthReport, with_trips: bool) {
                 d.date,
                 day,
                 planned,
-                d.norm_hours,
+                d.expected_hours,
                 d.periods_text(),
                 lunch,
                 worked,

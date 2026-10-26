@@ -3,11 +3,12 @@
 //! the vacation overview, and the Min Volkswagen account access and sync.
 //! Nothing here prints or prompts; warnings come back as values.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
 use crate::calendar::{self, Occurrence};
@@ -16,7 +17,7 @@ use crate::config::{Config, MileageConfig, PrivateConfig};
 use crate::connected_cars::{self, TokenStore, Vehicle};
 use crate::db;
 use crate::mileage::{self, MileageMonth, Status};
-use crate::month::{self, EntryKind, Month, MonthReport, TimedEntry};
+use crate::month::{self, EntryKind, Month, MonthReport, Span, TimedEntry, Today};
 use crate::state::{
     self, Appointment, EventChoice, IntervalKind, PlannedWindow, PrivateInterval, RunningTimer,
     State,
@@ -212,24 +213,64 @@ fn private_windows(entries: &[TimedEntry]) -> Vec<PlannedWindow> {
         .collect()
 }
 
+/// Where the fixed workplace comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkplaceSource {
+    /// `workplace` in the config.
+    Configured,
+    /// Not configured: the calendar's most frequent work location (see
+    /// [`month::detect_workplace`]).
+    Detected,
+}
+
+/// The fixed workplace for `month`: the configured one, else the one
+/// detected from the calendar in the 60 days up to the month's end. None:
+/// neither, so every calendar work entry with an address is a client
+/// visit.
+pub fn effective_workplace(
+    cfg: &Config,
+    cal: &[Occurrence],
+    month: Month,
+) -> Option<(String, WorkplaceSource)> {
+    match &cfg.workplace {
+        Some(w) => Some((w.clone(), WorkplaceSource::Configured)),
+        None => month::detect_workplace(cfg, cal, month.last_day())
+            .map(|w| (w, WorkplaceSource::Detected)),
+    }
+}
+
+/// `cfg` with the workplace detected for `month` when none is configured
+/// (see [`effective_workplace`]).
+fn with_workplace<'a>(cfg: &'a Config, cal: &[Occurrence], month: Month) -> Cow<'a, Config> {
+    match effective_workplace(cfg, cal, month) {
+        Some((w, WorkplaceSource::Detected)) => Cow::Owned(Config {
+            workplace: Some(w),
+            ..cfg.clone()
+        }),
+        _ => Cow::Borrowed(cfg),
+    }
+}
+
 /// The month's work calendar and norm hours, without trips or the state
 /// file; the totals are the whole month's.
 pub fn norm_month(cfg: &Config, month: Month, cal: &[Occurrence]) -> MonthReport {
     month::build(cfg, month, &[], cal, &State::default(), NaiveDate::MAX)
 }
 
-/// The month's days with totals up to and including `today`, with the
-/// lunch overrides and recorded private and home-working time from the
-/// database.
+/// The month's days with totals up to and including `today` (with the
+/// current time: today so far, see [`Today`]), with the lunch overrides
+/// and recorded private and home-working time from the database, and the
+/// workplace detected from the calendar when none is configured.
 pub fn build_month(
     cfg: &Config,
     month: Month,
     trips: &[Trip],
     cal: &[Occurrence],
-    today: NaiveDate,
+    today: impl Into<Today>,
 ) -> Result<MonthReport> {
     let state = State::load(&cfg.database)?;
-    Ok(month::build(cfg, month, trips, cal, &state, today))
+    let cfg = with_workplace(cfg, cal, month);
+    Ok(month::build(&cfg, month, trips, cal, &state, today))
 }
 
 /// The month's mileage, when the config has a `[mileage]` section.
@@ -247,7 +288,8 @@ pub fn mileage_for(
 
 /// The month's mileage; trips starting during recorded private time are
 /// private, like those during a private appointment, and the trips you set
-/// to business or private count so.
+/// to business or private count so. Without a configured workplace, the
+/// one detected from the calendar is home ↔ work commuting.
 pub fn compute_mileage(
     cfg: &Config,
     mcfg: &MileageConfig,
@@ -256,6 +298,7 @@ pub fn compute_mileage(
     cal: &[Occurrence],
 ) -> Result<MileageMonth> {
     let state = State::load(&cfg.database)?;
+    let cfg = &*with_workplace(cfg, cal, month);
     let entries = trip_entries(cfg, cal, &state);
     mileage::compute(
         mcfg,
@@ -310,12 +353,13 @@ pub fn fradrag(
         .mileage
         .as_ref()
         .context("no [mileage] section in config")?;
+    let december = Month { year, month: 12 };
+    let cal = calendar(cfg, december, mode)?.occurrences;
+    let cfg = &*with_workplace(cfg, &cal, december);
     if mcfg.home.is_none() || cfg.workplace.is_none() {
         anyhow::bail!("the befordringsfradrag needs mileage.home and workplace in the config");
     }
-    let december = Month { year, month: 12 };
     let trips = load_trips(cfg, None, december)?;
-    let cal = calendar(cfg, december, mode)?.occurrences;
     let state = State::load(&cfg.database)?;
     let mut excluded: std::collections::BTreeMap<NaiveDate, &'static str> = Default::default();
     for m in 1..=12 {
@@ -352,6 +396,7 @@ pub fn checklist_days(
     mileage: Option<&MileageMonth>,
     cal: &[Occurrence],
 ) -> Vec<ChecklistDay> {
+    let cfg = &*with_workplace(cfg, cal, report.month);
     checklist::build(cfg, report, trips, mileage, &timed_entries(cfg, cal))
 }
 
@@ -450,12 +495,19 @@ pub struct MonthView {
     pub mileage: Option<MileageMonth>,
     /// Today's and the coming private time.
     pub private: PrivateTime,
+    /// The fixed workplace and where it comes from; none: neither
+    /// configured nor detected.
+    pub workplace: Option<(String, WorkplaceSource)>,
+    /// Where today's work stands, when the month is the current one.
+    pub work: Option<WorkToday>,
 }
 
-/// The month's days and mileage as `report` builds them (calendar time
-/// recorded first, see [`settle_private`]), and the private time from `now`'s day through [`PRIVATE_DAYS_AHEAD`] days later. `cal`
-/// may reach past the month (see [`month_calendar`]); the days and mileage
-/// use only the occurrences up to the month's end, like `report`.
+/// The month's days (today so far at `now`) and mileage as `report`
+/// builds them (calendar time recorded first, see [`settle_private`]), the
+/// private time from `now`'s day through [`PRIVATE_DAYS_AHEAD`] days later,
+/// the workplace, and today's work state in the current month. `cal` may
+/// reach past the month (see [`month_calendar`]); the days and mileage use
+/// only the occurrences up to the month's end, like `report`.
 pub fn month_view(
     cfg: &Config,
     month: Month,
@@ -471,11 +523,12 @@ pub fn month_view(
         .collect();
     let today = now.date_naive();
     settle_private(cfg, cal, now.naive_local())?;
-    let report = build_month(cfg, month, trips, &up_to, today)?;
+    let report = build_month(cfg, month, trips, &up_to, now)?;
     let mileage = mileage_for(cfg, month, trips, &up_to)?;
+    let state = State::load(&cfg.database)?;
     let private = private_time(
         &timed_entries(cfg, cal),
-        &State::load(&cfg.database)?,
+        &state,
         &cfg.private,
         today,
         today + Duration::days(PRIVATE_DAYS_AHEAD),
@@ -485,7 +538,177 @@ pub fn month_view(
         report,
         mileage,
         private,
+        workplace: effective_workplace(cfg, &up_to, month),
+        work: month
+            .contains(today)
+            .then(|| work_today(cfg, &state, cal, trips, now)),
     })
+}
+
+/// Where today's work stands (see [`work_today`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkState {
+    /// Not at work, not working from home and no private time running;
+    /// `late_by` how long since the planned start when it has passed,
+    /// the planned end has not, and nothing was worked yet today.
+    NotWorking { late_by: Option<Duration> },
+    /// At a work address since arriving there (from the trips), without a
+    /// departure yet.
+    AtWork { place: String, since: DateTime<Tz> },
+    /// Working from home: the home-working timer, or a home-working
+    /// calendar event now.
+    Home { since: DateTime<Tz> },
+    /// Private time running: the timer (`auto` false), or a private
+    /// appointment started automatically (`auto` true).
+    Private {
+        label: String,
+        since: DateTime<Tz>,
+        auto: bool,
+    },
+}
+
+/// What the work card offers in a [`WorkState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkAction {
+    /// Start the home-working timer.
+    StartWork,
+    /// Start private time for today's current or next private appointment.
+    PrivateForAppointment,
+    /// Start private time without a calendar event.
+    PrivateWithoutEvent,
+    /// Stop the home-working timer.
+    StopWork,
+    /// Stop the private timer, or the appointment started automatically.
+    StopPrivate,
+}
+
+/// Today at some moment, for the work card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkToday {
+    pub state: WorkState,
+    /// Hours worked so far today (see [`month::Day::worked_hours`]).
+    pub worked: f64,
+    /// Hours expected so far today (see [`month::Day::expected_hours`]).
+    pub expected: f64,
+    /// Today's planned working time (first start, last end).
+    pub planned: Option<Span>,
+    /// The first private appointment that is planned and has not ended,
+    /// from today through [`PRIVATE_DAYS_AHEAD`] days later.
+    pub next_private: Option<PrivateItem>,
+    pub actions: Vec<WorkAction>,
+}
+
+impl WorkToday {
+    /// Worked minus expected hours so far.
+    pub fn difference(&self) -> f64 {
+        self.worked - self.expected
+    }
+}
+
+/// Where today's work stands at `now`: the private time running, else the
+/// home-working timer, else the open period at a work address, else a
+/// home-working calendar event now, else not working. `cal` and `trips`
+/// cover today's month (`cal` may reach further, for the coming private
+/// appointments); without a configured workplace the detected one counts.
+pub fn work_today(
+    cfg: &Config,
+    state: &State,
+    cal: &[Occurrence],
+    trips: &[Trip],
+    now: DateTime<Tz>,
+) -> WorkToday {
+    let today = now.date_naive();
+    let month = Month {
+        year: today.year(),
+        month: today.month(),
+    };
+    let up_to: Vec<Occurrence> = cal
+        .iter()
+        .filter(|o| occurrence_date(o) <= month.last_day())
+        .cloned()
+        .collect();
+    let cfg = &*with_workplace(cfg, &up_to, month);
+    let report = month::build(cfg, month, trips, &up_to, state, now);
+    let day = report
+        .days
+        .iter()
+        .find(|d| d.date == today)
+        .expect("today is in its month");
+    let private = private_time(
+        &timed_entries(cfg, cal),
+        state,
+        &cfg.private,
+        today,
+        today + Duration::days(PRIVATE_DAYS_AHEAD),
+        now.naive_local(),
+    );
+    let local = |t: NaiveDateTime| {
+        cfg.timezone
+            .from_local_datetime(&t)
+            .earliest()
+            .unwrap_or(now)
+    };
+    let running_private = private.items.iter().find_map(|i| match i.state {
+        PrivateState::Running { since } => Some((i.label.clone(), local(since), false)),
+        PrivateState::StartedAutomatically { since } => Some((i.label.clone(), local(since), true)),
+        _ => None,
+    });
+    // A home span running up to now: the timer, or a home-working event.
+    let home_now = day.home.iter().find(|(_, end)| *end == now).map(|s| s.0);
+    let state_now = if let Some((label, since, auto)) = running_private {
+        WorkState::Private { label, since, auto }
+    } else if let Some(r) = &state.home.running {
+        WorkState::Home {
+            since: local(r.start),
+        }
+    } else if let Some((since, place)) = &day.open {
+        WorkState::AtWork {
+            place: place.clone(),
+            since: *since,
+        }
+    } else if let Some(since) = home_now {
+        WorkState::Home { since }
+    } else {
+        let late_by = day
+            .planned
+            .filter(|(start, end)| *start < now && now < *end && day.first_start.is_none())
+            .map(|(start, _)| now - start);
+        WorkState::NotWorking { late_by }
+    };
+    let next_private = private
+        .items
+        .iter()
+        .find(|i| {
+            i.state == PrivateState::Planned
+                && i.planned.is_some_and(|(_, end)| end > now.naive_local())
+        })
+        .cloned();
+    let appointment_today = next_private
+        .as_ref()
+        .and_then(|i| i.planned)
+        .is_some_and(|(start, _)| start.date() == today);
+    let private_actions = || {
+        appointment_today
+            .then_some(WorkAction::PrivateForAppointment)
+            .into_iter()
+            .chain([WorkAction::PrivateWithoutEvent])
+    };
+    let actions = match &state_now {
+        WorkState::NotWorking { .. } => vec![WorkAction::StartWork],
+        WorkState::AtWork { .. } => private_actions().collect(),
+        WorkState::Home { .. } => private_actions()
+            .chain(state.home.running.is_some().then_some(WorkAction::StopWork))
+            .collect(),
+        WorkState::Private { .. } => vec![WorkAction::StopPrivate],
+    };
+    WorkToday {
+        state: state_now,
+        worked: day.worked_hours,
+        expected: day.expected_hours,
+        planned: day.planned,
+        next_private,
+        actions,
+    }
 }
 
 fn occurrence_date(o: &Occurrence) -> NaiveDate {
@@ -1768,6 +1991,202 @@ mod tests {
 
         delete_manual_trip(&cfg, *starts.iter().next().unwrap()).unwrap();
         assert_eq!(manual_trip_starts(&cfg).unwrap().len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The user's setup without `workplace`: home in Silkeborg, `days` office
+    /// days at Lysbrohøjen 3 in the calendar from 2026-10-19.
+    fn no_workplace(name: &str, days: u32) -> (std::path::PathBuf, Config, Vec<Occurrence>) {
+        let dir = crate::trips::tests::temp_dir(name);
+        let cfg = Config::from_text(
+            "employee_number = \"1\"\n[danlon]\nmileage_lonart = \"39\"\n\
+             [calendar]\nsource = \"cal.ics\"\n\
+             [mileage]\ndriver_name = \"T\"\nregistration_number = \"AB1\"\n\
+             home = \"Arendalsvej 192, 2. tv., 8600 Silkeborg\"\n\
+             [[mileage.rates]]\nyear = 2026\nlow = 3.94\nhigh = 2.28\n",
+            &dir.join("config.toml"),
+        )
+        .unwrap();
+        let tz = cfg.timezone;
+        let cal = (0..days)
+            .map(|i| {
+                let day = state::parse_date("2026-10-19").unwrap() + Duration::days(i.into());
+                let t = |h| {
+                    day.and_hms_opt(h, 0, 0)
+                        .unwrap()
+                        .and_local_timezone(tz)
+                        .unwrap()
+                };
+                Occurrence::Timed {
+                    start: t(8),
+                    end: t(16),
+                    summary: "Kontor".into(),
+                    location: "Lysbrohøjen 3, 8600 Silkeborg".into(),
+                }
+            })
+            .collect();
+        (dir, cfg, cal)
+    }
+
+    #[test]
+    fn without_a_workplace_the_one_in_the_calendar_is_commuting() {
+        let month = Month::parse("2026-10").unwrap();
+        let trip = |s: &str, e: &str, from: &str, to: &str| Trip {
+            start: trips::parse_time(s, chrono_tz::Europe::Copenhagen).unwrap(),
+            end: trips::parse_time(e, chrono_tz::Europe::Copenhagen).unwrap(),
+            distance_km: Some(6.5),
+            from: from.into(),
+            to: to.into(),
+            purpose: String::new(),
+            business: None,
+            start_pos: None,
+            end_pos: None,
+        };
+        let (home, work) = ("Arendalsvej, 8600 Silkeborg", "Lysbrohøjen, Lysbro");
+        let trips = [
+            trip("2026-10-20 07:40", "2026-10-20 07:55", home, work),
+            trip("2026-10-20 16:00", "2026-10-20 16:15", work, home),
+        ];
+
+        let (dir, cfg, cal) = no_workplace("svc-workplace-detected", 5);
+        assert_eq!(
+            effective_workplace(&cfg, &cal, month),
+            Some((
+                "Lysbrohøjen 3, 8600 Silkeborg".into(),
+                WorkplaceSource::Detected
+            ))
+        );
+        let m = mileage_for(&cfg, month, &trips, &cal).unwrap().unwrap();
+        assert_eq!(m.total_km(), 0.0);
+        let reasons: Vec<_> = m.driving.iter().map(|d| d.reason.clone()).collect();
+        assert_eq!(
+            reasons,
+            [mileage::Reason::Commute, mileage::Reason::Commute]
+        );
+        // The month counts the detected workplace as at work too.
+        let r = build_month(&cfg, month, &trips, &cal, NaiveDate::MAX).unwrap();
+        assert_eq!(r.days[19].periods_text(), "07:55–16:00");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // Two days are no clear candidate: none, and the drives are client
+        // visits (`report` and `logbook` warn).
+        let (dir, cfg, cal) = no_workplace("svc-workplace-none", 2);
+        assert_eq!(effective_workplace(&cfg, &cal, month), None);
+        let m = mileage_for(&cfg, month, &trips, &cal).unwrap().unwrap();
+        assert_eq!(m.total_km(), 13.0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn work_today_states() {
+        // Office at Lysbrohøjen 08:00–16:00 on 19–23 Oct (detected
+        // workplace), Læge 13:00–14:00 on the 20th.
+        let (dir, cfg, mut cal) = no_workplace("svc-work-today", 5);
+        let tz = cfg.timezone;
+        let now = |s: &str| at(s).and_local_timezone(tz).unwrap();
+        cal.push(Occurrence::Timed {
+            start: now("2026-10-20 13:00"),
+            end: now("2026-10-20 14:00"),
+            summary: "Læge".into(),
+            location: String::new(),
+        });
+        let arrive = Trip {
+            start: now("2026-10-20 08:50"),
+            end: now("2026-10-20 09:10"),
+            distance_km: Some(6.5),
+            from: "Arendalsvej, 8600 Silkeborg".into(),
+            to: "Lysbrohøjen, Lysbro".into(),
+            purpose: String::new(),
+            business: None,
+            start_pos: None,
+            end_pos: None,
+        };
+        let st = State::default();
+        let w = |st: &State, trips: &[Trip], t: &str| work_today(&cfg, st, &cal, trips, now(t));
+
+        // Not working, 40 min late; the Læge appointment is next.
+        let t = w(&st, &[], "2026-10-20 08:40");
+        assert_eq!(
+            t.state,
+            WorkState::NotWorking {
+                late_by: Some(Duration::minutes(40))
+            }
+        );
+        assert_eq!(t.actions, [WorkAction::StartWork]);
+        assert_eq!((t.expected, t.worked), (40.0 / 60.0, 0.0));
+        assert_eq!(t.next_private.as_ref().unwrap().label, "Læge");
+        // Before the planned start: not late.
+        let t = w(&st, &[], "2026-10-20 07:00");
+        assert_eq!(t.state, WorkState::NotWorking { late_by: None });
+
+        // At the office by trip since 09:10.
+        let t = w(&st, std::slice::from_ref(&arrive), "2026-10-20 10:10");
+        assert_eq!(
+            t.state,
+            WorkState::AtWork {
+                place: "Lysbrohøjen 3, 8600 Silkeborg".into(),
+                since: now("2026-10-20 09:10")
+            }
+        );
+        let min = |h: f64| (h * 60.0).round() as i64;
+        assert_eq!(
+            (min(t.expected), min(t.worked), min(t.difference())),
+            (130, 60, -70)
+        );
+        assert_eq!(
+            t.actions,
+            [
+                WorkAction::PrivateForAppointment,
+                WorkAction::PrivateWithoutEvent
+            ]
+        );
+
+        // The Læge appointment started automatically at 13:00.
+        let t = w(&st, std::slice::from_ref(&arrive), "2026-10-20 13:10");
+        assert_eq!(
+            t.state,
+            WorkState::Private {
+                label: "Læge".into(),
+                since: now("2026-10-20 13:00"),
+                auto: true
+            }
+        );
+        assert_eq!(t.actions, [WorkAction::StopPrivate]);
+        assert_eq!(t.next_private, None);
+
+        // Home timer since 08:05.
+        let mut home = State::default();
+        home.home.start(at("2026-10-20 08:05"), None, None).unwrap();
+        let t = w(&home, &[], "2026-10-20 09:05");
+        assert_eq!(
+            t.state,
+            WorkState::Home {
+                since: now("2026-10-20 08:05")
+            }
+        );
+        assert_eq!((t.worked, t.expected), (1.0, 65.0 / 60.0));
+        assert_eq!(
+            t.actions,
+            [
+                WorkAction::PrivateForAppointment,
+                WorkAction::PrivateWithoutEvent,
+                WorkAction::StopWork
+            ]
+        );
+
+        // The private timer running wins over the home timer.
+        home.private
+            .start(at("2026-10-20 09:00"), Some("Bank".into()), None)
+            .unwrap();
+        let t = w(&home, &[], "2026-10-20 09:05");
+        assert_eq!(
+            t.state,
+            WorkState::Private {
+                label: "Bank".into(),
+                since: now("2026-10-20 09:00"),
+                auto: false
+            }
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

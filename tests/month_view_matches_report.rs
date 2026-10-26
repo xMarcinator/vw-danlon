@@ -1,10 +1,11 @@
 //! The app's Month screen shows what `report` prints: the same norm, worked
-//! hours and difference per day for the example config, calendar and trips.
+//! hours and difference per day for the example config, calendar and trips,
+//! today so far at the same minute.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use chrono::{NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{NaiveDate, Timelike};
 use vw_danlon::config::Config;
 use vw_danlon::month::Month;
 use vw_danlon::service;
@@ -82,30 +83,42 @@ fn month_view_matches_report_for_the_example_data() {
     let dir = example_dir();
     let trips = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/trips.csv");
     let config = dir.join("config.toml");
-    let out = Command::new(env!("CARGO_BIN_EXE_vw-danlon"))
-        .arg("-c")
-        .arg(&config)
-        .args(["report", "2026-10", "-t"])
-        .arg(&trips)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let (want, want_totals) = report_numbers(&String::from_utf8(out.stdout).unwrap());
-    assert_eq!(want.len(), 31);
-
     let cfg = Config::load(&config).unwrap();
     let month = Month::parse("2026-10").unwrap();
+    let minute = || {
+        chrono::Utc::now()
+            .with_timezone(&cfg.timezone)
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap()
+    };
+    // `report` counts today so far at its own clock: run it and build the
+    // view within the same minute (retried when a minute passes between).
+    let (want, want_totals, now) = (0..3)
+        .find_map(|_| {
+            let before = minute();
+            let out = Command::new(env!("CARGO_BIN_EXE_vw-danlon"))
+                .arg("-c")
+                .arg(&config)
+                .args(["report", "2026-10", "-t"])
+                .arg(&trips)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let (want, totals) = report_numbers(&String::from_utf8(out.stdout).unwrap());
+            (minute() == before).then_some((want, totals, before))
+        })
+        .expect("report ran within one minute");
+    assert_eq!(want.len(), 31);
+
     // The CLI's today; the calendar reaches 14 days past it for the coming
     // private appointments, which must not change October.
-    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-    let now = cfg
-        .timezone
-        .from_local_datetime(&NaiveDateTime::new(today, chrono::NaiveTime::MIN))
-        .unwrap();
+    let today = now.date_naive();
     let trips = service::load_trips(&cfg, Some(&trips), month).unwrap();
     let cal = service::month_calendar(&cfg, month, today, service::CalendarMode::Fresh).unwrap();
     let view = service::month_view(&cfg, month, &trips, &cal.occurrences, now).unwrap();
@@ -119,7 +132,7 @@ fn month_view_matches_report_for_the_example_data() {
             let shown = |s: String| if past { s } else { String::new() };
             (
                 d.date,
-                format!("{:.2}", d.norm_hours),
+                format!("{:.2}", d.expected_hours),
                 shown(format!("{:.2}", d.worked_hours)),
                 shown(format!("{:+.2}", d.difference())),
             )
