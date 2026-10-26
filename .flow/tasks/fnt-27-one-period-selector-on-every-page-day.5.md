@@ -33,9 +33,16 @@ User: "give the stop work button les space since the private time button is a sp
 
 
 ## Done summary
-TBD
+On phone width the Hours dock (Month/Week and Day today) now follows the approved mockups: while working with a private appointment still ahead today, the split button's main part reads "Start private time" over "<title> · <start>" and starts that appointment's private time (Action::Start(Some(title)), the same as the old row Start); ▾ (aria-haspopup, aria-expanded) opens a menu absolutely positioned above the button row, over the content, with "Private time now" (48 px) and "Private since [time] Start" (52 px). With nothing left today the main part is "Private time" and the menu has only Private since; not working it is Start work ▾ with "Started work at [time] Start". The menu closes after a choice or a tap outside (backdrop, as on the desktop menu). Stop work is only as wide as its label (15 px, 14 px padding, 56 px) and the split button is accent-filled with a 52 px caret. The phone work card has no Start on the Next private row, and the row (and its list) is hidden on phone when nothing is running or ahead today. Desktop is unchanged, including its row Start.
 
+Verified live (desktop build, scratch copy of the earlier scratch data with "Læge" 22:30 and later "Tandlæge" 23:15 today, offline, headless output) at 390x844: Start work ▾ menu above the buttons; Start work -> split shows "Start private time / Læge · 22:30" with Stop work narrow; ▾ menu Private time now + Private since; Private time now starts and closes the menu; tapping the main part started Læge; after it the row hid and the main part read Private time with Private since only; Private since Start started private time and closed the menu; Stop work returned to Start work; Day today with "Tandlæge · 23:15" and its menu. At 1280x800 Hours Month showed the unchanged card with the Next private row Start and the header pill. Not verified: dark theme, Android build, Week view (same dock component). Note: while the menu is open, a tap on the main button first closes the menu (backdrop), like the desktop menu.
+
+Tier: not reported (model: claude-opus-5-5)
+
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: f4666ba014988e35aec6feb9f03b32a8dc363bf7
+- Tests: cargo test --workspace, cargo clippy --workspace --all-targets, dx build --platform desktop, cargo fmt --all -- --check
 - PRs:
