@@ -35,7 +35,8 @@
   --bad-bg: #fbe9e6;
   --info: #27577a;
   --info-bg: #e4eef6;
-  --drive: #7aa6c8;
+  --drive: #5a87ab;
+  --private: #27577a;
   --client: #5b3f8c;
   --client-bg: #efe9f8;
   --client-bar: #7a5bb5;
@@ -67,6 +68,7 @@
   --info: #8ab8dc;
   --info-bg: #1e2833;
   --drive: #5b8db5;
+  --private: #4fb0f0;
   --client: #c3aef0;
   --client-bg: #2a2238;
   --client-bar: #9d82d6;
@@ -99,6 +101,7 @@
     --info: #8ab8dc;
     --info-bg: #1e2833;
     --drive: #5b8db5;
+  --private: #4fb0f0;
     --client: #c3aef0;
     --client-bg: #2a2238;
     --client-bar: #9d82d6;
@@ -1524,13 +1527,14 @@ table.days tr.flagged {
 }
 
 .bar.client,
-.swatch.client {
+.swatch.client,
+.step-dot.client {
   background: var(--client-bar);
 }
 
 .bar.private,
 .swatch.private {
-  background: var(--info);
+  background: var(--private);
 }
 
 .bar.lunch,
@@ -1613,7 +1617,7 @@ table.days tr.flagged {
 }
 
 .step-dot.private {
-  border: 2px solid var(--info);
+  border: 2px solid var(--private);
 }
 
 .step-dot.lunch {
@@ -1837,13 +1841,59 @@ table.days tr.flagged {
   }
 
   .trip {
-    grid-template-columns: minmax(0, 1fr) auto;
-    padding: 10px 14px;
+    grid-template-columns: 52px minmax(0, 1fr) auto;
+    gap: 2px 10px;
+    align-items: baseline;
+    padding: 8px 14px;
+    font-size: 14px;
+    border-top: 1px solid var(--row);
   }
 
-  .trip-route {
-    grid-column: 1 / -1;
-    order: -1;
+  .trip-kind,
+  .trip-purpose {
+    grid-column: 2 / -1;
+    font-size: 12px;
+  }
+
+  .trip-purpose:empty {
+    display: none;
+  }
+
+  .trips-head {
+    border-bottom: none;
+    padding: 10px 14px 6px;
+  }
+
+  .trips-head h2 {
+    flex-grow: 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* The day's numbers: one card, three columns. */
+  .day-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 12px;
+    background: var(--surf);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .day-kpis > .kpi {
+    padding: 0;
+    gap: 0;
+    background: none;
+    border: none;
+    border-radius: 0;
+  }
+
+  .day-kpis > .kpi.narrow-only {
+    display: flex !important;
+  }
+
+  .day-kpis .kpi-sub {
+    font-size: 11px;
   }
 }
 
@@ -2330,15 +2380,36 @@ table.logbook tr.total td {
   }
 }
 
-/* Day: the lunch editor and the add-trip form. */
-.panel.lunch .pt-edit,
-.panel.lunch .pt-status {
-  flex: 1 1 100%;
+/* Day: the lunch sheet, the trips' heading and the add-trip form. */
+.ts-fields.lunch-fields {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  max-width: 360px;
 }
 
-.lunch-edit {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  padding: 4px 0 0;
+.trips-head {
+  align-items: baseline;
+}
+
+.trips-sum {
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.add-trip {
+  font: inherit;
+  font-size: 14px;
+  min-height: 44px;
+  flex: 1 1 0;
+  padding: 0 10px;
+  border: 1px solid var(--ctl);
+  border-radius: 10px;
+  background: var(--surf);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
 }
 
 .trip-form {
@@ -2883,6 +2954,14 @@ table.rates td:first-child {
     grid-column: 1 / -1;
   }
 
+  .ts-fields.lunch-fields {
+    max-width: none;
+  }
+
+  .ts-fields.lunch-fields .field:first-child {
+    grid-column: auto;
+  }
+
   .ts-fields input {
     font-size: 16px;
     height: 48px;
@@ -2917,6 +2996,7 @@ table.rates td:first-child {
 .small-btn:not(.primary-sm):active,
 .ts-btn:not(.primary):active,
 .add-time:active,
+.add-trip:active,
 .src-chip:active,
 .now-btn:active,
 .segmented button:active,

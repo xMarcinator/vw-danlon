@@ -1401,6 +1401,24 @@ pub fn day_timeline(
         .collect()
 }
 
+/// The time at work as the Day list shows it: the periods at work with
+/// the time at a client (part of `work`) split out as client visits, in
+/// time order. Unlike [`day_timeline`], lunch, private time and driving do
+/// not cut it.
+pub fn day_work_steps(
+    work: &[LocalSpan],
+    clients: &[LocalSpan],
+) -> Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> {
+    let mut out: Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> = month::subtract(work, clients)
+        .into_iter()
+        .map(|(s, e)| (s, e, TimelineKind::Work))
+        .chain(clients.iter().map(|(s, e)| (*s, *e, TimelineKind::Client)))
+        .filter(|(s, e, _)| s < e)
+        .collect();
+    out.sort_by_key(|(s, _, _)| *s);
+    out
+}
+
 /// The vacation overview of the open holiday years on `today`.
 #[derive(Debug)]
 pub struct VacationView {
@@ -1724,6 +1742,47 @@ mod tests {
                 ("12:20", "12:40", Private),
                 ("12:40", "16:00", Work),
             ])
+        );
+    }
+
+    #[test]
+    fn day_work_steps_split_the_client_visit_out() {
+        use TimelineKind::*;
+        let span = |s: &str, e: &str| {
+            (
+                at(&format!("2026-10-22 {s}")),
+                at(&format!("2026-10-22 {e}")),
+            )
+        };
+        let hm = |t: NaiveDateTime| t.format("%H:%M").to_string();
+        let rows = |work: &[LocalSpan], clients: &[LocalSpan]| {
+            day_work_steps(work, clients)
+                .into_iter()
+                .map(|(s, e, k)| (hm(s), hm(e), k))
+                .collect::<Vec<_>>()
+        };
+        let want = |rows: &[(&str, &str, TimelineKind)]| {
+            rows.iter()
+                .map(|(s, e, k)| (s.to_string(), e.to_string(), *k))
+                .collect::<Vec<_>>()
+        };
+        // At work 08:58–16:10 with a client 13:44–14:13 in the middle.
+        assert_eq!(
+            rows(&[span("08:58", "16:10")], &[span("13:44", "14:13")]),
+            want(&[
+                ("08:58", "13:44", Work),
+                ("13:44", "14:13", Client),
+                ("14:13", "16:10", Work),
+            ])
+        );
+        // Ending the day at the client; no client is one step.
+        assert_eq!(
+            rows(&[span("08:58", "14:13")], &[span("13:44", "14:13")]),
+            want(&[("08:58", "13:44", Work), ("13:44", "14:13", Client)])
+        );
+        assert_eq!(
+            rows(&[span("08:58", "16:10")], &[]),
+            want(&[("08:58", "16:10", Work)])
         );
     }
 
