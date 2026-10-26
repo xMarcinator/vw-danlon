@@ -54,6 +54,9 @@ dx bundle --platform android --release --target aarch64-linux-android --package-
 # library, turn off R8 (the generated project has no keep rules for the
 # classes Rust calls over JNI), skip lint (needs network), sign below.
 "$ndk_bin/llvm-strip" --strip-all "$gradle_dir/app/src/main/jniLibs/arm64-v8a/libmain.so"
+# Only arm64: a library an earlier build for another ABI (an emulator's
+# x86_64) left in the generated project would otherwise ship too.
+find "$gradle_dir/app/src/main/jniLibs" -mindepth 1 -maxdepth 1 ! -name arm64-v8a -exec rm -rf {} +
 sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/' "$gradle_dir/app/build.gradle.kts"
 # dx writes versionCode = 1 for every version; Android only installs an
 # update over the old app when versionCode grows: 0.2.0 -> 200.
