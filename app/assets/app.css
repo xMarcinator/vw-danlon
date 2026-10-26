@@ -519,9 +519,19 @@ body {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
   gap: 10px;
+}
+
+/* A confirmation or error next to buttons gets its own line above them, so
+   a long one (a trip's route) wraps instead of squeezing the buttons. */
+.actions > .status-ok,
+.actions > .status-bad {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .primary {
