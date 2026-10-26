@@ -540,6 +540,11 @@ On the phone, open the downloaded APK and allow *Install unknown apps* for
 the browser or Files app when asked. Installing a newer version over the
 old one keeps the app's data.
 
+The phone app has no file picker. To import trips, share the export from
+Min Volkswagen (**Ture → Historik**, share icon) and choose **vw-danlon**;
+the app opens on Settings with the result. A backup file shared the same
+way waits there for **Import backup**, since it replaces the phone's data.
+
 The launcher icon is `app/icons/icon.svg` (the sidebar mark). After changing
 it, re-render the PNGs in `app/icons/android/res/mipmap-*` with
 [resvg](https://github.com/linebender/resvg); the release build copies that

@@ -1,13 +1,14 @@
 //! Importing a trips file: the Min Volkswagen .xlsx export, or a CSV/JSON
 //! trips file. Desktop picks it with the native file dialog (Dioxus opens
-//! one for a file input); Android with the system document picker that the
-//! webview opens for a file input outside the Dioxus tree, read in the page
-//! and handed over as base64.
+//! one for a file input). Android has no picker: the file is shared to the
+//! app ("Share to vw-danlon"), see [`crate::platform::take_shared_file`].
 
+#[cfg(not(target_os = "android"))]
 use dioxus::prelude::*;
 use vw_danlon::config::Config;
 use vw_danlon::trip_store;
 
+#[cfg(not(target_os = "android"))]
 use crate::Icon;
 
 /// A picked file's name and content.
@@ -17,6 +18,12 @@ pub struct Picked {
     pub bytes: Vec<u8>,
 }
 
+/// A file shared to the app (Android), or why it couldn't be read; Settings
+/// imports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shared(pub Result<Picked, String>);
+
+#[cfg(not(target_os = "android"))]
 const UPLOAD_ICON: &str = "M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5M12 15V3M7 8l5-5 5 5";
 
 /// Merges the picked file into the trip store off the UI thread; the text
@@ -48,16 +55,30 @@ pub async fn import(cfg: Config, picked: Picked) -> Result<String, String> {
     .map_err(|e| format!("Not imported: {e:#}"))
 }
 
-/// A button that picks one file; `accept` lists its extensions (the
-/// desktop dialog's filter).
-#[component]
-pub fn PickButton(
-    label: String,
-    class: String,
-    accept: String,
-    on_picked: EventHandler<Result<Picked, String>>,
-) -> Element {
-    picker(label, class, accept, on_picked)
+/// The name a shared file is imported under: its display name, with the
+/// extension its MIME type gives when the name has none the import knows
+/// (the import tells the formats apart by the extension).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn shared_name(display: Option<&str>, mime: Option<&str>) -> String {
+    let name = display
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or("shared file");
+    let known = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| ["xlsx", "csv", "json"].contains(&e.to_ascii_lowercase().as_str()));
+    let ext = match mime.unwrap_or_default() {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "text/csv" | "text/comma-separated-values" => "csv",
+        "application/json" => "json",
+        _ => "",
+    };
+    if known || ext.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}.{ext}")
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -90,8 +111,11 @@ pub fn FolderButton(
     }
 }
 
+/// A button that picks one file; `accept` lists its extensions (the
+/// desktop dialog's filter).
 #[cfg(not(target_os = "android"))]
-fn picker(
+#[component]
+pub fn PickButton(
     label: String,
     class: String,
     accept: String,
@@ -124,69 +148,24 @@ fn picker(
     }
 }
 
-/// Opens the webview's own file chooser (the Android document picker): a
-/// file input Dioxus does not know is not routed to its desktop dialog.
-#[cfg(target_os = "android")]
-const PICK_JS: &str = r#"
-const input = document.createElement('input');
-input.type = 'file';
-input.style.display = 'none';
-document.body.appendChild(input);
-input.addEventListener('change', () => {
-  const f = input.files && input.files[0];
-  input.remove();
-  if (!f) { dioxus.send(null); return; }
-  const r = new FileReader();
-  r.onload = () => dioxus.send({ name: f.name, data: String(r.result).split(',')[1] || '' });
-  r.onerror = () => dioxus.send({ name: f.name, error: String(r.error) });
-  r.readAsDataURL(f);
-});
-input.click();
-"#;
+#[cfg(test)]
+mod tests {
+    use super::shared_name;
 
-#[cfg(target_os = "android")]
-#[derive(serde::Deserialize)]
-struct FromPage {
-    name: String,
-    #[serde(default)]
-    data: String,
-    error: Option<String>,
-}
-
-#[cfg(target_os = "android")]
-fn picker(
-    label: String,
-    class: String,
-    _accept: String,
-    on_picked: EventHandler<Result<Picked, String>>,
-) -> Element {
-    use base64::Engine;
-    rsx! {
-        button {
-            class: "{class}",
-            onclick: move |_| {
-                spawn(async move {
-                    let mut eval = document::eval(PICK_JS);
-                    let page: Option<FromPage> = match eval.recv().await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            on_picked.call(Err(format!("the file picker failed: {e}")));
-                            return;
-                        }
-                    };
-                    let Some(page) = page else { return };
-                    let picked = match page.error {
-                        Some(e) => Err(format!("{} can't be read: {e}", page.name)),
-                        None => base64::engine::general_purpose::STANDARD
-                            .decode(page.data.as_bytes())
-                            .map(|bytes| Picked { name: page.name.clone(), bytes })
-                            .map_err(|e| format!("{} can't be read: {e}", page.name)),
-                    };
-                    on_picked.call(picked);
-                });
-            },
-            Icon { d: UPLOAD_ICON, size: 16 }
-            "{label}"
+    #[test]
+    fn a_shared_file_is_named_for_the_import() {
+        let xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        for (display, mime, want) in [
+            (Some("Trips.xlsx"), Some(xlsx), "Trips.xlsx"),
+            (Some("Trips.XLSX"), None, "Trips.XLSX"),
+            (Some("export"), Some(xlsx), "export.xlsx"),
+            (Some("trips"), Some("text/csv"), "trips.csv"),
+            (Some("backup"), Some("application/json"), "backup.json"),
+            (None, Some("text/csv"), "shared file.csv"),
+            (Some("  "), None, "shared file"),
+            (Some("notes.txt"), Some("text/plain"), "notes.txt"),
+        ] {
+            assert_eq!(shared_name(display, mime), want, "{display:?} {mime:?}");
         }
     }
 }

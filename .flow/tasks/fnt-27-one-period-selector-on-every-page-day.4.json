@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-26T19:13:19.847727Z",
+  "depends_on": [
+    "fnt-27-one-period-selector-on-every-page-day.3"
+  ],
+  "id": "fnt-27-one-period-selector-on-every-page-day.4",
+  "priority": null,
+  "spec": "fnt-27-one-period-selector-on-every-page-day",
+  "spec_path": ".flow/tasks/fnt-27-one-period-selector-on-every-page-day.4.md",
+  "status": "todo",
+  "title": "Thumb layout on phone: period row and main actions at the bottom",
+  "updated_at": "2026-10-26T19:13:19.847727Z"
+}

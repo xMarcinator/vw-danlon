@@ -197,6 +197,43 @@ jobs:
           # otherwise recreate the activity, which the Dioxus app does not survive.
           sed -i 's/android:configChanges="[^"]*"/android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|fontScale|fontWeightAdjustment|density|locale|layoutDirection|colorMode"/' \
             "$g/app/src/main/AndroidManifest.xml"
+          # "Share to vw-danlon" (and "Open with") for the Min Volkswagen
+          # export, a CSV/JSON trips file or a backup; the app reads the
+          # activity's intent over JNI (platform::take_shared_file). singleTask,
+          # with onNewIntent keeping the new intent, so a share while the app
+          # runs reaches the running activity instead of starting a second
+          # one, which the Dioxus app does not survive.
+          python3 - "$g/app/src/main/AndroidManifest.xml" "$g/app/src/main/kotlin/dev/dioxus/main/MainActivity.kt" <<'PY'
+          import sys
+          manifest, activity = sys.argv[1], sys.argv[2]
+          mimes = [
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "text/csv",
+              "text/comma-separated-values",
+              "application/json",
+              "*/*",
+          ]
+          data = "".join(f'<data android:mimeType="{m}" />' for m in mimes)
+          filters = "".join(
+              f'<intent-filter><action android:name="android.intent.action.{a}" />'
+              f'<category android:name="android.intent.category.DEFAULT" />{data}</intent-filter>'
+              for a in ("SEND", "VIEW")
+          )
+          s = open(manifest).read()
+          tag = 'android:name="dev.dioxus.main.MainActivity"'
+          launcher = '<category android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>'
+          assert s.count(tag) == 1 and s.count(launcher) == 1, "unexpected AndroidManifest.xml"
+          s = s.replace(tag, tag + ' android:launchMode="singleTask"')
+          s = s.replace(launcher, launcher + filters)
+          open(manifest, "w").write(s)
+          k = open(activity).read()
+          plain = "class MainActivity : WryActivity()"
+          assert k.count(plain) == 1 and k.startswith("package dev.dioxus.main\n"), "unexpected MainActivity.kt"
+          k = k.replace("package dev.dioxus.main\n", "package dev.dioxus.main\n\nimport android.content.Intent\n", 1)
+          k = k.replace(plain, plain + " {\n    override fun onNewIntent(intent: Intent) {\n        super.onNewIntent(intent)\n        setIntent(intent)\n    }\n}")
+          open(activity, "w").write(k)
+          PY
+          grep -q 'android.intent.action.SEND' "$g/app/src/main/AndroidManifest.xml"
           # DayNight so the System theme follows the phone's dark mode.
           sed -i 's/Theme.AppCompat.Light.NoActionBar/Theme.AppCompat.DayNight.NoActionBar/' "$g/app/src/main/res/values/styles.xml"
           # Our launcher icon instead of dx's.

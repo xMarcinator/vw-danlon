@@ -146,19 +146,55 @@ pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Sign
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Resumed(pub u32);
 
-/// Tells Rust each time the page becomes visible again.
-const RESUME_JS: &str = r#"
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') dioxus.send(true);
-});
-await new Promise(() => {});
-"#;
+impl Resumed {
+    /// The shortest time between two bumps: coming back gives both a
+    /// resume and a focus event (Android), counted once.
+    const SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Bumps `resumed` each time the app comes back to the foreground.
-pub async fn watch_resume(mut resumed: Signal<Resumed>) {
-    let mut eval = document::eval(RESUME_JS);
-    while let Ok(true) = eval.recv::<bool>().await {
-        resumed.write().0 += 1;
+    /// Whether a lifecycle event means the app is in front again: Android's
+    /// resume, or the window getting the focus (desktop and Android).
+    pub fn is_back<T>(event: &crate::webview::tao::event::Event<'_, T>) -> bool {
+        use crate::webview::tao::event::{Event, WindowEvent};
+        matches!(
+            event,
+            Event::Resumed
+                | Event::WindowEvent {
+                    event: WindowEvent::Focused(true),
+                    ..
+                }
+        )
+    }
+
+    /// Whether coming back at `now` counts: not within [`Self::SETTLE`] of
+    /// the last one counted (kept in `last`).
+    pub fn due(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+        if last.is_some_and(|l| now.duration_since(l) < Self::SETTLE) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
+}
+
+/// The scrolling page content (`main.content`), so a screen can scroll it
+/// to the top.
+#[derive(Clone, Copy)]
+pub struct Content(pub Signal<Option<std::rc::Rc<MountedData>>>);
+
+impl Content {
+    /// Scrolls the page content to the top.
+    pub fn scroll_to_top(self) {
+        let Some(el) = self.0.peek().clone() else {
+            return;
+        };
+        spawn(async move {
+            let _ = el
+                .scroll(
+                    dioxus::html::geometry::PixelsVector2D::new(0.0, 0.0),
+                    ScrollBehavior::Instant,
+                )
+                .await;
+        });
     }
 }
 
@@ -639,5 +675,20 @@ pub fn PrivateList(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::Resumed;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn coming_back_twice_at_once_counts_once() {
+        let t = Instant::now();
+        let mut last = None;
+        assert!(Resumed::due(&mut last, t));
+        assert!(!Resumed::due(&mut last, t + Duration::from_millis(300)));
+        assert!(Resumed::due(&mut last, t + Duration::from_secs(2)));
     }
 }

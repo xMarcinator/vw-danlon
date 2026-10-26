@@ -1,6 +1,8 @@
 //! Reaching outside the app: opening the Danløn app (Android) or its web
-//! site (desktop), and printing the logbook: the desktop webview's print
-//! dialog, or on Android (whose webview does not print) the share sheet.
+//! site (desktop), printing the logbook (the desktop webview's print
+//! dialog, or on Android, whose webview does not print, the share sheet),
+//! the clipboard, and on Android the file shared to the app. All in Rust
+//! (JNI on Android), no JavaScript.
 
 use anyhow::Result;
 
@@ -32,8 +34,23 @@ pub const PRINT_LABEL: &str = "Share to print";
 /// any, says what was done.
 #[cfg(not(target_os = "android"))]
 pub fn print_page(_title: &str, _page: &str) -> Result<Option<String>> {
-    dioxus::prelude::document::eval("window.print()");
+    dioxus::desktop::window().print();
     Ok(None)
+}
+
+/// Puts `text` on the clipboard. The clipboard is kept open while the app
+/// runs: on Linux the copied text is served by its owner.
+#[cfg(not(target_os = "android"))]
+pub fn copy_text(text: &str) -> Result<()> {
+    use std::sync::Mutex;
+    static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+    let mut kept = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+    let clipboard = match kept.as_mut() {
+        Some(c) => c,
+        None => kept.insert(arboard::Clipboard::new()?),
+    };
+    clipboard.set_text(text)?;
+    Ok(())
 }
 
 /// Shares `page` through the share sheet, so it can be saved or printed.
@@ -100,7 +117,7 @@ mod android {
         }
     }
 
-    fn string<'a>(env: &mut JNIEnv<'a>, s: &str) -> jni::errors::Result<JObject<'a>> {
+    pub fn string<'a>(env: &mut JNIEnv<'a>, s: &str) -> jni::errors::Result<JObject<'a>> {
         Ok(env.new_string(s)?.into())
     }
 
@@ -261,4 +278,226 @@ pub fn share(title: &str, mime: &str, text: &str, html: Option<&str>) -> Result<
         android::start(env, context, &chooser)
     })
     .map_err(|e| e.context("the share sheet can't be opened"))
+}
+
+/// Puts `text` on the clipboard through the ClipboardManager.
+#[cfg(target_os = "android")]
+pub fn copy_text(text: &str) -> Result<()> {
+    use jni::objects::JValue;
+    android::with_context(|env, context| {
+        let service = android::string(env, "clipboard")?;
+        let manager = env
+            .call_method(
+                context,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        let label = android::string(env, "vw-danlon")?;
+        let text = android::string(env, text)?;
+        let clip = env
+            .call_static_method(
+                "android/content/ClipData",
+                "newPlainText",
+                "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+                &[JValue::Object(&label), JValue::Object(&text)],
+            )?
+            .l()?;
+        env.call_method(
+            &manager,
+            "setPrimaryClip",
+            "(Landroid/content/ClipData;)V",
+            &[JValue::Object(&clip)],
+        )?;
+        Ok(())
+    })
+    .map_err(|e| e.context("the clipboard can't be used"))
+}
+
+/// The largest shared file read; a trips export is far smaller.
+#[cfg(target_os = "android")]
+const SHARED_MAX: usize = 64 << 20;
+
+/// Takes the file shared to the app, if the activity was started with one:
+/// "Share to vw-danlon" (`ACTION_SEND`, the file in `EXTRA_STREAM`) or
+/// "Open with" (`ACTION_VIEW`, the file as the data). The activity's intent
+/// is then replaced by a plain one, so the file is taken once.
+///
+/// The activity is `singleTask` and its `onNewIntent` keeps the new intent
+/// (both patched into the generated project by the release workflow), so a
+/// share while the app is already running reaches the same activity and is
+/// taken here when the app comes back to the foreground.
+#[cfg(target_os = "android")]
+pub fn take_shared_file() -> Result<Option<crate::import::Picked>> {
+    use jni::objects::{JByteArray, JString, JValue};
+    let picked = android::with_context(|env, activity| {
+        let intent = env
+            .call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])?
+            .l()?;
+        if intent.is_null() {
+            return Ok(None);
+        }
+        let action = env
+            .call_method(&intent, "getAction", "()Ljava/lang/String;", &[])?
+            .l()?;
+        let action: String = if action.is_null() {
+            String::new()
+        } else {
+            env.get_string(&JString::from(action))?.into()
+        };
+        let uri = match action.as_str() {
+            "android.intent.action.SEND" => {
+                let key = android::string(env, "android.intent.extra.STREAM")?;
+                let uri = env
+                    .call_method(
+                        &intent,
+                        "getParcelableExtra",
+                        "(Ljava/lang/String;)Landroid/os/Parcelable;",
+                        &[JValue::Object(&key)],
+                    )?
+                    .l()?;
+                if uri.is_null() {
+                    // Some apps only fill the clip data.
+                    let clip = env
+                        .call_method(&intent, "getClipData", "()Landroid/content/ClipData;", &[])?
+                        .l()?;
+                    if clip.is_null() {
+                        uri
+                    } else {
+                        let item = env
+                            .call_method(
+                                &clip,
+                                "getItemAt",
+                                "(I)Landroid/content/ClipData$Item;",
+                                &[JValue::Int(0)],
+                            )?
+                            .l()?;
+                        env.call_method(&item, "getUri", "()Landroid/net/Uri;", &[])?
+                            .l()?
+                    }
+                } else {
+                    uri
+                }
+            }
+            "android.intent.action.VIEW" => env
+                .call_method(&intent, "getData", "()Landroid/net/Uri;", &[])?
+                .l()?,
+            _ => return Ok(None),
+        };
+        // Taken once, even when it can't be read.
+        let plain = env.new_object("android/content/Intent", "()V", &[])?;
+        env.call_method(
+            activity,
+            "setIntent",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&plain)],
+        )?;
+        if uri.is_null() {
+            return Ok(None);
+        }
+        let resolver = env
+            .call_method(
+                activity,
+                "getContentResolver",
+                "()Landroid/content/ContentResolver;",
+                &[],
+            )?
+            .l()?;
+        let mime = env
+            .call_method(
+                &resolver,
+                "getType",
+                "(Landroid/net/Uri;)Ljava/lang/String;",
+                &[JValue::Object(&uri)],
+            )?
+            .l()?;
+        let mime: Option<String> = if mime.is_null() {
+            None
+        } else {
+            Some(env.get_string(&JString::from(mime))?.into())
+        };
+        let display = display_name(env, &resolver, &uri)?;
+        let name = crate::import::shared_name(display.as_deref(), mime.as_deref());
+        let stream = env
+            .call_method(
+                &resolver,
+                "openInputStream",
+                "(Landroid/net/Uri;)Ljava/io/InputStream;",
+                &[JValue::Object(&uri)],
+            )?
+            .l()?;
+        if stream.is_null() {
+            return Ok(None);
+        }
+        let chunk: JByteArray = env.new_byte_array(64 * 1024)?;
+        let mut bytes = Vec::new();
+        let mut buf = vec![0i8; 64 * 1024];
+        loop {
+            let n = env
+                .call_method(&stream, "read", "([B)I", &[JValue::Object(&chunk)])?
+                .i()?;
+            if n < 0 || bytes.len() > SHARED_MAX {
+                break;
+            }
+            let part = &mut buf[..n as usize];
+            env.get_byte_array_region(&chunk, 0, part)?;
+            bytes.extend(part.iter().map(|&b| b as u8));
+        }
+        env.call_method(&stream, "close", "()V", &[])?;
+        Ok(Some(crate::import::Picked { name, bytes }))
+    })
+    .map_err(|e| e.context("the shared file can't be read"))?;
+    if let Some(p) = &picked
+        && p.bytes.len() > SHARED_MAX
+    {
+        anyhow::bail!("{} is too large to be a trips file", p.name);
+    }
+    Ok(picked)
+}
+
+/// The shared file's display name, from its content provider.
+#[cfg(target_os = "android")]
+fn display_name(
+    env: &mut jni::JNIEnv,
+    resolver: &jni::objects::JObject,
+    uri: &jni::objects::JObject,
+) -> jni::errors::Result<Option<String>> {
+    use jni::objects::{JObject, JString, JValue};
+    let column = android::string(env, "_display_name")?;
+    let columns = env.new_object_array(1, "java/lang/String", &column)?;
+    let null = JObject::null();
+    let cursor = env
+        .call_method(
+            resolver,
+            "query",
+            "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+            &[
+                JValue::Object(uri),
+                JValue::Object(&columns),
+                JValue::Object(&null),
+                JValue::Object(&null),
+                JValue::Object(&null),
+            ],
+        )?
+        .l()?;
+    if cursor.is_null() {
+        return Ok(None);
+    }
+    let mut name = None;
+    if env.call_method(&cursor, "moveToFirst", "()Z", &[])?.z()? {
+        let value = env
+            .call_method(
+                &cursor,
+                "getString",
+                "(I)Ljava/lang/String;",
+                &[JValue::Int(0)],
+            )?
+            .l()?;
+        if !value.is_null() {
+            name = Some(env.get_string(&JString::from(value))?.into());
+        }
+    }
+    env.call_method(&cursor, "close", "()V", &[])?;
+    Ok(name)
 }

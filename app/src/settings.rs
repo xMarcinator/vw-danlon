@@ -6,7 +6,9 @@ use dioxus::prelude::*;
 use vw_danlon::service::SyncOutcome;
 
 use crate::Screen;
-use crate::import::{self, PickButton, Picked};
+#[cfg(not(target_os = "android"))]
+use crate::import::PickButton;
+use crate::import::{self, Picked};
 use crate::setup::{self, AccountStatus, HomeWorkingForm, Problem, SettingsForm, Setup, Theme};
 
 /// Switches the theme now and remembers it in `app.toml`.
@@ -53,7 +55,14 @@ const IMPORT_OLD: &str = "Import old data…";
 const DATA_NOTE: &str =
     "Backups leave out the calendar link and account token. Importing replaces this app's data.";
 #[cfg(target_os = "android")]
-const DATA_NOTE: &str = "Without calendar link and token. Importing replaces this phone's data.";
+const DATA_NOTE: &str = "Without calendar link and token. To import a backup, share its file to vw-danlon; importing replaces this phone's data.";
+
+/// Where the trips file comes from.
+#[cfg(not(target_os = "android"))]
+const TRIPS_NOTE: &str = "Min Volkswagen: Trips → History → share. Overlapping exports are merged.";
+#[cfg(target_os = "android")]
+const TRIPS_NOTE: &str =
+    "Min Volkswagen: Trips → History → share → vw-danlon. Overlapping exports are merged.";
 
 /// Keeps the backup where the user can take it: a file in Downloads on the
 /// desktop; the share sheet on Android.
@@ -332,6 +341,25 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         ),
         Err(e) => data_status.set(Some(Err(e))),
     };
+    // A file shared to the app (Android): a backup waits for Import backup
+    // (it replaces the data), anything else is imported as trips.
+    let mut shared = use_context::<Signal<Option<import::Shared>>>();
+    let mut shared_backup = use_signal(|| None::<Picked>);
+    use_effect(move || {
+        if shared.read().is_none() {
+            return;
+        }
+        let Some(import::Shared(picked)) = shared.write().take() else {
+            return;
+        };
+        let mut on_picked = on_picked;
+        match picked {
+            Ok(p) if vw_danlon::backup::Backup::parse(&p.name, &p.bytes).is_ok() => {
+                shared_backup.set(Some(p));
+            }
+            other => on_picked(other),
+        }
+    });
     #[cfg(not(target_os = "android"))]
     let on_folder = move |folder: std::path::PathBuf| {
         data_job(
@@ -355,6 +383,19 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     };
     #[cfg(target_os = "android")]
     let (folder_button, folder_busy) = (rsx! {}, rsx! {});
+
+    // Android has no file picker: files are shared to the app.
+    #[cfg(not(target_os = "android"))]
+    let (trips_button, backup_button) = (
+        rsx! {
+            PickButton { label: "Import trips file", class: "small-btn", accept: ".xlsx,.csv,.json", on_picked }
+        },
+        rsx! {
+            PickButton { label: "Import backup…", class: "small-btn", accept: ".json", on_picked: on_backup }
+        },
+    );
+    #[cfg(target_os = "android")]
+    let (trips_button, backup_button) = (rsx! {}, rsx! {});
 
     let toggle_file = move |e: Event<FormData>| {
         let on = e.checked();
@@ -567,19 +608,14 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             div { class: "box",
                 b { "Min Volkswagen export (.xlsx) or CSV/JSON file" }
                 span { class: "sub", "{trips}" }
-                span { class: "note",
-                    "Min Volkswagen: Trips → History → share. Overlapping exports are merged."
-                }
-                div { class: "box-actions",
-                    if has_config && !busy() {
-                        PickButton {
-                            label: "Import trips file",
-                            class: "small-btn",
-                            accept: ".xlsx,.csv,.json",
-                            on_picked,
+                span { class: "note", "{TRIPS_NOTE}" }
+                if !cfg!(target_os = "android") {
+                    div { class: "box-actions",
+                        if has_config && !busy() {
+                            {trips_button}
+                        } else {
+                            button { class: "small-btn", disabled: true, "Import trips file" }
                         }
-                    } else {
-                        button { class: "small-btn", disabled: true, "Import trips file" }
                     }
                 }
                 match trips_status() {
@@ -677,11 +713,26 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 } else {
                     {folder_button}
                     button { class: "small-btn", disabled: !has_config, onclick: export, "Export backup…" }
-                    PickButton {
-                        label: "Import backup…",
-                        class: "small-btn",
-                        accept: ".json",
-                        on_picked: on_backup,
+                    {backup_button}
+                }
+            }
+            if let Some(p) = shared_backup() {
+                div { class: "box",
+                    b { "{p.name} is a backup" }
+                    span { class: "note", "Importing it replaces this phone's data." }
+                    div { class: "box-actions",
+                        button {
+                            class: "small-btn",
+                            disabled: busy(),
+                            onclick: move |_| {
+                                if let Some(p) = shared_backup.take() {
+                                    let mut on_backup = on_backup;
+                                    on_backup(Ok(p));
+                                }
+                            },
+                            "Import backup"
+                        }
+                        button { class: "small-btn", onclick: move |_| shared_backup.set(None), "Cancel" }
                     }
                 }
             }

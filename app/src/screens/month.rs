@@ -131,6 +131,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
     // Coming back to the app computes today again at once.
     let resumed = use_context::<Signal<super::Resumed>>();
+    let content = use_context::<super::Content>();
     let mut loaded = use_resource(move || {
         let m = month();
         let _ = cal_sync.read().version;
@@ -207,7 +208,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         adding.set(false);
         sheet.set(None);
         period.set(p);
-        document::eval("document.querySelector('.content')?.scrollTo(0, 0)");
+        content.scroll_to_top();
     });
     // A day in the list opens Day on that date.
     let go = use_callback(move |d: NaiveDate| change.call(Period::day(d)));

@@ -12,6 +12,12 @@ mod setup;
 
 use setup::{Problem, Setup, Theme};
 
+/// The webview platform: tao's window and lifecycle events come through it.
+#[cfg(feature = "desktop")]
+pub use dioxus::desktop as webview;
+#[cfg(all(feature = "mobile", not(feature = "desktop")))]
+pub use dioxus::mobile as webview;
+
 const CSS: Asset = asset!("/assets/app.css");
 const SANS_400: Asset = asset!("/assets/fonts/IBMPlexSans-Regular.woff2");
 const SANS_500: Asset = asset!("/assets/fonts/IBMPlexSans-Medium.woff2");
@@ -137,18 +143,6 @@ fn Icon(d: &'static str, size: u32) -> Element {
     }
 }
 
-/// Runs before Dioxus's document-level `contextmenu` blocker (capture
-/// phase on window) and stops it for text fields, so their native menu
-/// with Paste appears.
-const ALLOW_FIELD_MENU_JS: &str = r#"
-window.addEventListener('contextmenu', function (e) {
-  var t = e.target;
-  if (t && t.closest && t.closest('input, textarea, [contenteditable="true"]')) {
-    e.stopImmediatePropagation();
-  }
-}, true);
-"#;
-
 #[component]
 fn App() -> Element {
     let setup = use_signal(|| Setup::load(setup::data_dir()));
@@ -159,24 +153,51 @@ fn App() -> Element {
             Screen::Settings
         }
     });
-    // Dioxus release builds block the context menu for the whole page,
-    // which also hides Paste (long-press on a phone, right-click on a
-    // desktop) in text fields. Let it through for fields only.
-    use_hook(|| {
-        document::eval(ALLOW_FIELD_MENU_JS);
-    });
     let cal_sync = use_context_provider(|| Signal::new(screens::CalendarSync::default()));
     // The screens show the kept calendar; it is refreshed now and then.
     use_future(move || screens::refresh_calendar_now_and_then(setup, cal_sync));
     // Trips from a connected account, so an arrival shows without Sync now.
     let trip_sync = use_context_provider(|| Signal::new(screens::TripSync::default()));
     use_future(move || screens::sync_trips_now_and_then(setup, trip_sync));
-    let resumed = use_context_provider(|| Signal::new(screens::Resumed::default()));
+    let mut resumed = use_context_provider(|| Signal::new(screens::Resumed::default()));
     // Each page's period: kept while the app runs, across the tabs.
     let today = screens::month::today_of(&setup.peek());
     use_context_provider(|| Signal::new(screens::period::Period::new(today)));
     use_context_provider(|| screens::period::PagePeriods::new(today));
-    use_future(move || screens::watch_resume(resumed));
+    // Coming back to the app (focus, or Android's resume) computes today
+    // again at once.
+    let mut last_back = None;
+    webview::use_wry_event_handler(move |event, _| {
+        if screens::Resumed::is_back(event)
+            && screens::Resumed::due(&mut last_back, std::time::Instant::now())
+        {
+            resumed.write().0 += 1;
+        }
+    });
+    // A file shared to the app (Android), taken at start and on each return;
+    // Settings imports it.
+    let shared = use_context_provider(|| Signal::new(None::<import::Shared>));
+    #[cfg(target_os = "android")]
+    use_effect(move || {
+        let _ = resumed.read();
+        let (mut shared, mut screen) = (shared, screen);
+        spawn(async move {
+            let taken = tokio::task::spawn_blocking(platform::take_shared_file)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| format!("{e:#}")));
+            let picked = match taken {
+                Ok(None) => return,
+                Ok(Some(p)) => Ok(p),
+                Err(e) => Err(e),
+            };
+            shared.set(Some(import::Shared(picked)));
+            screen.set(Screen::Settings);
+        });
+    });
+    #[cfg(not(target_os = "android"))]
+    let _ = shared;
+    let content = use_context_provider(|| screens::Content(Signal::new(None)));
     let theme = setup.read().settings.theme;
     let current = screen();
     // The data pages start with the period selector, not a heading.
@@ -191,7 +212,12 @@ fn App() -> Element {
                 header { class: if headed { "topbar" } else { "topbar hidden" },
                     h1 { "{current.label()}" }
                 }
-                main { class: if current == Screen::Month { "content full" } else { "content" },
+                main {
+                    class: if current == Screen::Month { "content full" } else { "content" },
+                    onmounted: move |e| {
+                        let mut el = content.0;
+                        el.set(Some(e.data()));
+                    },
                     if headed {
                         h1 { "{current.label()}" }
                     }

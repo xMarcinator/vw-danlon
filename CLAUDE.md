@@ -48,6 +48,11 @@ signed with the new key installs.
   files.
 - Mileage follows Skat's rules (LL § 9 B); they are the law and are not
   made switchable.
+- No JavaScript in the app: use Dioxus/Rust APIs and JNI; Dioxus's own
+  internal JavaScript is fine. No `document::eval`, no `<script>`, no .js
+  files (`app/tests/no_javascript.rs` checks it). Android receives files
+  by "Share to vw-danlon" (intent-filter patched into the generated
+  manifest by the release workflow), not a file picker.
 - Never read or change the user's `config.toml`, `vw-danlon.db` or
   `connected-cars-token` in the repo root; test on copies. Never call
   Connected Cars from tests.

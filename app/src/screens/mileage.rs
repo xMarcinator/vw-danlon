@@ -845,7 +845,7 @@ fn fradrag_view(
     f: Option<&mileage::Fradrag>,
     year: i32,
     today: chrono::NaiveDate,
-    mut copied: Signal<Option<String>>,
+    copied: Signal<Option<String>>,
     tabs: Element,
 ) -> Element {
     let head = rsx! {
@@ -877,14 +877,11 @@ fn fradrag_view(
     let months = fradrag_months(f);
     let current = super::week::month_of(today);
     let copy = move |label: &'static str, text: String| {
-        spawn(async move {
-            let ok = super::danlon::copy(text.clone()).await;
-            copied.set(Some(if ok {
-                format!("Copied {text}")
-            } else {
-                format!("{label} can't be copied")
-            }));
-        });
+        let mut copied = copied;
+        copied.set(Some(match crate::platform::copy_text(&text) {
+            Ok(()) => format!("Copied {text}"),
+            Err(e) => format!("{label} can't be copied: {e:#}"),
+        }));
     };
     rsx! {
         section { class: "panel fradrag", "aria-label": "Kørselsfradrag",

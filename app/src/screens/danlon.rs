@@ -83,43 +83,8 @@ fn copy_actions(k: &Korsel) -> Vec<(String, String)> {
     out
 }
 
-/// Writes the text the Rust side sends to the clipboard and answers whether
-/// it worked; the textarea fallback is for webviews without the async
-/// clipboard (Android WebView).
-const COPY_JS: &str = r#"
-const text = await dioxus.recv();
-let ok = false;
-try {
-  await navigator.clipboard.writeText(text);
-  ok = true;
-} catch (_) {
-  const t = document.createElement('textarea');
-  t.value = text;
-  t.setAttribute('readonly', '');
-  t.style.position = 'fixed';
-  t.style.opacity = '0';
-  document.body.appendChild(t);
-  t.select();
-  try { ok = document.execCommand('copy'); } catch (_) {}
-  t.remove();
-}
-dioxus.send(ok);
-"#;
-
 /// An arrow out of a box.
 const OPEN_ICON: &str = "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6";
-
-/// Scrolls the opened ⋯ menu into view once it is drawn (on a phone it
-/// can open under the tab bar).
-const SHOW_MENU_JS: &str = "setTimeout(() => document.querySelector('.dl-menu')?.scrollIntoView({ block: 'nearest' }), 50);";
-
-pub(super) async fn copy(text: String) -> bool {
-    let mut eval = document::eval(COPY_JS);
-    if eval.send(text).is_err() {
-        return false;
-    }
-    eval.recv::<bool>().await.unwrap_or(false)
-}
 
 #[component]
 pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
@@ -385,9 +350,6 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                                 onclick: move |_| {
                                                     let open = menu() == Some(date);
                                                     menu.set(if open { None } else { Some(date) });
-                                                    if !open {
-                                                        document::eval(SHOW_MENU_JS);
-                                                    }
                                                 },
                                                 svg {
                                                     "aria-hidden": "true",
@@ -401,7 +363,21 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                                 }
                                             }
                                             if menu() == Some(date) {
-                                                div { class: "dl-menu", role: "menu", "aria-label": "Actions",
+                                                div {
+                                                    class: "dl-menu",
+                                                    role: "menu",
+                                                    "aria-label": "Actions",
+                                                    // On a phone it can open under the tab bar.
+                                                    onmounted: move |e| async move {
+                                                        let _ = e
+                                                            .data()
+                                                            .scroll_to_with_options(ScrollToOptions {
+                                                                behavior: ScrollBehavior::Smooth,
+                                                                vertical: ScrollLogicalPosition::Nearest,
+                                                                horizontal: ScrollLogicalPosition::Nearest,
+                                                            })
+                                                            .await;
+                                                    },
                                                     for (label , text) in copy_actions(&k) {
                                                         button {
                                                             role: "menuitem",
@@ -409,10 +385,9 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                                                 menu.set(None);
                                                                 let text = text.clone();
                                                                 spawn(async move {
-                                                                    let said = if copy(text.clone()).await {
-                                                                        format!("Copied {text}")
-                                                                    } else {
-                                                                        "Copying failed".to_string()
+                                                                    let said = match crate::platform::copy_text(&text) {
+                                                                        Ok(()) => format!("Copied {text}"),
+                                                                        Err(e) => format!("Copying failed: {e:#}"),
                                                                     };
                                                                     let id = toast.peek().as_ref().map_or(0, |t| t.0) + 1;
                                                                     toast.set(Some((id, said)));
