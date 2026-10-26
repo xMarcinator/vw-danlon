@@ -38,9 +38,16 @@ Phone thumb layout (approved mockups, artifact K5zwEk1uPeNuifnnaZjZ2W, boards `P
 
 
 ## Done summary
-TBD
+On phone width every data page now opens with its period title (h1 + sub; tapping it returns to the current period and it is disabled when already there) and ends with a dock fixed right above the tab bar: the page's main actions over the period row (48 px arrows around the switch, or "Whole calendar years" / "Whole holiday years"). Hours: Start work (56 px, split with Started at), or Private time + Stop work, moved from the work card into the dock, also on Day for today; Mileage: Reimbursable / All driving / Fradrag; Danløn: Open Danløn app + Mark <date> entered for the next day; Vacation: the year row only (its "How vacation is counted" card was already in the page, so nothing moved there). The selector is now `period::Bar` (top card, phone header, dock row) replacing PeriodBar/PeriodPicker/YearBar; desktop keeps the card unchanged, width chosen by CSS only (no JavaScript).
 
+Verified live on the desktop build (scratch data dir, offline) at 390x844: Hours Month/Week/Day, step back and tap title to return, Start work -> Private time + Stop work -> Stop work, Started at row, last month row scrolls clear of the dock; Mileage tabs and Fradrag year stepping; Danløn Mark 1 Oct entered (next became 2 Oct); Vacation year row. At 1280 px Hours and Danløn show the unchanged period card. Not verified: dark theme, a real phone/Android build (android clippy not run; no platform-specific code changed), private-time running state in the dock. The scratch data now has 1 Oct ticked and a short home-work entry from the test.
+
+Tier: not reported (model: claude-opus-5-5)
+
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 3045f8655a16fb6bc95a368ee72c1f2f8ef3e796
+- Tests: cargo test --workspace, cargo clippy --workspace --all-targets, dx build --platform desktop
 - PRs:
