@@ -367,7 +367,7 @@ fn work_segments(
 
 /// What a timed calendar event stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EventKind {
+pub(crate) enum EventKind {
     /// Planned working time at the event's address.
     Work,
     /// A private appointment (doctor etc.): not working time.
@@ -376,7 +376,7 @@ enum EventKind {
 
 /// Classify a timed event by its title: private when one of
 /// `private_keywords` is a whole word of it (case-insensitive).
-fn classify(summary: &str, private_keywords: &[String]) -> EventKind {
+pub(crate) fn classify(summary: &str, private_keywords: &[String]) -> EventKind {
     let lower = summary.to_lowercase();
     let private = lower
         .split(|c: char| !c.is_alphanumeric())

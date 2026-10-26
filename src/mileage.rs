@@ -10,6 +10,10 @@
 //! day's first trip arriving at the entry's address and the last trip
 //! leaving it are business trips, with the entry's title as purpose. Trips
 //! in between (a lunch errand) are not.
+//!
+//! Private appointments (see `calendar.private_keywords`) are never business
+//! visits: a trip arriving at or leaving an appointment's address that day,
+//! or starting during an appointment, is private.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -21,7 +25,7 @@ use chrono_tz::Tz;
 use crate::address;
 use crate::calendar::Occurrence;
 use crate::config::{MileageConfig, MileageRate};
-use crate::month::Month;
+use crate::month::{self, EventKind, Month};
 use crate::trips::Trip;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +37,47 @@ pub enum Status {
     Incomplete(&'static str),
 }
 
+/// A private appointment from the calendar (doctor etc.).
+#[derive(Debug, Clone)]
+pub struct Appointment {
+    pub start: DateTime<Tz>,
+    pub end: DateTime<Tz>,
+    pub location: String,
+}
+
+impl Appointment {
+    /// The trip drives to or from this appointment: it arrives at or leaves
+    /// its address on the appointment's date, or starts during it.
+    fn covers(&self, trip: &Trip) -> bool {
+        let at = |a: &str| !self.location.trim().is_empty() && address::matches(a, &self.location);
+        (self.start <= trip.start && trip.start < self.end)
+            || (trip.start.date_naive() == self.start.date_naive()
+                && (at(&trip.to) || at(&trip.from)))
+    }
+}
+
+/// Timed calendar events whose title makes them private appointments.
+pub fn appointments(calendar: &[Occurrence], private_keywords: &[String]) -> Vec<Appointment> {
+    calendar
+        .iter()
+        .filter_map(|occ| match occ {
+            Occurrence::Timed {
+                start,
+                end,
+                summary,
+                location,
+            } if month::classify(summary, private_keywords) == EventKind::Private => {
+                Some(Appointment {
+                    start: *start,
+                    end: *end,
+                    location: location.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Classifies a trip. `purpose` is the trip's own purpose, or the calendar
 /// entry it drives to or from (see [`calendar_purposes`]).
 pub fn classify(
@@ -40,6 +85,7 @@ pub fn classify(
     purpose: &str,
     cfg: &MileageConfig,
     workplace: Option<&str>,
+    appointments: &[Appointment],
 ) -> Status {
     let is = address::matches;
     if let (Some(work), Some(home)) = (workplace, &cfg.home) {
@@ -47,6 +93,9 @@ pub fn classify(
         if (is(f, home) && is(t, work)) || (is(f, work) && is(t, home)) {
             return Status::Commute;
         }
+    }
+    if appointments.iter().any(|a| a.covers(trip)) {
+        return Status::Private;
     }
     let business = trip.business.unwrap_or(!purpose.is_empty());
     if !business {
@@ -66,11 +115,13 @@ pub fn classify(
 
 /// Purpose for each trip (same order as `trips`): its own, or the title of
 /// the calendar entry away from the workplace that it is the day's first
-/// arrival at or last departure from. Empty if neither.
+/// arrival at or last departure from. Empty if neither. Private
+/// appointments are never visits.
 pub fn calendar_purposes(
     trips: &[Trip],
     calendar: &[Occurrence],
     workplace: Option<&str>,
+    private_keywords: &[String],
 ) -> Vec<String> {
     let mut visits: BTreeMap<NaiveDate, Vec<(&str, &str)>> = BTreeMap::new();
     for occ in calendar {
@@ -82,6 +133,7 @@ pub fn calendar_purposes(
         } = occ
             && !location.trim().is_empty()
             && !workplace.is_some_and(|w| address::matches(location, w))
+            && month::classify(summary, private_keywords) == EventKind::Work
         {
             visits
                 .entry(start.date_naive())
@@ -162,22 +214,25 @@ impl MileageMonth {
 }
 
 /// `calendar` should cover the year up to the end of `month`, so business
-/// km earlier in the year are counted the same way.
+/// km earlier in the year are counted the same way. Events titled with one
+/// of `private_keywords` are private appointments.
 pub fn compute(
     cfg: &MileageConfig,
     workplace: Option<&str>,
     month: Month,
     trips: &[Trip],
     calendar: &[Occurrence],
+    private_keywords: &[String],
 ) -> Result<MileageMonth> {
     let rate = cfg.rate(month.year)?;
     let year_start = NaiveDate::from_ymd_opt(month.year, 1, 1).unwrap();
     let km = |t: &Trip| t.distance_km.unwrap_or(0.0);
-    let purposes = calendar_purposes(trips, calendar, workplace);
+    let purposes = calendar_purposes(trips, calendar, workplace, private_keywords);
+    let appointments = appointments(calendar, private_keywords);
     let classified = trips
         .iter()
         .zip(&purposes)
-        .map(|(t, p)| (t, p, classify(t, p, cfg, workplace)));
+        .map(|(t, p)| (t, p, classify(t, p, cfg, workplace, &appointments)));
 
     let mut ytd = 0.0;
     let mut km_before = 0.0;
@@ -318,7 +373,7 @@ mod tests {
     const WORK: Option<&str> = Some("Kontor");
 
     fn classify_own(t: &Trip, c: &MileageConfig) -> Status {
-        classify(t, &t.purpose, c, WORK)
+        classify(t, &t.purpose, c, WORK, &[])
     }
 
     #[test]
@@ -405,7 +460,15 @@ mod tests {
             trip("2026-10-07 07:30", "Hjem", "Kontor", "", 25.0),
             trip("2026-10-07 16:00", "Kontor", "Hjem", "", 25.0),
         ];
-        let m = compute(&c, WORK, Month::parse("2026-10").unwrap(), &trips, &cal).unwrap();
+        let m = compute(
+            &c,
+            WORK,
+            Month::parse("2026-10").unwrap(),
+            &trips,
+            &cal,
+            &[],
+        )
+        .unwrap();
         let reimbursed: Vec<_> = m
             .entries
             .iter()
@@ -427,12 +490,80 @@ mod tests {
             trip("2026-10-05 08:00", "Hjem", "Kunde B", "Service", 30.0),
             trip("2026-10-06 08:00", "Hjem", "Kontor", "Arbejde", 25.0),
         ];
-        let m = compute(&c, WORK, Month::parse("2026-10").unwrap(), &trips, &[]).unwrap();
+        let m = compute(&c, WORK, Month::parse("2026-10").unwrap(), &trips, &[], &[]).unwrap();
         assert_eq!(m.km_before, 19_990.0);
         assert_eq!(m.km_at(3.94), 10.0);
         assert_eq!(m.km_at(2.28), 20.0);
         assert!((m.total_amount() - (39.40 + 45.60)).abs() < 1e-9);
         assert_eq!(m.skipped.len(), 1);
         assert_eq!(m.skipped[0].1, Status::Commute);
+    }
+
+    fn appointment(start: &str, end: &str, summary: &str, location: &str) -> Occurrence {
+        let tz = chrono_tz::Europe::Copenhagen;
+        Occurrence::Timed {
+            start: parse_time(start, tz).unwrap(),
+            end: parse_time(end, tz).unwrap(),
+            summary: summary.into(),
+            location: location.into(),
+        }
+    }
+
+    #[test]
+    fn trips_to_and_from_private_appointments_are_private() {
+        let c = cfg();
+        let keywords = vec!["Læge".to_string()];
+        let laege = "Lægehuset, Søndergade 3, 8000 Aarhus C";
+        let cal = vec![
+            appointment("2026-10-06 10:00", "2026-10-06 11:15", "Læge", laege),
+            // Without an address, only the time window marks trips private.
+            appointment("2026-10-07 13:00", "2026-10-07 14:00", "Tandlæge Læge", ""),
+        ];
+        let trips = vec![
+            // Kontoret → Læge and Læge → Kontoret, with a purpose given.
+            trip("2026-10-06 09:45", "Kontor", laege, "Møde", 6.0),
+            trip("2026-10-06 11:20", laege, "Kontor", "Møde", 6.0),
+            // Starts inside the appointment window, no address match.
+            trip("2026-10-07 13:05", "Kontor", "Klinik", "Møde", 4.0),
+            // Same address on another day is not the appointment.
+            trip("2026-10-08 09:00", "Kontor", laege, "Levering", 6.0),
+        ];
+        let m = compute(
+            &c,
+            WORK,
+            Month::parse("2026-10").unwrap(),
+            &trips,
+            &cal,
+            &keywords,
+        )
+        .unwrap();
+        let reimbursed: Vec<_> = m.entries.iter().map(|e| e.purpose.as_str()).collect();
+        assert_eq!(reimbursed, ["Levering"]);
+        let private = m.skipped.iter().filter(|s| s.1 == Status::Private).count();
+        assert_eq!(private, 3);
+
+        let mut log = Vec::new();
+        write_logbook(&c, &m, &mut log).unwrap();
+        let log = String::from_utf8(log).unwrap();
+        assert!(!log.contains("Møde"), "{log}");
+    }
+
+    #[test]
+    fn located_appointment_is_never_a_visit_purpose() {
+        let laege = "Søndergade 3, 8000 Aarhus C";
+        let cal = vec![appointment(
+            "2026-10-06 10:00",
+            "2026-10-06 11:15",
+            "Læge",
+            laege,
+        )];
+        let trips = vec![
+            trip("2026-10-06 09:45", "Hjem", laege, "", 6.0),
+            trip("2026-10-06 11:20", laege, "Hjem", "", 6.0),
+        ];
+        let keywords = vec!["Læge".to_string()];
+        assert_eq!(calendar_purposes(&trips, &cal, WORK, &keywords), ["", ""]);
+        // Without the keyword the same event is a business visit.
+        assert_eq!(calendar_purposes(&trips, &cal, WORK, &[]), ["Læge", "Læge"]);
     }
 }

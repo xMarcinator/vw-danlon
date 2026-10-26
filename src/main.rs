@@ -135,7 +135,14 @@ fn main() -> Result<()> {
             let month = Month::parse(&month)?;
             let trips = trips::load(&trips, cfg.timezone)?;
             let cal = calendar(&cfg, month)?;
-            let m = mileage::compute(mcfg, cfg.workplace.as_deref(), month, &trips, &cal)?;
+            let m = mileage::compute(
+                mcfg,
+                cfg.workplace.as_deref(),
+                month,
+                &trips,
+                &cal,
+                private_keywords(&cfg),
+            )?;
             mileage::write_logbook(mcfg, &m, create(&out)?)?;
             print_mileage(&m);
             println!("Wrote {}", out.display());
@@ -346,8 +353,18 @@ fn mileage_for(
 ) -> Result<Option<MileageMonth>> {
     cfg.mileage
         .as_ref()
-        .map(|m| mileage::compute(m, cfg.workplace.as_deref(), month, trips, cal))
+        .map(|m| {
+            let workplace = cfg.workplace.as_deref();
+            mileage::compute(m, workplace, month, trips, cal, private_keywords(cfg))
+        })
         .transpose()
+}
+
+fn private_keywords(cfg: &Config) -> &[String] {
+    cfg.calendar
+        .as_ref()
+        .map(|c| c.private_keywords.as_slice())
+        .unwrap_or(&[])
 }
 
 fn create(path: &Path) -> Result<BufWriter<File>> {
