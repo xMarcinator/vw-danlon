@@ -103,7 +103,7 @@ const OPEN_ICON: &str = "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6";
 /// can open under the tab bar).
 const SHOW_MENU_JS: &str = "setTimeout(() => document.querySelector('.dl-menu')?.scrollIntoView({ block: 'nearest' }), 50);";
 
-async fn copy(text: String) -> bool {
+pub(super) async fn copy(text: String) -> bool {
     let mut eval = document::eval(COPY_JS);
     if eval.send(text).is_err() {
         return false;
@@ -263,7 +263,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 div { class: "bar-fill", style: "width: {pct:.1}%" }
             }
             span { class: "note",
-                "Type each Komme/gå entry (time and break) into the Danløn app; private time splits the day into entries, and the break is only lunch. Tick the day off when done. Ticks are only stored on this device."
+                "Ticks stay on this device."
             }
         }
         div { class: "dl-tabs", role: "tablist", "aria-label": "Show",

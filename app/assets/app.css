@@ -2587,7 +2587,7 @@ table.rates td:first-child {
 @media (max-width: 719px) {
   .mileage-tabs.narrow-only {
     display: grid !important;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     padding: 3px;
     border-radius: 10px;
   }
@@ -2965,4 +2965,74 @@ table.rates td:first-child {
   flex-direction: column;
   align-self: center;
   margin-left: 0;
+}
+
+/* Mileage: the Fradrag tab. */
+.fradrag-sum {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 12px 16px 0;
+}
+
+.fradrag-sum b {
+  font-size: 24px;
+  flex-grow: 1;
+}
+
+.fradrag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 16px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--row);
+}
+
+.fradrag-num {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fradrag-num b {
+  font-size: 20px;
+}
+
+.fradrag-foot {
+  display: block;
+  padding: 10px 16px 0;
+  font-size: 12px;
+}
+
+.panel.fradrag {
+  padding-bottom: 14px;
+}
+
+.panel.fradrag > .pt-status {
+  margin: 10px 16px 0;
+}
+
+.fradrag-month {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  padding: 10px 16px;
+}
+
+.fradrag-month b {
+  font-size: 14px;
+}
+
+.fradrag-month .sub {
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.fradrag-month .r {
+  text-align: right;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
 }

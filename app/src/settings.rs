@@ -50,9 +50,10 @@ type DataJob = Box<dyn FnOnce(&Setup) -> anyhow::Result<String> + Send>;
 const IMPORT_OLD: &str = "Import old data…";
 
 #[cfg(not(target_os = "android"))]
-const DATA_NOTE: &str = "Import old data: pick the folder you used with the command-line tool (config.toml, trips.json, state.json). Its settings, trips and state replace this app's; then trips.json and state.json are deleted there, config.toml stays. A backup holds settings, trips, ticks, lunch, private and home-working time — not the calendar link or account token, which you enter again on the other device. Importing a backup replaces this app's data.";
+const DATA_NOTE: &str =
+    "Backups leave out the calendar link and account token. Importing replaces this app's data.";
 #[cfg(target_os = "android")]
-const DATA_NOTE: &str = "Move your data from the computer: export a backup there, then import it here; it replaces the data on this phone. The calendar link and account token are not in the backup.";
+const DATA_NOTE: &str = "Without calendar link and token. Importing replaces this phone's data.";
 
 /// Keeps the backup where the user can take it: a file in Downloads on the
 /// desktop; the share sheet on Android.
@@ -174,7 +175,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let link_hint = if s.link_in_store {
         "A link is saved. Paste a new one to replace it."
     } else if s.config.as_ref().is_some_and(|c| c.calendar.is_some()) {
-        "The config file names a calendar. Paste the link here to keep it in the secret store instead."
+        "Paste the link to keep it in the secret store."
     } else {
         "https://calendar.proton.me/…"
     };
@@ -396,7 +397,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 oninput: move |e| link.set(e.value()),
             }
             span { class: "note",
-                "Timed events are working hours at the event’s address. All-day events are days off. The link holds the key to your calendar, so it is kept in {store}, never in the config file."
+                "Kept in {store}."
             }
         }
 
@@ -411,14 +412,13 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         value: "{workplace}",
                         oninput: move |e| workplace.set(e.value()),
                     }
-                    span { class: "note", "Always counts as work, also when a colleague drives on" }
+                    span { class: "note", "Always counts as work" }
                     match detected.read().clone().flatten() {
                         Some(Some(found)) => rsx! {
                             div { class: "detected", role: "status",
                                 span { class: "grow",
-                                    "Detected from your calendar: "
+                                    "From the calendar: "
                                     b { "{found}" }
-                                    ". Used until you save a workplace."
                                 }
                                 button {
                                     class: "small-btn primary-sm",
@@ -437,7 +437,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         },
                         Some(None) => rsx! {
                             div { class: "detected warn", role: "status",
-                                "No fixed workplace set and none found in the calendar: every work event with an address counts as a client visit, so drives there are reimbursed."
+                                "No fixed workplace: every work address counts as a client visit."
                             }
                         },
                         None => rsx! {},
@@ -459,9 +459,9 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     }
                     span { class: "note",
                         if has_mileage {
-                            "Home ↔ workplace is commuting, never reimbursed"
+                            "Home ↔ workplace is commuting"
                         } else {
-                            "Part of the mileage logbook, which isn't set up. "
+                            "Needs the mileage logbook. "
                             button {
                                 class: "link-btn",
                                 onclick: move |_| screen.set(Screen::Mileage),
@@ -476,7 +476,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         section { class: "card", "aria-labelledby": "s-home",
             h2 { id: "s-home", "Working from home" }
             span { class: "sub",
-                "A work event titled like this, or placed at your home address, counts its planned hours as worked (minus lunch and private time). The Start/Stop timer on Month counts the time you measure instead. Days at home are not commuting days."
+                "Counts the planned hours as worked."
             }
             div { class: "grid2",
                 div { class: "field",
@@ -487,7 +487,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         value: "{hw_keywords}",
                         oninput: move |e| hw_keywords.set(e.value()),
                     }
-                    span { class: "note", "Whole words, separated by commas" }
+                    span { class: "note", "Whole words, comma-separated" }
                 }
                 label { class: "check hw-check",
                     input {
@@ -503,32 +503,32 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         section { class: "card", "aria-labelledby": "s-rules",
             h2 { id: "s-rules", "Mileage rules" }
             span { class: "sub",
-                "All driving is logged. Only trips that count under Skat’s rules for tax-free kørselsgodtgørelse are reimbursed; the rest are listed as “not reimbursable” with the reason."
+                "All driving is logged; Skat’s rules decide what is reimbursed."
             }
             ul { class: "rules",
                 li {
                     b { "Client visits" }
-                    " (work events at other addresses): reimbursed, and the time is work hours. Home ↔ client counts for 60 working days per address within 12 months; work ↔ client always."
+                    ": reimbursed · home ↔ client 60 days per address a year"
                 }
                 li {
                     b { "Home ↔ fixed workplace" }
-                    ": private (commute). Logged as driving, never reimbursed, not work hours."
+                    ": commute, not reimbursed"
                 }
                 li {
                     b { "Errands on the way home" }
-                    ": private. After a client visit only the direct km home are reimbursed."
+                    ": private"
                 }
                 li {
                     b { "Between workplaces" }
-                    " during the day: reimbursed (tick Business on the trip if the tool can’t see it)."
+                    ": reimbursed"
                 }
             }
             span { class: "note",
-                "These follow Skat (LL § 9 B, skat.dk) and can’t be switched off. Kørselsfradrag (LL § 9 C) is separate; the Mileage screen shows the estimate. Nothing is sent to Skat; godtgørelse reaches Skat through Danløn."
+                "LL § 9 B · fixed by Skat."
             }
             if rates.is_empty() {
                 span { class: "note",
-                    "No yearly rates: the mileage logbook isn't set up. "
+                    "No rates: the mileage logbook isn't set up. "
                     button {
                         class: "link-btn",
                         onclick: move |_| screen.set(Screen::Mileage),
@@ -557,7 +557,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     }
                 }
                 span { class: "note",
-                    "Rates are Skatterådet’s for each year, in [[mileage.rates]] in config.toml; add next year’s when published."
+                    "Skatterådet’s rates, in config.toml"
                 }
             }
         }
@@ -568,7 +568,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 b { "Min Volkswagen export (.xlsx) or CSV/JSON file" }
                 span { class: "sub", "{trips}" }
                 span { class: "note",
-                    "In Min Volkswagen: Ture → Historik → share icon. Exports can overlap: a trip already imported (same start time and odometer) is skipped. A CSV/JSON file has start, end, distance_km, from, to, purpose."
+                    "Min Volkswagen: Trips → History → share. Overlapping exports are merged."
                 }
                 div { class: "box-actions",
                     if has_config && !busy() {
@@ -642,7 +642,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
                 }
                 span { class: "note",
-                    "Syncs by itself when the app opens or comes back, and every 15 minutes while it is open; Sync now fetches at once. Uses a device token kept in {store}; your password is never stored. Uses the app’s own unofficial access, so it can stop working when the app changes; the export above always works."
+                    "Auto-syncs every 15 min · unofficial, may stop working · password never stored"
                 }
             }
         }
@@ -659,7 +659,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     "Keep secrets in a file readable only by you"
                     br {}
                     span { class: "note",
-                        "For systems without a keychain. Secrets already saved stay where they are."
+                        "For systems without a keychain."
                     }
                 }
             }
