@@ -568,7 +568,10 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         }
                         tbody {
                             for r in rows.iter().cloned() {
-                                tr { class: if r.business { "" } else { "quiet" },
+                                // Keyed by the trip (and rate: a trip crossing
+                                // 20.000 km is two rows), so a removed row
+                                // never leaves its Business box on the next.
+                                tr { key: "{r.start}{r.rate}", class: if r.business { "" } else { "quiet" },
                                     td { class: "nowrap", "{r.date}" }
                                     td { class: "mono small", "{r.depart}" }
                                     td { "{r.route}" }
@@ -611,7 +614,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 }
                 ul { class: "plain-list narrow-only",
                     for r in rows.iter().cloned() {
-                        li { class: "trip-entry",
+                        li { key: "{r.start}{r.rate}", class: "trip-entry",
                             b { "{r.purpose}" }
                             b { class: "r", "{r.amount}" }
                             span { class: "sub", "{r.short_date} {r.depart} · {r.route}" }
