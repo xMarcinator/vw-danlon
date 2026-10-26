@@ -162,7 +162,7 @@ cargo run -- checklist 2026-11
     Komme/gå  07:58 to 10:00 · break none · 2h 02m
     Komme/gå  11:15 to 16:00 · break 30m · 4h 15m
 2026-11-21  lør  nothing to enter (weekend)
-2026-11-25  ons  fix first: ankomst til … uden registreret afgang
+2026-11-25  ons  fix first: arrived at …, no departure
 
 Days entered: 1 of 18 · Trips entered: 0 of 3 · 1 to fix first
 ```
@@ -439,7 +439,7 @@ today it counts nothing yet. Home working that is not in the calendar is
 timed like private time:
 
 ```sh
-cargo run -- home start [label]   # label defaults to "Hjemmearbejde"
+cargo run -- home start [label]   # label defaults to "Home"
 cargo run -- home stop
 cargo run -- home list 2026-11
 cargo run -- home edit <id> 08:00 12:30

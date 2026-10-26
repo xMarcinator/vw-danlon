@@ -163,9 +163,9 @@ pub struct PlannedWindow {
 
 /// The label of a private timer started without one and without a linked
 /// event.
-pub const DEFAULT_LABEL: &str = "Privat";
+pub const DEFAULT_LABEL: &str = "Private";
 /// The label of a home-working timer started without one.
-pub const HOME_LABEL: &str = "Hjemmearbejde";
+pub const HOME_LABEL: &str = "Home";
 
 /// Which calendar appointment `private start` links to.
 pub enum EventChoice {

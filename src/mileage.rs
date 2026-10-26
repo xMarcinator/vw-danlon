@@ -351,9 +351,9 @@ fn classify_all(
         };
         let complete = |t: &Trip| {
             if t.from.is_empty() || t.to.is_empty() {
-                Err("mangler fra/til")
+                Err("missing from/to")
             } else if km(t) <= 0.0 {
-                Err("mangler km")
+                Err("missing km")
             } else {
                 Ok(())
             }
@@ -418,7 +418,7 @@ fn classify_all(
             continue;
         }
         if purpose.is_empty() {
-            decided[i] = Some(incomplete("mangler formål"));
+            decided[i] = Some(incomplete("missing purpose"));
             continue;
         }
         if let Err(why) = complete(t) {
@@ -515,7 +515,7 @@ fn classify_all(
             .fold(None, |m: Option<f64>, k| Some(m.map_or(k, |m| m.min(k))));
         let Some(direct) = direct else {
             decided[i] = Some(incomplete(
-                "mangler direkte km til hjem/arbejde (sæt turen med `trip business|private`)",
+                "missing the direct km to home or work (set the trip with `trip business|private`)",
             ));
             continue;
         };
@@ -1080,7 +1080,7 @@ mod tests {
         );
         let mut t = trip("2026-10-05 08:00", "Hjem", "Kunde A", "", 20.0);
         t.business = Some(true);
-        assert_eq!(classify_own(&t, &c), Status::Incomplete("mangler formål"));
+        assert_eq!(classify_own(&t, &c), Status::Incomplete("missing purpose"));
     }
 
     fn visit(start: &str, summary: &str, location: &str) -> Occurrence {
@@ -1492,7 +1492,7 @@ mod tests {
         assert_eq!(m.total_km(), 75.0);
         assert!(matches!(
             m.driving[1].status,
-            Status::Incomplete(why) if why.starts_with("mangler direkte km")
+            Status::Incomplete(why) if why.starts_with("missing the direct km")
         ));
     }
 

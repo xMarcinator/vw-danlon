@@ -617,7 +617,7 @@ pub fn build(
                 (span.into_iter().collect(), None)
             } else if match_locations.is_empty() {
                 let note = (!day_trips.is_empty() && day_home.is_empty())
-                    .then(|| "kørsel, men ingen arbejdsadresse i kalenderen".to_string());
+                    .then(|| "driving, but no work address in the calendar".to_string());
                 (Vec::new(), note)
             } else {
                 let w = work_segments(
@@ -650,11 +650,9 @@ pub fn build(
                         }
                         None
                     }
-                    (Some((_, loc)), false) => {
-                        Some(format!("ankomst til {loc} uden registreret afgang"))
-                    }
+                    (Some((_, loc)), false) => Some(format!("arrived at {loc}, no departure")),
                     (None, false) if w.no_driving_to_work && day_home.is_empty() => {
-                        Some("ingen kørsel til eller fra arbejdsadressen".to_string())
+                        Some("no driving to or from the work address".to_string())
                     }
                     (None, _) => None,
                 };
@@ -663,7 +661,7 @@ pub fn build(
             if note.is_none()
                 && let Some(summary) = missing_location.get(&date)
             {
-                note = Some(format!("kalenderpost uden adresse: {summary}"));
+                note = Some(format!("calendar event without an address: {summary}"));
             }
 
             // Nothing needs fixing on a day without work: driving then is
@@ -1329,12 +1327,7 @@ END:VEVENT
 
         let thu = &r.days[7];
         assert_eq!(thu.worked_hours, 0.0);
-        assert!(
-            thu.check
-                .as_deref()
-                .unwrap()
-                .contains("uden registreret afgang")
-        );
+        assert!(thu.check.as_deref().unwrap().contains(", no departure"));
 
         // Saturday has no work event: its driving is private, nothing to fix.
         let sat = &r.days[9];
@@ -1906,13 +1899,13 @@ END:VEVENT
         }
         for today in [Today::from(date(27)), Today::from(now("2026-10-27 15:00"))] {
             let c = checks(today);
-            assert!(c[0].as_deref().unwrap().contains("uden registreret afgang"));
+            assert!(c[0].as_deref().unwrap().contains(", no departure"));
             assert_eq!(c[1], None, "{today:?}");
         }
         let c = checks(Today::from(date(28)));
         assert_eq!(
             c[1].as_deref(),
-            Some("ingen kørsel til eller fra arbejdsadressen")
+            Some("no driving to or from the work address")
         );
     }
 
