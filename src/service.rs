@@ -1404,17 +1404,21 @@ pub fn day_timeline(
 /// The time at work as the Day list shows it: the periods at work with
 /// the time at a client (part of `work`) split out as client visits, in
 /// time order. Unlike [`day_timeline`], lunch, private time and driving do
-/// not cut it.
+/// not cut it. Home-working time (part of `work`) is left out: the Day list
+/// shows it as its own "Worked from home" entry, not as time at work.
 pub fn day_work_steps(
     work: &[LocalSpan],
     clients: &[LocalSpan],
+    home: &[LocalSpan],
 ) -> Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> {
-    let mut out: Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> = month::subtract(work, clients)
-        .into_iter()
-        .map(|(s, e)| (s, e, TimelineKind::Work))
-        .chain(clients.iter().map(|(s, e)| (*s, *e, TimelineKind::Client)))
-        .filter(|(s, e, _)| s < e)
-        .collect();
+    let away = month::subtract(work, home);
+    let mut out: Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> =
+        month::subtract(&away, clients)
+            .into_iter()
+            .map(|(s, e)| (s, e, TimelineKind::Work))
+            .chain(clients.iter().map(|(s, e)| (*s, *e, TimelineKind::Client)))
+            .filter(|(s, e, _)| s < e)
+            .collect();
     out.sort_by_key(|(s, _, _)| *s);
     out
 }
@@ -1756,7 +1760,7 @@ mod tests {
         };
         let hm = |t: NaiveDateTime| t.format("%H:%M").to_string();
         let rows = |work: &[LocalSpan], clients: &[LocalSpan]| {
-            day_work_steps(work, clients)
+            day_work_steps(work, clients, &[])
                 .into_iter()
                 .map(|(s, e, k)| (hm(s), hm(e), k))
                 .collect::<Vec<_>>()
@@ -1783,6 +1787,16 @@ mod tests {
         assert_eq!(
             rows(&[span("08:58", "16:10")], &[]),
             want(&[("08:58", "16:10", Work)])
+        );
+        // Home working added afterwards is part of the worked time but not
+        // time at work: it gets its own entry.
+        let worked = [span("08:58", "13:35"), span("15:18", "18:14")];
+        assert_eq!(
+            day_work_steps(&worked, &[], &[span("15:18", "18:14")])
+                .into_iter()
+                .map(|(s, e, k)| (hm(s), hm(e), k))
+                .collect::<Vec<_>>(),
+            want(&[("08:58", "13:35", Work)])
         );
     }
 

@@ -663,7 +663,9 @@ fn day_steps(
     let mut steps = Vec::new();
     let place = d.work_locations.first().cloned().unwrap_or_default();
     // At work, with the time at a client split out as a client visit.
-    for (s, e, kind) in service::day_work_steps(&local(&d.segments), &local(&d.clients)) {
+    for (s, e, kind) in
+        service::day_work_steps(&local(&d.segments), &local(&d.clients), &local(&d.home))
+    {
         let client = kind == TimelineKind::Client;
         let ongoing = d.so_far && e == now;
         steps.push(Step {
