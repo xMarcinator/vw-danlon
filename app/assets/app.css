@@ -803,67 +803,134 @@ body {
     font-size: 14px;
   }
 
-  /* Hours: Start work, or Private time and Stop work side by side. */
-  .dock-work {
-    display: flex;
-    gap: 10px;
+  /* Hours: Start work ▾; the split button and Stop work, which takes
+     only the room its label needs; ▾ opens a menu above them. */
+  .dock-actions {
+    position: relative;
   }
 
-  .dock-work .dock-split,
-  .dock-work .stop-work {
-    flex: 1 1 0;
-    min-width: 0;
+  .dock-work {
+    display: flex;
+    gap: 8px;
   }
 
   .dock-work .dock-split {
     display: flex;
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   .dock-work .pt-btn {
     min-height: 56px;
-    padding: 0 10px;
+    padding: 0 12px;
+    border: none;
     border-radius: 14px;
     font-size: 17px;
-    font-weight: 600;
+    font-weight: 500;
     white-space: nowrap;
   }
 
-  .dock-work .pt-btn.split-main {
+  .dock-work .pt-btn.split-main,
+  .dock-work .pt-btn.private {
     flex: 1 1 auto;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .dock-work .pt-btn.split-main {
     border-radius: 14px 0 0 14px;
   }
 
+  .split-sub {
+    font-size: 12px;
+    opacity: 0.85;
+  }
+
+  .split-sub,
+  .split-label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .dock-work .pt-btn.split-caret {
-    flex: 0 0 44px;
-    width: 44px;
+    flex: 0 0 52px;
+    width: 52px;
     padding: 0;
     border-radius: 0 14px 14px 0;
   }
 
-  .dock-work .pt-btn.private {
-    flex: 1 1 auto;
-  }
-
-  .dock-work .pt-btn.working {
-    border: 1px solid var(--info);
-    background: none;
-    color: var(--info);
-  }
-
-  .dock-work .pt-btn.split-main.working {
-    border-right: none;
-  }
-
   .dock-work .pt-btn.stop-work {
+    flex: 0 0 auto;
+    padding: 0 14px;
     border: 1px solid var(--ctl);
+    background: var(--surf);
+    color: var(--bad);
+    font-size: 15px;
+  }
+
+  .dock-menu {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 8px);
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    background: var(--surf);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  }
+
+  .dock-menu-item {
+    font: inherit;
+    font-size: 15px;
+    min-height: 48px;
+    padding: 0 12px;
+    border: none;
+    border-radius: 8px;
     background: none;
+    color: var(--text);
+    text-align: left;
+  }
+
+  .dock-menu-at {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 52px;
+    padding: 0 4px 0 12px;
+  }
+
+  .dock-menu-item + .dock-menu-at {
+    border-top: 1px solid var(--row);
+  }
+
+  .dock-menu-at label {
+    flex-grow: 1;
+    font-size: 15px;
+  }
+
+  .dock-menu-at input {
+    font: inherit;
+    font-size: 16px;
+    height: 44px;
+    padding: 0 10px;
+    border: 1px solid var(--ctl);
+    border-radius: 10px;
+    background: var(--surf);
     color: var(--text);
   }
 
-  .dock-earlier {
-    display: flex;
-    padding: 0;
+  .dock-menu-at .small-btn {
+    min-height: 44px;
+    padding: 0 14px;
+    font-size: 14px;
   }
 
   /* Danløn: Open Danløn app and Mark the next day entered. */
@@ -3137,6 +3204,7 @@ table.rates td:first-child {
 .icon-btn:active,
 .nav-item:active,
 .menu-item:active,
+.dock-menu-item:active,
 .step-edit:active,
 .day-row:active,
 .link-btn:active {

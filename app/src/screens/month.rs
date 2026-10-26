@@ -835,8 +835,9 @@ fn work_head(w: &WorkToday, computed_at: NaiveDateTime, now: NaiveDateTime) -> W
 }
 
 /// Today's work: on a narrow screen the status, then one row of buttons
-/// ([`CardActions`]); the next private appointment with its own Start, and
-/// today's private list under the chevron. On a wide screen the head and
+/// ([`CardActions`]); the next private appointment (its Start only when
+/// wide; a phone shows the row only while one is running or ahead today),
+/// and today's private list under the chevron. On a wide screen the head and
 /// buttons are the header's [`WorkPill`].
 #[cfg(test)]
 mod tests {
@@ -899,6 +900,13 @@ fn WorkCard(
     let current = next
         .as_ref()
         .and_then(|n| items.iter().position(|i| i == n));
+    // On a phone the row shows only what is running or still ahead today;
+    // its Start is the dock's split button there.
+    let next_class = if private_now.is_none() && !next_today {
+        "wide-only"
+    } else {
+        ""
+    };
     let card_class = match head.tone {
         "" => "work-card".to_string(),
         tone => format!("work-card {tone}"),
@@ -918,7 +926,7 @@ fn WorkCard(
                 AutoStart { since, on_action }
             }
             {status(message)}
-            div { class: "next-row",
+            div { class: "next-row {next_class}",
                 span { class: "pt-title",
                     if let Some((label, since, _)) = &private_now {
                         span { class: "pt-kicker", "Running now" }
@@ -949,7 +957,7 @@ fn WorkCard(
                         let title = n.label.clone();
                         rsx! {
                             button {
-                                class: "small-btn next-start",
+                                class: "small-btn next-start wide-only",
                                 "aria-label": "Start private time for {title}",
                                 onclick: move |_| {
                                     on_action.call(Action::Start(Some(title.clone())));
@@ -971,7 +979,7 @@ fn WorkCard(
                 }
             }
             if open {
-                ul { id: "pt-list", class: "pt-list",
+                ul { id: "pt-list", class: "pt-list {next_class}",
                     if items.is_empty() {
                         li { class: "pt-item",
                             div { class: "pt-row muted", "No private time today" }
@@ -992,26 +1000,43 @@ fn WorkCard(
 }
 
 /// The work buttons in the phone's dock: Start work ▾ when not working;
-/// Private time ▾ and Stop work at work or at home; Stop private time while
-/// it runs. ▾ opens "Started at" above them, for a start earlier today.
+/// at work or at home the split button, whose main part starts today's
+/// next private appointment (or private time when none is left today),
+/// and Stop work; Stop private time while it runs. ▾ opens a menu above
+/// the buttons: Private time now (when the main part names an
+/// appointment) and a start earlier today.
 #[component]
 fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, bool>) -> Element {
-    let mut earlier = use_signal(|| false);
+    let mut menu = use_signal(|| false);
     let mut at = use_signal(String::new);
     let has = |a: WorkAction| work.actions.contains(&a);
+    let working = matches!(
+        work.state,
+        WorkState::AtWork { .. } | WorkState::Home { .. }
+    );
+    let private = matches!(work.state, WorkState::Private { .. });
+    // Today's next private appointment, for the main part.
+    let next = work
+        .next_private
+        .as_ref()
+        .filter(|_| working && has(WorkAction::PrivateForAppointment))
+        .and_then(|i| i.planned.map(|(s, _)| (i.label.clone(), hm(s))));
     let (main, main_action, caret_label, stop) = match &work.state {
         WorkState::NotWorking { .. } if has(WorkAction::StartWork) => (
-            "Start work",
+            "Start work".to_string(),
             Action::HomeStart,
             Some("Started work earlier"),
             None,
         ),
         WorkState::NotWorking { .. } => return rsx! {},
-        WorkState::Private { .. } => ("Stop private time", Action::Stop, None, None),
+        WorkState::Private { .. } => ("Stop private time".to_string(), Action::Stop, None, None),
         WorkState::AtWork { .. } | WorkState::Home { .. } => (
-            "Private time",
-            Action::Start(None),
-            Some("Private time started earlier"),
+            match &next {
+                Some((label, when)) => format!("{label} · {when}"),
+                None => "Private time".to_string(),
+            },
+            Action::Start(next.as_ref().map(|(label, _)| label.clone())),
+            Some("More private time choices"),
             if has(WorkAction::StopWork) {
                 Some(Action::HomeStop)
             } else if has(WorkAction::LeaveWork) {
@@ -1021,70 +1046,97 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
             },
         ),
     };
-    let working = matches!(
-        work.state,
-        WorkState::AtWork { .. } | WorkState::Home { .. }
-    );
-    let private = matches!(work.state, WorkState::Private { .. });
-    let open = earlier() && caret_label.is_some();
+    let main_label = match &next {
+        Some((label, when)) => format!("Start private time: {label}, {when}"),
+        None => main.clone(),
+    };
+    let open = menu() && caret_label.is_some();
+    let mut close = move || menu.set(false);
     rsx! {
-        if open {
-            div { id: "pt-earlier-row", class: "card-earlier dock-earlier",
-                label { r#for: "pt-earlier-card", "Started at" }
-                input {
-                    id: "pt-earlier-card",
-                    r#type: "time",
-                    value: "{at}",
-                    oninput: move |e| at.set(e.value()),
-                }
-                button {
-                    class: "small-btn primary-sm",
-                    onclick: move |_| {
-                        let action = if working {
-                            Action::StartAt(at())
-                        } else {
-                            Action::HomeStartAt(at())
-                        };
-                        if on_action.call(action) {
-                            earlier.set(false);
+        div { class: "dock-actions",
+            if open {
+                div { class: "menu-backdrop", onclick: move |_| close() }
+                div {
+                    id: "pt-menu",
+                    class: "dock-menu",
+                    role: "menu",
+                    "aria-label": caret_label.unwrap_or_default(),
+                    if next.is_some() {
+                        button {
+                            class: "dock-menu-item",
+                            role: "menuitem",
+                            onclick: move |_| {
+                                close();
+                                on_action.call(Action::Start(None));
+                            },
+                            "Private time now"
                         }
-                    },
-                    "Start"
-                }
-            }
-        }
-        div { class: "dock-work",
-            span { class: "split dock-split", role: "group", "aria-label": "{main}",
-                button {
-                    class: if private { "pt-btn private" } else if working { "pt-btn split-main working" } else { "pt-btn split-main" },
-                    onclick: move |_| {
-                        earlier.set(false);
-                        on_action.call(main_action.clone());
-                    },
-                    "{main}"
-                }
-                if let Some(label) = caret_label {
-                    button {
-                        class: if working { "pt-btn split-caret working" } else { "pt-btn split-caret" },
-                        "aria-expanded": if open { "true" } else { "false" },
-                        "aria-controls": "pt-earlier-row",
-                        "aria-label": "{label}",
-                        onclick: move |_| {
-                            at.set(hm(now));
-                            earlier.set(!open);
-                        },
-                        Icon { d: "m6 9 6 6 6-6", size: 16 }
+                    }
+                    div { class: "dock-menu-at",
+                        label { r#for: "pt-menu-at",
+                            if working { "Private since" } else { "Started work at" }
+                        }
+                        input {
+                            id: "pt-menu-at",
+                            r#type: "time",
+                            value: "{at}",
+                            oninput: move |e| at.set(e.value()),
+                        }
+                        button {
+                            class: "small-btn primary-sm",
+                            onclick: move |_| {
+                                let action = if working {
+                                    Action::StartAt(at())
+                                } else {
+                                    Action::HomeStartAt(at())
+                                };
+                                if on_action.call(action) {
+                                    close();
+                                }
+                            },
+                            "Start"
+                        }
                     }
                 }
             }
-            if let Some(action) = stop {
-                button {
-                    class: "pt-btn stop-work",
-                    onclick: move |_| {
-                        earlier.set(false);
-                        on_action.call(action.clone());
-                    },
-                    "Stop work"
+            div { class: "dock-work",
+                span { class: "split dock-split", role: "group", "aria-label": "{main}",
+                    button {
+                        class: if private { "pt-btn private" } else { "pt-btn split-main" },
+                        "aria-label": "{main_label}",
+                        onclick: move |_| {
+                            close();
+                            on_action.call(main_action.clone());
+                        },
+                        if next.is_some() {
+                            span { class: "split-sub", "Start private time" }
+                        }
+                        span { class: "split-label", "{main}" }
+                    }
+                    if let Some(label) = caret_label {
+                        button {
+                            class: "pt-btn split-caret",
+                            "aria-haspopup": "menu",
+                            "aria-expanded": if open { "true" } else { "false" },
+                            "aria-controls": "pt-menu",
+                            "aria-label": "{label}",
+                            onclick: move |_| {
+                                at.set(hm(now));
+                                menu.set(!open);
+                            },
+                            Icon { d: "m6 9 6 6 6-6", size: 16 }
+                        }
+                    }
+                }
+                if let Some(action) = stop {
+                    button {
+                        class: "pt-btn stop-work",
+                        onclick: move |_| {
+                            close();
+                            on_action.call(action.clone());
+                        },
+                        "Stop work"
+                    }
                 }
             }
         }
