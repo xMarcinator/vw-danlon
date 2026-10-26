@@ -117,6 +117,8 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut adding = use_signal(|| false);
     let mut sheet = use_signal(|| None::<super::day::Sheet>);
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
+    // Coming back to the app computes today again at once.
+    let resumed = use_context::<Signal<super::Resumed>>();
     let mut loaded = use_resource(move || {
         let m = month();
         let _ = cal_sync.read().version;
@@ -155,6 +157,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     // the UI thread (it reads the database and may record calendar time).
     let computed = use_resource(move || {
         let _ = minute();
+        let _ = resumed.read();
         let _ = version();
         let cfg = setup.read().config.clone();
         let l = match &*loaded.read() {
@@ -171,6 +174,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     // The same for the week's second month.
     let computed2 = use_resource(move || {
         let _ = minute();
+        let _ = resumed.read();
         let _ = version();
         let cfg = setup.read().config.clone();
         let l = match &*loaded2.read() {
@@ -819,8 +823,22 @@ fn since_text(t: NaiveDateTime, now: NaiveDateTime) -> String {
     }
 }
 
-fn work_head(w: &WorkToday, now: NaiveDateTime) -> WorkHead {
-    let worked = hmm(minutes(w.worked));
+/// Minutes worked shown live: those computed at `computed_at`, plus the
+/// time since then up to `live` (the card ticks between the minute
+/// recomputes).
+fn live_minutes(computed: i64, computed_at: NaiveDateTime, live: NaiveDateTime) -> i64 {
+    computed + (live - computed_at).num_minutes().max(0)
+}
+
+/// The work card's head at `now` (live); `computed_at` is when `w` was
+/// computed.
+fn work_head(w: &WorkToday, computed_at: NaiveDateTime, now: NaiveDateTime) -> WorkHead {
+    let counting = matches!(w.state, WorkState::AtWork { .. } | WorkState::Home { .. });
+    let worked = if counting {
+        hmm(live_minutes(minutes(w.worked), computed_at, now))
+    } else {
+        hmm(minutes(w.worked))
+    };
     let at = |t: DateTime<Tz>| hm(t.naive_local());
     let not_working = || {
         if w.worked > 0.0 {
@@ -884,6 +902,23 @@ fn work_head(w: &WorkToday, now: NaiveDateTime) -> WorkHead {
 /// ([`CardActions`]); the next private appointment with its own Start, and
 /// today's private list under the chevron. On a wide screen the head and
 /// buttons are the header's [`WorkPill`].
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_work_card_counts_on_between_the_minutes() {
+        let at = |s: &str| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap();
+        let computed = at("2026-11-24 12:10:05");
+        assert_eq!(live_minutes(312, computed, computed), 312);
+        assert_eq!(live_minutes(312, computed, at("2026-11-24 12:10:50")), 312);
+        assert_eq!(live_minutes(312, computed, at("2026-11-24 12:11:05")), 313);
+        assert_eq!(live_minutes(312, computed, at("2026-11-24 14:40:05")), 462);
+        // A clock behind the computed time adds nothing.
+        assert_eq!(live_minutes(312, computed, at("2026-11-24 12:00:00")), 312);
+    }
+}
+
 #[component]
 fn WorkCard(
     work: WorkToday,
@@ -909,7 +944,7 @@ fn WorkCard(
     });
     let _ = tick();
     let live = chrono::Utc::now().with_timezone(&tz).naive_local().max(now);
-    let head = work_head(&work, live);
+    let head = work_head(&work, now, live);
     let open = expanded();
     let private_now = match &work.state {
         WorkState::Private { label, since, auto } => Some((label.clone(), *since, *auto)),

@@ -140,6 +140,27 @@ pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Sign
     }
 }
 
+/// Bumped each time the app comes back to the foreground, so the screens
+/// compute today again at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Resumed(pub u32);
+
+/// Tells Rust each time the page becomes visible again.
+const RESUME_JS: &str = r#"
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') dioxus.send(true);
+});
+await new Promise(() => {});
+"#;
+
+/// Bumps `resumed` each time the app comes back to the foreground.
+pub async fn watch_resume(mut resumed: Signal<Resumed>) {
+    let mut eval = document::eval(RESUME_JS);
+    while let Ok(true) = eval.recv::<bool>().await {
+        resumed.write().0 += 1;
+    }
+}
+
 /// The account trip sync the app runs by itself, shared with Settings so
 /// Sync now and the automatic sync never run at once.
 #[derive(Debug, Clone, Default, PartialEq)]

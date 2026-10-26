@@ -161,6 +161,8 @@ fn App() -> Element {
     // Trips from a connected account, so an arrival shows without Sync now.
     let trip_sync = use_context_provider(|| Signal::new(screens::TripSync::default()));
     use_future(move || screens::sync_trips_now_and_then(setup, trip_sync));
+    let resumed = use_context_provider(|| Signal::new(screens::Resumed::default()));
+    use_future(move || screens::watch_resume(resumed));
     let theme = setup.read().settings.theme;
     let current = screen();
 
