@@ -35,6 +35,10 @@ pub struct State {
     /// Private calendar appointments whose time you deleted: you did not
     /// go, so they count no private time and are not recorded again.
     pub dismissed: BTreeSet<PlannedWindow>,
+    /// Per day, when you left work without a trip ("Stop work (left
+    /// early)"): an arrival at a work address without a departure ends
+    /// then.
+    pub left_work: BTreeMap<NaiveDate, NaiveDateTime>,
 }
 
 /// The account `account connect` registered, and when trips were last synced.
@@ -584,6 +588,7 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
         account,
         trip_overrides: read_overrides(conn)?,
         dismissed: read_dismissed(conn)?,
+        left_work: read_left_work(conn)?,
     })
 }
 
@@ -601,6 +606,17 @@ fn read_dismissed(conn: &Connection) -> rusqlite::Result<BTreeSet<PlannedWindow>
                 end: r.get(2)?,
             })
         })?
+        .collect()
+}
+
+/// When you left work without a trip, per day; none in a database from
+/// before it (opened read-only, so not upgraded).
+fn read_left_work(conn: &Connection) -> rusqlite::Result<BTreeMap<NaiveDate, NaiveDateTime>> {
+    if !crate::db::has_table(conn, "work_end")? {
+        return Ok(BTreeMap::new());
+    }
+    conn.prepare("SELECT day, at FROM work_end")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect()
 }
 
@@ -667,7 +683,7 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
         "DELETE FROM lunch; DELETE FROM entered; DELETE FROM private_intervals; \
          DELETE FROM private_running; DELETE FROM account; \
          DELETE FROM home_intervals; DELETE FROM home_running; DELETE FROM trip_overrides; \
-         DELETE FROM private_dismissed; \
+         DELETE FROM private_dismissed; DELETE FROM work_end; \
          DELETE FROM meta WHERE key IN ('private_next_id', 'home_next_id');",
     )?;
     let mut st = conn.prepare("INSERT INTO lunch (day, start, minutes) VALUES (?1, ?2, ?3)")?;
@@ -743,6 +759,10 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
         conn.prepare("INSERT INTO private_dismissed (title, start, end) VALUES (?1, ?2, ?3)")?;
     for w in &state.dismissed {
         st.execute(params![w.title, w.start, w.end])?;
+    }
+    let mut st = conn.prepare("INSERT INTO work_end (day, at) VALUES (?1, ?2)")?;
+    for (day, at) in &state.left_work {
+        st.execute(params![day, at])?;
     }
     Ok(())
 }

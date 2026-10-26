@@ -1,13 +1,12 @@
-//! The Month screen: month navigation, the private-time list, the totals
-//! and one row per day, as `report` computes them. A day opens the Day
-//! screen.
+//! The Month screen: month navigation, today's work card (work, private
+//! time and today's private list), the totals and one row per day, as
+//! `report` computes them. A day opens the Day screen.
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
 use dioxus::prelude::*;
-use vw_danlon::month::{Day, EntryKind, Month, OffReason};
-use vw_danlon::service::{self, PrivateState, PrivateTime};
-use vw_danlon::state::{RunningTimer, State};
+use vw_danlon::month::{Day, Month, OffReason};
+use vw_danlon::service::{PrivateItem, PrivateState, WorkAction, WorkState, WorkToday};
 use vw_danlon::timesheet::weekday_da;
 
 use super::{
@@ -84,31 +83,39 @@ fn planned_note(d: &Day) -> String {
     }
 }
 
-/// The next home-working event in the calendar from `now`: "Fri 27 Nov"
-/// or "today 08:00–16:00".
-fn next_home_event(
-    cfg: &vw_danlon::config::Config,
-    cal: &[vw_danlon::calendar::Occurrence],
-    now: NaiveDateTime,
-) -> Option<String> {
-    service::timed_entries(cfg, cal)
-        .into_iter()
-        .filter(|e| e.kind == EntryKind::Home && e.end.naive_local() > now)
-        .min_by_key(|e| e.start)
-        .map(|e| {
-            let (s, end) = (e.start.naive_local(), e.end.naive_local());
-            if s.date() == now.date() {
-                format!("today {}–{}", hm(s), hm(end))
-            } else {
-                s.format("%a %-d %b").to_string()
-            }
-        })
-}
-
 fn planned(d: &Day) -> String {
     d.planned
         .map(|(s, e)| format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")))
         .unwrap_or_default()
+}
+
+/// "1:10" for 70 minutes; "−1:10" below zero.
+fn hmm(minutes: i64) -> String {
+    let sign = if minutes < 0 { "−" } else { "" };
+    let m = minutes.abs();
+    format!("{sign}{}:{:02}", m / 60, m % 60)
+}
+
+/// Hours as minutes, rounded.
+fn minutes(h: f64) -> i64 {
+    (h * 60.0).round() as i64
+}
+
+/// Private items of today only: planned, running or recorded (a timer
+/// still running from an earlier day too).
+fn today_items(items: &[PrivateItem], today: NaiveDate) -> Vec<PrivateItem> {
+    items
+        .iter()
+        .filter(|i| matches!(i.state, PrivateState::Running { .. }) || i.start().date() == today)
+        .cloned()
+        .collect()
+}
+
+/// The first part of the planned working time today that has passed:
+/// "08:00–09:10", while it is counting.
+fn counting_window(d: &Day, now: DateTime<Tz>) -> Option<String> {
+    let (s, e) = d.planned?;
+    (d.so_far && s < now).then(|| format!("{}–{}", s.format("%H:%M"), e.min(now).format("%H:%M")))
 }
 
 #[component]
@@ -128,6 +135,35 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             match cfg {
                 Some(cfg) => super::load(cfg, m).await,
                 None => Err("no config".to_string()),
+            }
+        }
+    });
+    // Today counts up to now: the month is computed again every minute. A
+    // minute missed while the app was paused is not caught up.
+    let mut minute = use_signal(|| 0u64);
+    use_future(move || async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        every.tick().await;
+        loop {
+            every.tick().await;
+            minute += 1;
+        }
+    });
+    // The month's days, mileage, private time and today's work, built off
+    // the UI thread (it reads the database and may record calendar time).
+    let computed = use_resource(move || {
+        let _ = minute();
+        let _ = version();
+        let cfg = setup.read().config.clone();
+        let l = match &*loaded.read() {
+            Some(Ok(l)) => Some(l.clone()),
+            _ => None,
+        };
+        async move {
+            match (cfg, l) {
+                (Some(cfg), Some(l)) => Some(super::compute(cfg, l).await),
+                _ => None,
             }
         }
     });
@@ -160,18 +196,10 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let Some(cfg) = setup.read().config.clone() else {
         return rsx! {};
     };
-    let _ = version();
     let m = month();
-    let now = super::now(&cfg);
-    let today = now.date_naive();
     let loaded = loaded.read();
     let loaded = match &*loaded {
-        None => {
-            return rsx! {
-                MonthHeader { month, screen }
-                p { class: "placeholder", role: "status", "Loading {month_title(m)}…" }
-            };
-        }
+        Some(Ok(l)) if l.month == m => l,
         Some(Err(e)) => {
             return rsx! {
                 MonthHeader { month, screen }
@@ -181,25 +209,41 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 }
             };
         }
-        Some(Ok(l)) => l,
-    };
-    let view = match service::month_view(&cfg, m, &loaded.trips, &loaded.occurrences, now) {
-        Ok(v) => v,
-        Err(e) => {
+        _ => {
             return rsx! {
                 MonthHeader { month, screen }
-                div { class: "alert", role: "alert", "{e:#}" }
+                p { class: "placeholder", role: "status", "Loading {month_title(m)}…" }
             };
         }
     };
+    let computed = computed.read();
+    let computed = match &*computed {
+        Some(Some(Ok(c))) if c.month == m => c,
+        Some(Some(Err(e))) => {
+            return rsx! {
+                MonthHeader { month, screen }
+                div { class: "alert", role: "alert", "{e}" }
+            };
+        }
+        _ => {
+            return rsx! {
+                MonthHeader { month, screen }
+                p { class: "placeholder", role: "status", "Loading {month_title(m)}…" }
+            };
+        }
+    };
+    let view = &computed.view;
+    let now = computed.now;
+    let today = now.date_naive();
 
     if let Some(date) = open_day().filter(|d| m.contains(*d)) {
         return super::day::render(super::day::DayArgs {
             cfg: &cfg,
-            view: &view,
+            view,
+            state: &computed.state,
             loaded,
             date,
-            now: now.naive_local(),
+            now,
             message: message(),
             on_action,
             on_back: Callback::new(move |_| go.call(None)),
@@ -238,10 +282,18 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         .map(|n| format!("Calendar “{n}”"))
         .unwrap_or_else(|| "Calendar".to_string());
     let has_calendar = cfg.calendar.is_some();
+    // Today so far, when it is in this month.
+    let today_day = report.days.iter().find(|d| d.date == today && d.so_far);
+    let not_at_work_yet = matches!(
+        view.work.as_ref().map(|w| &w.state),
+        Some(WorkState::NotWorking { late_by: Some(_) })
+    ) && today_day.is_some_and(|d| d.worked_hours == 0.0);
     let norm_sub = if m.last_day() <= report.today {
         format!("{working_days} working days · {vacation_days} vacation days")
     } else if m.first_day() > report.today {
         format!("month not started · {} planned", hours(month_norm))
+    } else if let Some(w) = today_day.and_then(|d| counting_window(d, now)) {
+        format!("today counts {w} · {} for the month", hours(month_norm))
     } else {
         format!(
             "until today, {} · {} for the whole month",
@@ -249,13 +301,26 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             hours(month_norm)
         )
     };
-    let worked_sub = if from_home > 0.0 {
+    let worked_sub = if not_at_work_yet {
+        "not at work yet today".to_string()
+    } else if from_home > 0.0 {
         format!(
             "incl. {} h from home · after lunch and private time",
             hours(from_home)
         )
     } else {
         "after lunch and private time".to_string()
+    };
+    let checks = match to_check.len() {
+        0 => None,
+        1 => Some("1 day to check".to_string()),
+        n => Some(format!("{n} days to check")),
+    };
+    let diff_sub = match (today_day.filter(|d| d.expected_hours > 0.0), checks) {
+        (Some(d), Some(c)) => format!("today {} so far · {c}", signed(d.difference())),
+        (Some(d), None) => format!("today {} so far", signed(d.difference())),
+        (None, Some(c)) => c,
+        (None, None) => "nothing to check".to_string(),
     };
     let mut kpis = vec![
         ("Norm to date", hours(report.norm_total()), norm_sub, ""),
@@ -268,11 +333,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         (
             "Difference to date",
             signed(diff),
-            match to_check.len() {
-                0 => "nothing to check".to_string(),
-                1 => "1 day to check".to_string(),
-                n => format!("{n} days to check"),
-            },
+            diff_sub,
             diff_class(diff),
         ),
     ];
@@ -294,14 +355,28 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         cfg.lunch.minutes,
         cfg.lunch.start.format("%H:%M")
     );
-
-    let home_running = State::load(&cfg.database).ok().and_then(|s| s.home.running);
-    let home_next = next_home_event(&cfg, &loaded.occurrences, now.naive_local());
-    let home_message = message_for(&message(), Panel::Home);
     let calendar_chip = match loaded.calendar_fetched_at {
         Some(at) => format!("{calendar_name} · {}", super::calendar_age(at, now)),
         None => calendar_name.to_string(),
     };
+    // The fixed workplace by its short name, as in the Danløn checklist.
+    let short = |place: String| match &view.workplace {
+        Some((w, _)) if vw_danlon::address::matches(&place, w) => {
+            cfg.checklist.workplace_name.clone()
+        }
+        _ => place,
+    };
+    let place_today = today_day
+        .and_then(|d| d.work_locations.first().cloned())
+        .map(short)
+        .unwrap_or_default();
+    let work = view.work.clone().map(|mut w| {
+        if let WorkState::AtWork { place, .. } = &mut w.state {
+            *place = short(std::mem::take(place));
+        }
+        w
+    });
+    let items = today_items(&view.private.items, today);
 
     rsx! {
         MonthHeader { month, screen }
@@ -339,9 +414,10 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 }
             }
             span { class: "grow" }
-            HomePill { running: home_running.clone(), on_action }
+            if let Some(work) = &work {
+                WorkPill { work: work.clone(), today, on_action }
+            }
         }
-        div { class: "wide-only", {status(home_message.clone())} }
         if let Some(w) = &loaded.calendar_warning {
             div { class: "alert", role: "status", "{w}" }
         }
@@ -351,24 +427,27 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
 
-        PrivateCard {
-            private: view.private.clone(),
-            today,
-            now: now.naive_local(),
-            tz: cfg.timezone,
-            auto_start: cfg.private.auto_start,
-            grace_minutes: cfg.private.grace_minutes,
-            expanded,
-            message: message_for(&message(), Panel::Private),
-            on_action,
-        }
-
-        HomeCard {
-            running: home_running,
-            next: home_next,
-            tz: cfg.timezone,
-            message: home_message,
-            on_action,
+        if let Some(work) = &work {
+            WorkCard {
+                work: work.clone(),
+                items,
+                running_replaces: view
+                    .private
+                    .running
+                    .as_ref()
+                    .and_then(|r| r.replaces.as_ref())
+                    .map(|w| (w.start, w.end)),
+                place: place_today,
+                today,
+                now: now.naive_local(),
+                tz: cfg.timezone,
+                auto_start: cfg.private.auto_start,
+                grace_minutes: cfg.private.grace_minutes,
+                expanded,
+                message: message_for(&message(), Panel::Private)
+                    .or_else(|| message_for(&message(), Panel::Home)),
+                on_action,
+            }
         }
 
         div { class: "kpis",
@@ -403,7 +482,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             div { class: "panel-head",
                 h2 { id: "days-h", "Days" }
                 span { class: "note",
-                    "Totals count up to today · days after today are planned only. {lunch_rule}"
+                    "Totals count up to today (today from the planned start up to now) · days after today are planned only. {lunch_rule}"
                 }
             }
             div { class: "scroll-x",
@@ -439,6 +518,11 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                 };
                                 let remark = if future { planned_note(d) } else { d.remark() };
                                 let note_class = if future { "chip planned" } else { note_class(d) };
+                                let place = if is_today && not_at_work_yet {
+                                    "Not at work yet".to_string()
+                                } else {
+                                    place(d)
+                                };
                                 rsx! {
                                     tr { class: "{row}", "aria-current": if is_today { "date" } else { "false" },
                                         td { class: "nowrap",
@@ -460,7 +544,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                             td {}
                                             td {}
                                         } else {
-                                            td { "{place(d)}" }
+                                            td { "{place}" }
                                             td { class: "mono small", "{d.periods_text()}" }
                                             td { class: "r", "{hours(d.worked_hours)}" }
                                         }
@@ -472,7 +556,12 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                         if future {
                                             td {}
                                         } else {
-                                            td { class: "r strong {diff_class(d.difference())}", "{signed(d.difference())}" }
+                                            td { class: "r strong {diff_class(d.difference())}",
+                                                "{signed(d.difference())}"
+                                                if d.so_far {
+                                                    span { class: "muted small", " so far" }
+                                                }
+                                            }
                                         }
                                         td {
                                             if !remark.is_empty() {
@@ -495,11 +584,19 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         let date = d.date;
                         let future = date > report.today;
                         let is_today = date == report.today;
-                        let remark = if future { String::new() } else { d.remark() };
+                        let mut remark = if future { String::new() } else { d.remark() };
                         let place = match (&d.off_reason, future) {
                             (None, true) if d.norm_hours > 0.0 => "Planned".to_string(),
+                            _ if is_today && not_at_work_yet => "Not at work yet".to_string(),
                             _ => place(d),
                         };
+                        if is_today
+                            && not_at_work_yet
+                            && remark.is_empty()
+                            && let Some((s, _)) = d.planned
+                        {
+                            remark = format!("Today · planned since {}", s.format("%H:%M"));
+                        }
                         let class = if is_today {
                             "day-row today"
                         } else if future || quiet(d) {
@@ -507,6 +604,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         } else {
                             "day-row"
                         };
+                        let chip = if is_today && not_at_work_yet { "chip info" } else { note_class(d) };
                         rsx! {
                             li { "aria-current": if is_today { "date" } else { "false" },
                                 button {
@@ -523,7 +621,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                     span { class: "day-mid",
                                         span { class: "ellipsis", "{place}" }
                                         if !remark.is_empty() {
-                                            span { class: "{note_class(d)} ellipsis", "{remark}" }
+                                            span { class: "{chip} ellipsis", "{remark}" }
                                         }
                                     }
                                     span { class: "day-nums",
@@ -531,13 +629,9 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                             if d.norm_hours > 0.0 {
                                                 span { class: "quiet", "{hours(d.norm_hours)}" }
                                             }
-                                        } else if !quiet(d) {
+                                        } else if !quiet(d) || d.so_far && d.expected_hours > 0.0 {
                                             b { "{hours(d.worked_hours)}" }
-                                            if is_today {
-                                                span { class: "quiet", "so far" }
-                                            } else {
-                                                span { class: "{diff_class(d.difference())}", "{signed(d.difference())}" }
-                                            }
+                                            span { class: "{diff_class(d.difference())}", "{signed(d.difference())}" }
                                         }
                                     }
                                 }
@@ -588,12 +682,114 @@ fn MonthHeader(month: Signal<Month>, screen: Signal<Screen>) -> Element {
     }
 }
 
-/// The private-time list: collapsed, the current or next entry with
-/// Start/Stop and the running timer's status; expanded, today's and the
-/// coming entries and "Start without an event".
+/// The head of the work card: kicker, title, the title's and the dot's
+/// class, and the status line with its class.
+struct WorkHead {
+    kicker: String,
+    title: String,
+    tone: &'static str,
+    status: Option<(String, &'static str)>,
+}
+
+fn work_head(w: &WorkToday, place: &str, now: NaiveDateTime) -> WorkHead {
+    let worked = hmm(minutes(w.worked));
+    let at = |t: DateTime<Tz>| hm(t.naive_local());
+    match &w.state {
+        WorkState::NotWorking { late_by: Some(_) } => {
+            let start = w.planned.map(|(s, _)| at(s)).unwrap_or_default();
+            WorkHead {
+                kicker: format!("Today · planned from {start} · now {}", hm(now)),
+                title: format!("Not at work · {} so far", hmm(minutes(w.difference()))),
+                tone: "bad",
+                status: Some((
+                    format!(
+                        "Counting since {start}: the planned time that has passed counts against you until you start."
+                    ),
+                    "bad",
+                )),
+            }
+        }
+        WorkState::NotWorking { late_by: None } => {
+            let place_part = if place.is_empty() {
+                String::new()
+            } else {
+                format!(" · {place}")
+            };
+            match w.planned {
+                Some((s, e)) if now < s.naive_local() => WorkHead {
+                    kicker: format!("Today · planned {}–{}{place_part}", at(s), at(e)),
+                    title: "Not working yet".into(),
+                    tone: "",
+                    status: Some((
+                        format!(
+                            "Starts by itself when you arrive at {}, or tap Start work at home.",
+                            if place.is_empty() { "work" } else { place }
+                        ),
+                        "info",
+                    )),
+                },
+                Some((s, e)) => WorkHead {
+                    kicker: format!("Today · planned {}–{}{place_part}", at(s), at(e)),
+                    title: if w.worked > 0.0 {
+                        format!("Not working · {worked} today")
+                    } else {
+                        "Not working".into()
+                    },
+                    tone: "",
+                    status: None,
+                },
+                None => WorkHead {
+                    kicker: "Today · nothing planned".into(),
+                    title: if w.worked > 0.0 {
+                        format!("Not working · {worked} today")
+                    } else {
+                        "Not working".into()
+                    },
+                    tone: "",
+                    status: None,
+                },
+            }
+        }
+        WorkState::AtWork { place, since } => WorkHead {
+            kicker: format!("Working · {place}"),
+            title: format!("Since {} · {worked} today", at(*since)),
+            tone: "on",
+            status: None,
+        },
+        WorkState::Home { since } => WorkHead {
+            kicker: "Working from home".into(),
+            title: format!("Since {} · {worked} today", at(*since)),
+            tone: "on",
+            status: None,
+        },
+        WorkState::Private { label, since, .. } => {
+            let since_local = since.naive_local();
+            let elapsed = hmm((now - since_local).num_minutes().max(0));
+            let since_text = if since_local.date() == now.date() {
+                hm(since_local)
+            } else {
+                since_local.format("%a %-d %b %H:%M").to_string()
+            };
+            WorkHead {
+                kicker: format!("Private time · {label}"),
+                title: format!("{elapsed} · since {since_text}"),
+                tone: "warn",
+                status: None,
+            }
+        }
+    }
+}
+
+/// Today's work: Start work, the split button Private time ▾ while working
+/// (by trip or the home timer), or Stop private; the next private
+/// appointment with its own Start, and today's private list under the
+/// chevron. On a wide screen the head is the header's [`WorkPill`].
 #[component]
-fn PrivateCard(
-    private: PrivateTime,
+fn WorkCard(
+    work: WorkToday,
+    items: Vec<PrivateItem>,
+    running_replaces: Option<(NaiveDateTime, NaiveDateTime)>,
+    place: String,
     today: NaiveDate,
     now: NaiveDateTime,
     tz: Tz,
@@ -603,89 +799,78 @@ fn PrivateCard(
     message: Option<Result<String, String>>,
     on_action: Callback<Action, bool>,
 ) -> Element {
-    let open = expanded();
-    let current = private.current.map(|i| private.items[i].clone());
-    let running = private.running.clone();
-    // The appointment started automatically, shown first when no timer runs.
-    let auto = current
-        .as_ref()
-        .filter(|_| running.is_none())
-        .and_then(|i| match (&i.state, i.planned) {
-            (PrivateState::StartedAutomatically { since }, Some((_, end))) => {
-                Some((i.label.clone(), *since, end))
-            }
-            _ => None,
-        });
-    let (kicker, title) = match &current {
-        Some(item) => {
-            let at = match item.planned {
-                Some((s, e)) if s.date() == today => format!("{}–{}", hm(s), hm(e)),
-                Some((s, _)) => s.format("%a %-d %b %H:%M").to_string(),
-                None => format!("since {}", hm(item.start())),
-            };
-            let now_on = matches!(item.state, PrivateState::Running { .. })
-                || item.planned.is_some_and(|(s, e)| s <= now && now < e);
-            (
-                if auto.is_some() {
-                    "Private time · started automatically"
-                } else if now_on {
-                    "Private time · now"
-                } else {
-                    "Private time · next"
-                },
-                format!("{} · {at}", item.label),
-            )
+    // The elapsed private time is kept current between the minutes.
+    let mut tick = use_signal(|| 0u64);
+    use_future(move || async move {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(15));
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            every.tick().await;
+            tick += 1;
         }
-        None => ("Private time", "No private appointments coming".to_string()),
+    });
+    let _ = tick();
+    let live = chrono::Utc::now().with_timezone(&tz).naive_local().max(now);
+    let head = work_head(&work, &place, live);
+    let open = expanded();
+    let private_now = match &work.state {
+        WorkState::Private { label, since, auto } => Some((label.clone(), *since, *auto)),
+        _ => None,
     };
-    // Start links the shown appointment when it is today.
-    let link = current
+    // The appointment started automatically: its planned end, for AutoStatus.
+    let auto = private_now
         .as_ref()
-        .filter(|i| i.state == PrivateState::Planned)
-        .filter(|i| i.planned.is_some_and(|(s, _)| s.date() == today))
-        .map(|i| i.label.clone());
-    let timer_on = running.is_some();
-    let is_running = timer_on || auto.is_some();
-
+        .filter(|p| p.2)
+        .and_then(|(label, since, _)| {
+            items
+                .iter()
+                .find(|i| {
+                    matches!(i.state, PrivateState::StartedAutomatically { .. })
+                        && &i.label == label
+                })
+                .and_then(|i| i.planned)
+                .map(|(_, end)| (label.clone(), since.naive_local(), end))
+        });
+    let status = match (&private_now, &head.status) {
+        (Some((_, since, false)), _) => {
+            let planned = running_replaces
+                .map(|(s, e)| format!(" Planned {}–{}; the real time replaces it.", hm(s), hm(e)))
+                .unwrap_or_default();
+            let forgotten = if since.date_naive() < today {
+                " Still running from an earlier day? Stop it and fix the end time."
+            } else {
+                ""
+            };
+            Some((
+                format!("Work continues when you stop.{planned}{forgotten}"),
+                "warn",
+            ))
+        }
+        (_, s) => s.clone(),
+    };
+    let next = work.next_private.clone();
+    let next_today = next
+        .as_ref()
+        .and_then(|i| i.planned)
+        .is_some_and(|(s, _)| s.date() == today);
+    let current = next
+        .as_ref()
+        .and_then(|n| items.iter().position(|i| i == n));
+    let card_class = match head.tone {
+        "on" => "work-card on",
+        "warn" => "work-card running",
+        "bad" => "work-card late",
+        _ => "work-card",
+    };
     rsx! {
-        section {
-            class: if is_running { "pt-card running" } else { "pt-card" },
-            "aria-label": "Private time",
-            div { class: "pt-head",
-                span { class: if is_running { "pt-dot on" } else { "pt-dot" }, "aria-hidden": "true" }
+        section { class: "{card_class}", "aria-label": "Work today",
+            div { class: "pt-head narrow-only",
+                span { class: "pt-dot {head.tone}", "aria-hidden": "true" }
                 span { class: "pt-title",
-                    span { class: "pt-kicker", "{kicker}" }
-                    b { class: "ellipsis", "{title}" }
+                    span { class: "pt-kicker ellipsis", "{head.kicker}" }
+                    b { class: "ellipsis {head.tone}", "{head.title}" }
                 }
-                if is_running {
-                    button {
-                        class: "pt-btn stop",
-                        "aria-pressed": "true",
-                        onclick: move |_| {
-                            on_action.call(Action::Stop);
-                        },
-                        "Stop"
-                    }
-                } else {
-                    button {
-                        class: "pt-btn",
-                        "aria-pressed": "false",
-                        onclick: move |_| {
-                            on_action.call(Action::Start(link.clone()));
-                        },
-                        "Start"
-                    }
-                }
-                button {
-                    class: "icon-btn",
-                    "aria-expanded": if open { "true" } else { "false" },
-                    "aria-controls": "pt-list",
-                    "aria-label": if open { "Hide private time list" } else { "Show private time list" },
-                    onclick: move |_| expanded.set(!open),
-                    span { class: if open { "chevron up" } else { "chevron" },
-                        Icon { d: "m6 9 6 6 6-6", size: 22 }
-                    }
-                }
+                WorkButtons { work: work.clone(), pill: false, on_action }
             }
             if let Some((label, since, end)) = auto {
                 AutoStatus {
@@ -696,33 +881,71 @@ fn PrivateCard(
                     grace_minutes,
                     on_action,
                 }
+            } else if let Some((text, class)) = status {
+                div { class: "pt-status {class}", role: "status", "{text}" }
             }
-            if let Some(r) = running {
-                RunningStatus {
-                    since: r.start,
-                    planned: r.replaces.as_ref().map(|w| (w.start, w.end)),
-                    tz,
+            {status_line(message)}
+            div { class: "next-row",
+                span { class: "pt-title",
+                    span { class: "pt-kicker", if private_now.is_some() { "Private time now" } else { "Next private" } }
+                    span { class: "ellipsis",
+                        if let Some((label, since, _)) = &private_now {
+                            b { "{label}" }
+                            " · since {hm(since.naive_local())}"
+                        } else if let Some(n) = &next {
+                            b { "{n.label}" }
+                            {
+                                let (s, e) = n.planned.unwrap_or((n.start(), n.start()));
+                                let when = super::when(s, Some(e), today).replacen("Today", "today", 1);
+                                let auto_text = if auto_start && next_today { " · starts automatically" } else { "" };
+                                rsx! { " · {when}{auto_text}" }
+                            }
+                        } else {
+                            span { class: "muted", "No private appointments coming" }
+                        }
+                    }
+                }
+                if private_now.is_some() {
+                    button { class: "small-btn next-start running", disabled: true, "Running" }
+                } else if let Some(n) = next.as_ref().filter(|_| next_today) {
+                    {
+                        let title = n.label.clone();
+                        rsx! {
+                            button {
+                                class: "small-btn next-start",
+                                "aria-label": "Start private time for {title}",
+                                onclick: move |_| {
+                                    on_action.call(Action::Start(Some(title.clone())));
+                                },
+                                "Start"
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: "icon-btn",
+                    "aria-expanded": if open { "true" } else { "false" },
+                    "aria-controls": "pt-list",
+                    "aria-label": if open { "Hide today's private time" } else { "Show today's private time" },
+                    onclick: move |_| expanded.set(!open),
+                    span { class: if open { "chevron up" } else { "chevron" },
+                        Icon { d: "m6 9 6 6 6-6", size: 20 }
+                    }
                 }
             }
-            {status(message)}
             if open {
                 ul { id: "pt-list", class: "pt-list",
-                    PrivateList {
-                        items: private.items.clone(),
-                        current: private.current,
-                        today,
-                        auto_start,
-                        on_action,
-                    }
-                    li { class: "pt-item",
-                        button {
-                            class: "pt-plain",
-                            disabled: timer_on,
-                            onclick: move |_| {
-                                on_action.call(Action::Start(None));
-                            },
-                            Icon { d: "M12 5v14M5 12h14", size: 16 }
-                            "Start without an event"
+                    if items.is_empty() {
+                        li { class: "pt-item",
+                            div { class: "pt-row muted", "No private time today" }
+                        }
+                    } else {
+                        PrivateList {
+                            items: items.clone(),
+                            current,
+                            today,
+                            auto_start,
+                            on_action,
                         }
                     }
                 }
@@ -731,43 +954,196 @@ fn PrivateCard(
     }
 }
 
-/// "Running 0:43 · since 12:30 · planned 13:00–14:00", kept current.
+/// The status line of the last action.
+fn status_line(message: Option<Result<String, String>>) -> Element {
+    status(message)
+}
+
+/// The work buttons: Start work, Stop private, or the split button
+/// Private time ▾ whose menu starts private time now or earlier and stops
+/// work. `pill` for the wide header.
 #[component]
-fn RunningStatus(
-    since: NaiveDateTime,
-    planned: Option<(NaiveDateTime, NaiveDateTime)>,
-    tz: Tz,
-) -> Element {
-    let mut tick = use_signal(|| 0u64);
-    use_future(move || async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            tick += 1;
-        }
-    });
-    let _ = tick();
-    let now = chrono::Utc::now().with_timezone(&tz).naive_local();
-    let minutes = (now - since).num_minutes().max(0);
-    let forgotten = vw_danlon::state::RunningTimer {
-        start: since,
-        label: String::new(),
-        replaces: None,
-    }
-    .forgotten(now);
-    let since_text = if since.date() == now.date() {
-        hm(since)
+fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -> Element {
+    let mut menu = use_signal(|| false);
+    let mut earlier = use_signal(|| false);
+    let mut at = use_signal(String::new);
+    let (btn, stop) = if pill {
+        ("pill-btn", "pill-btn stop")
     } else {
-        since.format("%a %-d %b %H:%M").to_string()
+        ("pt-btn", "pt-btn stop")
     };
-    let planned = planned
-        .map(|(s, e)| format!(" · planned {}–{} · counts travel and waiting", hm(s), hm(e)))
-        .unwrap_or_default();
+    let has = |a: WorkAction| work.actions.contains(&a);
+    match &work.state {
+        WorkState::NotWorking { .. } => rsx! {
+            if has(WorkAction::StartWork) {
+                button {
+                    class: "{btn}",
+                    onclick: move |_| {
+                        on_action.call(Action::HomeStart);
+                    },
+                    "Start work"
+                }
+            }
+        },
+        WorkState::Private { .. } => rsx! {
+            button {
+                class: "{stop}",
+                onclick: move |_| {
+                    on_action.call(Action::Stop);
+                },
+                "Stop private"
+            }
+        },
+        WorkState::AtWork { .. } | WorkState::Home { .. } => {
+            let stop_item = if has(WorkAction::StopWork) {
+                Some(("Stop working from home", Action::HomeStop))
+            } else if has(WorkAction::LeaveWork) {
+                Some(("Stop work (left early)", Action::LeaveWork))
+            } else {
+                None
+            };
+            let open = menu();
+            let mut close = move || {
+                menu.set(false);
+                earlier.set(false);
+            };
+            rsx! {
+                span { class: if pill { "split pill" } else { "split" }, role: "group", "aria-label": "Work actions",
+                    button {
+                        class: "{btn} split-main",
+                        onclick: move |_| {
+                            close();
+                            on_action.call(Action::Start(None));
+                        },
+                        "Private time"
+                    }
+                    button {
+                        class: "{btn} split-caret",
+                        "aria-haspopup": "menu",
+                        "aria-expanded": if open { "true" } else { "false" },
+                        "aria-label": "More work actions",
+                        onclick: move |_| {
+                            earlier.set(false);
+                            menu.set(!open);
+                        },
+                        Icon { d: "m6 9 6 6 6-6", size: 16 }
+                    }
+                    if open {
+                        div { class: "menu-backdrop", onclick: move |_| close() }
+                        div { class: "menu", role: "menu",
+                            if earlier() {
+                                div { class: "menu-edit",
+                                    label { r#for: "pt-earlier", "Started at" }
+                                    input {
+                                        id: "pt-earlier",
+                                        r#type: "time",
+                                        value: "{at}",
+                                        oninput: move |e| at.set(e.value()),
+                                    }
+                                    button { class: "small-btn", onclick: move |_| earlier.set(false), "Cancel" }
+                                    button {
+                                        class: "small-btn primary-sm",
+                                        onclick: move |_| {
+                                            if on_action.call(Action::StartAt(at())) {
+                                                close();
+                                            }
+                                        },
+                                        "Start"
+                                    }
+                                }
+                            } else {
+                                button {
+                                    class: "menu-item",
+                                    role: "menuitem",
+                                    onclick: move |_| {
+                                        close();
+                                        on_action.call(Action::Start(None));
+                                    },
+                                    "Start private time now"
+                                }
+                                button {
+                                    class: "menu-item",
+                                    role: "menuitem",
+                                    onclick: move |_| {
+                                        at.set(hm(chrono::Local::now().naive_local()));
+                                        earlier.set(true);
+                                    },
+                                    "Private time started earlier…"
+                                }
+                                if let Some((label, action)) = stop_item {
+                                    div { class: "menu-sep", role: "separator" }
+                                    button {
+                                        class: "menu-item",
+                                        role: "menuitem",
+                                        onclick: move |_| {
+                                            close();
+                                            on_action.call(action.clone());
+                                        },
+                                        "{label}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Today's work on a wide screen, beside the sources: where it stands, the
+/// work buttons and the next private appointment.
+#[component]
+fn WorkPill(work: WorkToday, today: NaiveDate, on_action: Callback<Action, bool>) -> Element {
+    let at = |t: DateTime<Tz>| hm(t.naive_local());
+    let (class, label, rest) = match &work.state {
+        WorkState::NotWorking { late_by: Some(_) } => (
+            "late",
+            "Not at work".to_string(),
+            format!(" · {} so far", hmm(minutes(work.difference()))),
+        ),
+        WorkState::NotWorking { late_by: None } => ("", "Not working".to_string(), String::new()),
+        WorkState::AtWork { place, since } => (
+            "on",
+            format!("Working · {place}"),
+            format!(" since {}", at(*since)),
+        ),
+        WorkState::Home { since } => (
+            "on",
+            "Working from home".to_string(),
+            format!(" since {}", at(*since)),
+        ),
+        WorkState::Private { label, since, .. } => (
+            "running",
+            format!("Private time · {label}"),
+            format!(" since {}", at(*since)),
+        ),
+    };
+    let next = work
+        .next_private
+        .as_ref()
+        .filter(|_| !matches!(work.state, WorkState::Private { .. }))
+        .and_then(|i| i.planned.map(|(s, _)| (i.label.clone(), s)))
+        .map(|(label, s)| {
+            let day = if s.date() == today {
+                "today".to_string()
+            } else {
+                s.format("%a %-d %b").to_string()
+            };
+            (label, format!(" {day} {}", hm(s)))
+        });
     rsx! {
-        div { class: "pt-status warn", role: "status",
-            b { "Running {minutes / 60}:{minutes % 60:02}" }
-            span { " since {since_text}{planned}" }
-            if forgotten {
-                span { " · still running? Stop it and fix the end time" }
+        span { class: "src-chip work-pill {class}",
+            span { class: "dot", "aria-hidden": "true" }
+            b { "{label}" }
+            "{rest}"
+            WorkButtons { work: work.clone(), pill: true, on_action }
+        }
+        if let Some((label, when)) = next {
+            span { class: "next-note",
+                "Next private: "
+                b { "{label}" }
+                "{when}"
             }
         }
     }
@@ -833,110 +1209,6 @@ fn AutoStatus(
                     "Started at …"
                 }
             }
-        }
-    }
-}
-
-/// The home-working timer at `now`: elapsed "3:42", "since 08:10" or
-/// "since Mon 23 Nov 08:10", whether it started today, and whether it was
-/// likely forgotten.
-fn home_running_text(r: &RunningTimer, tz: Tz) -> (String, String, bool, bool) {
-    let now = chrono::Utc::now().with_timezone(&tz).naive_local();
-    let minutes = (now - r.start).num_minutes().max(0);
-    let today = r.start.date() == now.date();
-    let since = if today {
-        hm(r.start)
-    } else {
-        r.start.format("%a %-d %b %H:%M").to_string()
-    };
-    (
-        format!("{}:{:02}", minutes / 60, minutes % 60),
-        since,
-        today,
-        r.forgotten(now),
-    )
-}
-
-/// Working from home on a wide screen: a pill with Start/Stop beside the
-/// sources.
-#[component]
-fn HomePill(running: Option<RunningTimer>, on_action: Callback<Action, bool>) -> Element {
-    let on = running.is_some();
-    let since = running
-        .as_ref()
-        .map(|r| format!(" · since {}", hm(r.start)))
-        .unwrap_or_default();
-    rsx! {
-        span { class: if on { "src-chip home-pill on" } else { "src-chip home-pill" },
-            span { class: if on { "dot" } else { "dot off" }, "aria-hidden": "true" }
-            "Working from home{since}"
-            button {
-                class: if on { "pill-btn stop" } else { "pill-btn" },
-                "aria-pressed": if on { "true" } else { "false" },
-                onclick: move |_| {
-                    on_action.call(if on { Action::HomeStop } else { Action::HomeStart });
-                },
-                if on { "Stop" } else { "Start" }
-            }
-        }
-    }
-}
-
-/// Working from home on a narrow screen: a card with Start/Stop and, while
-/// the timer runs, how long.
-#[component]
-fn HomeCard(
-    running: Option<RunningTimer>,
-    next: Option<String>,
-    tz: Tz,
-    message: Option<Result<String, String>>,
-    on_action: Callback<Action, bool>,
-) -> Element {
-    let mut tick = use_signal(|| 0u64);
-    use_future(move || async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            tick += 1;
-        }
-    });
-    let _ = tick();
-    let on = running.is_some();
-    let status_line = running.as_ref().map(|r| home_running_text(r, tz));
-    let title = match (&status_line, &next) {
-        (Some((_, since, true, _)), _) => format!("Since {since} today"),
-        (Some((_, since, false, _)), _) => format!("Since {since}"),
-        (None, Some(n)) => format!("Next in the calendar: {n}"),
-        (None, None) => "Not running".to_string(),
-    };
-    rsx! {
-        section {
-            class: if on { "pt-card home-card on narrow-only" } else { "pt-card home-card narrow-only" },
-            "aria-label": "Working from home",
-            div { class: "pt-head home-head",
-                span { class: if on { "pt-dot home" } else { "pt-dot" }, "aria-hidden": "true" }
-                span { class: "pt-title",
-                    span { class: "pt-kicker", "Working from home" }
-                    b { class: "ellipsis", "{title}" }
-                }
-                button {
-                    class: if on { "pt-btn home-stop" } else { "pt-btn" },
-                    "aria-pressed": if on { "true" } else { "false" },
-                    onclick: move |_| {
-                        on_action.call(if on { Action::HomeStop } else { Action::HomeStart });
-                    },
-                    if on { "Stop" } else { "Start" }
-                }
-            }
-            if let Some((elapsed, since, _, forgotten)) = status_line {
-                div { class: "pt-status acc", role: "status",
-                    b { "Working {elapsed}" }
-                    " · since {since} · counts as work, minus lunch"
-                    if forgotten {
-                        " · still running? Stop it and fix the end time"
-                    }
-                }
-            }
-            {status(message)}
         }
     }
 }

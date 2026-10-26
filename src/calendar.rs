@@ -71,6 +71,10 @@ pub fn fetch(source: &str) -> Result<String> {
                     .root_certs(crate::root_certs())
                     .build(),
             )
+            // A dead connection (e.g. the phone's network cut while the app
+            // was in the background) fails instead of hanging the refresh.
+            .timeout_connect(Some(std::time::Duration::from_secs(15)))
+            .timeout_global(Some(std::time::Duration::from_secs(45)))
             .build()
             .into();
         agent

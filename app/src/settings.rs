@@ -128,6 +128,19 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     });
     let mut password = use_signal(String::new);
     let mut data_status = use_signal(|| None::<Result<String, String>>);
+    // Without a fixed workplace: the one the calendar shows, off the UI
+    // thread.
+    let detected = use_resource(move || {
+        let cfg = setup.read().config.clone();
+        async move {
+            let cfg = cfg?;
+            tokio::task::spawn_blocking(move || setup::detected_workplace(&cfg))
+                .await
+                .ok()
+                .flatten()
+        }
+    });
+    let mut workplace_status = use_signal(|| None::<Result<String, String>>);
 
     let s = setup.read();
     let store = s.secret_store().describe();
@@ -393,6 +406,41 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         oninput: move |e| workplace.set(e.value()),
                     }
                     span { class: "note", "Always counts as work, also when a colleague drives on" }
+                    match detected.read().clone().flatten() {
+                        Some(Some(found)) => rsx! {
+                            div { class: "detected", role: "status",
+                                span { class: "grow",
+                                    "Detected from your calendar: "
+                                    b { "{found}" }
+                                    ". Used until you save a workplace."
+                                }
+                                button {
+                                    class: "small-btn primary-sm",
+                                    onclick: move |_| {
+                                        let result = setup::save_workplace(&setup.peek(), &found);
+                                        if result.is_ok() {
+                                            workplace.set(found.clone());
+                                            reload(setup);
+                                        }
+                                        workplace_status
+                                            .set(Some(result.map(|()| "Saved".into()).map_err(|e| format!("{e:#}"))));
+                                    },
+                                    "Save"
+                                }
+                            }
+                        },
+                        Some(None) => rsx! {
+                            div { class: "detected warn", role: "status",
+                                "No fixed workplace set and none found in the calendar: every work event with an address counts as a client visit, so drives there are reimbursed."
+                            }
+                        },
+                        None => rsx! {},
+                    }
+                    match workplace_status() {
+                        Some(Ok(t)) => rsx! { span { class: "note good", "{t}" } },
+                        Some(Err(e)) => rsx! { span { class: "note bad", "{e}" } },
+                        None => rsx! {},
+                    }
                 }
                 div { class: "field",
                     label { r#for: "a-home", "Home" }

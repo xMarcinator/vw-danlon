@@ -627,9 +627,22 @@ pub fn build(
                     cfg.periods.count_travel_time,
                 );
                 let mut segments = w.segments;
+                // Left work without a trip ("Stop work (left early)"): the
+                // open period ends then.
+                let left = state
+                    .left_work
+                    .get(&date)
+                    .and_then(|at| tz.from_local_datetime(at).earliest());
+                let open_now = match (w.open, left) {
+                    (Some((since, _)), Some(left)) if since < left => {
+                        segments.push((since, left));
+                        None
+                    }
+                    (open, _) => open,
+                };
                 // The day is not over: no departure or no driving to work
                 // yet is fine.
-                let note = match (w.open, date == today) {
+                let note = match (open_now, date == today) {
                     (Some((since, loc)), true) => {
                         if let Some(now) = so_far.filter(|now| since < *now) {
                             segments.push((since, now));

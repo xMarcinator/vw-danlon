@@ -97,6 +97,7 @@ fn agent() -> ureq::Agent {
                 .build(),
         )
         .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(Duration::from_secs(60)))
         .user_agent(concat!("vw-danlon/", env!("CARGO_PKG_VERSION")))
         .build()

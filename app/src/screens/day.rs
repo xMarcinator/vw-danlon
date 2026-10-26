@@ -1,9 +1,12 @@
-//! The Day screen: the day's numbers, a timeline of planned time, time at
-//! work, private time, lunch and driving, the lunch break and where it
-//! comes from (changeable), the private time (recorded intervals editable)
-//! and the trips, where a missing trip can be added by hand.
+//! The Day screen: the day's numbers (today: worked and expected so far,
+//! the difference and how late), a timeline of planned time, time at work,
+//! private time, lunch and driving (today with the planned start, now and
+//! the planned end), the lunch break and where it comes from (changeable),
+//! the private time (recorded intervals editable) and the trips, where a
+//! missing trip can be added by hand.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
+use chrono_tz::Tz;
 use dioxus::prelude::*;
 use vw_danlon::config::Config;
 use vw_danlon::mileage::Status;
@@ -21,8 +24,10 @@ pub struct DayArgs<'a> {
     pub cfg: &'a Config,
     pub view: &'a MonthView,
     pub loaded: &'a Loaded,
+    /// The state the view was built from.
+    pub state: &'a State,
     pub date: NaiveDate,
-    pub now: NaiveDateTime,
+    pub now: DateTime<Tz>,
     pub message: Message,
     pub on_action: Callback<Action, bool>,
     pub on_back: Callback<()>,
@@ -48,6 +53,15 @@ fn trip_kind(s: &Option<Status>) -> (&'static str, &'static str) {
     }
 }
 
+/// "25 min", "1 h 10 min".
+fn minutes_text(m: i64) -> String {
+    match (m / 60, m % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
+    }
+}
+
 /// The private items' times: as measured, else as planned.
 fn private_span(i: &PrivateItem, now: NaiveDateTime) -> Option<(NaiveDateTime, NaiveDateTime)> {
     match i.state {
@@ -69,9 +83,10 @@ pub fn render(a: DayArgs) -> Element {
     let DayArgs {
         cfg,
         view,
+        state,
         loaded,
         date,
-        now,
+        now: now_tz,
         message,
         on_action,
         on_back,
@@ -80,19 +95,15 @@ pub fn render(a: DayArgs) -> Element {
     let Some(d) = view.report.days.iter().find(|d| d.date == date) else {
         return rsx! {};
     };
-    let private = match State::load(&cfg.database) {
-        Ok(s) => service::private_time(
-            &service::timed_entries(cfg, &loaded.occurrences),
-            &s,
-            &cfg.private,
-            date,
-            date,
-            now,
-        ),
-        Err(e) => {
-            return rsx! { div { class: "alert", role: "alert", "{e:#}" } };
-        }
-    };
+    let now = now_tz.naive_local();
+    let private = service::private_time(
+        &service::timed_entries(cfg, &loaded.occurrences),
+        state,
+        &cfg.private,
+        date,
+        date,
+        now,
+    );
     let trips = service::day_trips(&loaded.trips, view.mileage.as_ref(), date);
     let (km, amount) = view
         .mileage
@@ -120,6 +131,36 @@ pub fn render(a: DayArgs) -> Element {
         None => ("No lunch".to_string(), 0),
     };
     let today = now.date();
+    // Today so far: the planned start counts, not the arrival.
+    let so_far = d.so_far;
+    let late = match (d.planned, d.first_start) {
+        (Some((s, _)), Some(first)) if first > s => Some((first - s).num_minutes()),
+        (Some((s, _)), None) if so_far && s < now_tz => Some((now_tz - s).num_minutes()),
+        _ => None,
+    };
+    let late_text = match (late, d.first_start) {
+        (Some(m), Some(_)) => format!("{} late", minutes_text(m)),
+        (Some(m), None) => format!("not at work yet · {} late", minutes_text(m)),
+        (None, Some(_)) if d.planned.is_some() => "on time".to_string(),
+        _ => String::new(),
+    };
+    let worked_sub = match (d.first_start, d.last_end) {
+        (Some(first), Some(last)) if so_far && last == now_tz => {
+            format!("{} – now", first.format("%H:%M"))
+        }
+        (None, _) if so_far => "not at work yet".to_string(),
+        _ => d.periods_text(),
+    };
+    let expected_sub = match d.planned.filter(|(s, _)| *s < now_tz) {
+        Some((s, e)) => format!(
+            "{}–{} of {}",
+            s.format("%H:%M"),
+            e.min(now_tz).format("%H:%M"),
+            hours(d.norm_hours)
+        ),
+        None => format!("of {}", hours(d.norm_hours)),
+    };
+    let left_work = state.left_work.get(&date).copied();
 
     rsx! {
         nav { class: "crumbs wide-only", "aria-label": "Breadcrumb",
@@ -151,14 +192,27 @@ pub fn render(a: DayArgs) -> Element {
                 span { class: "kpi-sub", "{planned_text}" }
             }
             section { class: "kpi",
-                h2 { "Worked" }
+                h2 { if so_far { "Worked so far" } else { "Worked" } }
                 span { class: "kpi-value", "{hours(d.worked_hours)}" }
-                span { class: "kpi-sub", "{d.periods_text()}" }
+                span { class: "kpi-sub", "{worked_sub}" }
+            }
+            if so_far {
+                section { class: "kpi",
+                    h2 { "Expected so far" }
+                    span { class: "kpi-value", "{hours(d.expected_hours)}" }
+                    span { class: "kpi-sub", "{expected_sub}" }
+                }
             }
             section { class: "kpi",
-                h2 { "Difference" }
+                h2 { if so_far { "Diff" } else { "Difference" } }
                 span { class: "kpi-value {diff_class(d.difference())}", "{signed(d.difference())}" }
-                span { class: "kpi-sub", "norm {hours(d.norm_hours)} h" }
+                span { class: "kpi-sub",
+                    if so_far {
+                        "{late_text}"
+                    } else {
+                        "norm {hours(d.norm_hours)} h"
+                    }
+                }
             }
             if view.mileage.is_some() {
                 section { class: "kpi",
@@ -176,7 +230,23 @@ pub fn render(a: DayArgs) -> Element {
             }
         }
 
-        {timeline(d, &private.items, &trips, now)}
+        if let Some(at) = left_work {
+            div { class: "alert info", role: "status",
+                span { class: "grow",
+                    "You left work at {hm(at)} without a trip (set by you): the time at work ends then."
+                }
+                button {
+                    class: "small-btn",
+                    onclick: move |_| {
+                        on_action.call(Action::UndoLeaveWork(date));
+                    },
+                    "Undo"
+                }
+            }
+        }
+        {status(message_for(&message, Panel::Home))}
+
+        {timeline(d, &private.items, &trips, now_tz)}
 
         LunchPanel {
             date,
@@ -305,8 +375,9 @@ fn timeline(
     d: &Day,
     private: &[PrivateItem],
     trips: &[(&vw_danlon::trips::Trip, Option<Status>)],
-    now: NaiveDateTime,
+    now_tz: DateTime<Tz>,
 ) -> Element {
+    let now = now_tz.naive_local();
     let naive = |t: chrono::DateTime<chrono_tz::Tz>| t.naive_local();
     let mut spans: Vec<(NaiveDateTime, NaiveDateTime, u32, &'static str)> = Vec::new();
     if let Some((s, e)) = d.planned {
@@ -351,9 +422,57 @@ fn timeline(
             } else {
                 format!("At work · {place}")
             },
-            sub: format!("until {}", e.format("%H:%M")),
+            sub: if d.so_far && *e == now_tz {
+                format!("since {}", s.format("%H:%M"))
+            } else {
+                format!("until {}", e.format("%H:%M"))
+            },
             kind: "work",
         });
+    }
+    // Today: counting starts at the planned start; now; the planned end.
+    if d.so_far
+        && let Some((ps, pe)) = d.planned
+    {
+        let late = match d.first_start {
+            Some(first) if first > ps => format!(
+                " · {} until you arrived",
+                minutes_text((first - ps).num_minutes())
+            ),
+            None if ps < now_tz => " · not at work yet".to_string(),
+            _ => String::new(),
+        };
+        steps.push(Step {
+            at: naive(ps),
+            title: "Planned start".into(),
+            sub: format!("Counting from here{late}"),
+            kind: if late.is_empty() { "planned" } else { "late" },
+        });
+        if ps < now_tz && now_tz < pe {
+            steps.push(Step {
+                at: now,
+                title: "Now".into(),
+                sub: if d.open.is_some() {
+                    "Still at work · no drive home yet is fine until the day is over".into()
+                } else if d.home.iter().any(|(_, e)| *e == now_tz) {
+                    "Working from home".into()
+                } else if d.first_start.is_none() {
+                    "Not at work yet · the planned time that has passed counts".into()
+                } else {
+                    "Not at work".into()
+                },
+                kind: "now",
+            });
+            steps.push(Step {
+                at: naive(pe),
+                title: "Planned end".into(),
+                sub: format!(
+                    "{} h to go",
+                    hours((d.norm_hours - d.expected_hours).max(0.0))
+                ),
+                kind: "planned",
+            });
+        }
     }
     for i in private {
         if let Some((s, e)) = private_span(i, now) {
@@ -408,6 +527,9 @@ fn timeline(
                 span { class: "legend", span { class: "swatch private" } "Private" }
                 span { class: "legend", span { class: "swatch lunch" } "Lunch" }
                 span { class: "legend", span { class: "swatch drive" } "Driving" }
+                if d.so_far {
+                    span { class: "legend", span { class: "swatch now" } "Now · no drive home yet is fine" }
+                }
             }
             div { class: "tl", role: "img", "aria-label": "{label}",
                 for (s , e , row , class) in spans.iter() {
@@ -415,6 +537,9 @@ fn timeline(
                         class: "{class}",
                         style: "left: {pct(*s)}%; width: {(pct(*e) - pct(*s)).max(0.4)}%; top: {4 + row * 26}px",
                     }
+                }
+                if d.so_far {
+                    span { class: "now-mark", style: "left: {pct(now)}%", title: "Now {hm(now)}" }
                 }
             }
             div { class: "tl-ticks", "aria-hidden": "true",

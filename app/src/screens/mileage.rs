@@ -438,8 +438,45 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     };
     let tab = |on: bool| if on { "true" } else { "false" };
 
+    let workplace = service::effective_workplace(&cfg, cal, m);
     rsx! {
         {head}
+        match workplace {
+            Some((found, service::WorkplaceSource::Detected)) => rsx! {
+                div { class: "detected", role: "status",
+                    span { class: "grow",
+                        "Detected from your calendar: "
+                        b { "{found}" }
+                        " is your fixed workplace, so home ↔ there is commuting. Save it to keep it."
+                    }
+                    button {
+                        class: "small-btn primary-sm",
+                        onclick: move |_| {
+                            let saved = setup::save_workplace(&setup.peek(), &found);
+                            match saved {
+                                Ok(()) => {
+                                    let dir = setup.peek().dir.clone();
+                                    setup.set(Setup::load(Ok(dir)));
+                                    message.set(Some(Ok("Saved the workplace".into())));
+                                }
+                                Err(e) => message.set(Some(Err(format!("{e:#}")))),
+                            }
+                        },
+                        "Save"
+                    }
+                }
+            },
+            None => rsx! {
+                div { class: "alert", role: "status",
+                    span { "aria-hidden": "true", style: "font-weight: 700", "!" }
+                    div {
+                        "No fixed workplace is set and none was found in the calendar: every work event with an address counts as a client visit. "
+                        button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Set it in Settings" }
+                    }
+                }
+            },
+            _ => rsx! {},
+        }
         div { class: "mileage-tabs narrow-only", role: "tablist", "aria-label": "Show",
             button {
                 role: "tab",

@@ -384,6 +384,34 @@ impl SettingsForm {
     }
 }
 
+/// Saves `workplace` as the fixed workplace in `config.toml` (the detected
+/// one, from Settings or Mileage), the rest of the config as it is.
+pub fn save_workplace(setup: &Setup, workplace: &str) -> Result<()> {
+    let form = SettingsForm {
+        workplace: workplace.to_string(),
+        ..SettingsForm::from_config(setup.config.as_ref())
+    };
+    save(setup, &form)
+}
+
+/// The workplace detected from the kept calendar for the current month,
+/// when none is configured (see [`service::effective_workplace`]): `None`
+/// when one is configured or the calendar can't be read, `Some(None)` when
+/// there is no clear candidate. Reads the database: call it off the UI
+/// thread.
+pub fn detected_workplace(cfg: &Config) -> Option<Option<String>> {
+    if cfg.workplace.is_some() {
+        return None;
+    }
+    let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
+    let month = vw_danlon::month::Month {
+        year: chrono::Datelike::year(&today),
+        month: chrono::Datelike::month(&today),
+    };
+    let cal = service::calendar(cfg, month, service::CalendarMode::Cached).ok()?;
+    Some(service::effective_workplace(cfg, &cal.occurrences, month).map(|(w, _)| w))
+}
+
 /// Saves the form: the calendar link to the secret store, the addresses to
 /// `config.toml` (created when missing, comments kept). Nothing is written
 /// unless the resulting config can be read.
@@ -830,6 +858,31 @@ pub mod tests {
         let cfg = Config::load(&dir.join("config.toml")).unwrap();
         assert_eq!(cfg.workplace.as_deref(), Some("Kontorvej 1"));
         assert!(cfg.calendar.is_none());
+    }
+
+    #[test]
+    fn a_detected_workplace_is_saved_with_the_rest_kept() {
+        let dir = file_dir("save-workplace");
+        let s = Setup::load(Ok(dir.clone()));
+        let form = SettingsForm {
+            home_working: Some(HomeWorkingForm {
+                keywords: "Hjemme".into(),
+                at_home_address: false,
+            }),
+            ..SettingsForm::default()
+        };
+        save(&s, &form).unwrap();
+        let s = Setup::load(Ok(dir.clone()));
+        let cfg = s.config.as_ref().unwrap();
+        assert_eq!(detected_workplace(cfg), Some(None));
+        save_workplace(&s, "Lysbrohøjen 3, 8600 Silkeborg").unwrap();
+        let cfg = Config::load(&dir.join("config.toml")).unwrap();
+        assert_eq!(
+            cfg.workplace.as_deref(),
+            Some("Lysbrohøjen 3, 8600 Silkeborg")
+        );
+        assert_eq!(cfg.home_working.keywords, ["Hjemme"]);
+        assert_eq!(detected_workplace(&cfg), None);
     }
 
     #[test]

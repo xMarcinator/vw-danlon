@@ -85,6 +85,25 @@ pub struct CalendarSync {
 /// How often the app refreshes the calendar while it runs.
 pub const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+/// How long a calendar refresh may take before it is given up.
+const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Refreshes the calendar every [`REFRESH_EVERY`] while the app runs. A
+/// tick missed while the app was paused (the phone asleep, the app in the
+/// background) is not caught up: coming back gives at most one refresh, and
+/// none while one is still running.
+pub async fn refresh_calendar_now_and_then(
+    setup: Signal<crate::setup::Setup>,
+    sync: Signal<CalendarSync>,
+) {
+    let mut every = tokio::time::interval(REFRESH_EVERY);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        every.tick().await;
+        refresh_calendar(setup, sync).await;
+    }
+}
+
 /// Fetches the calendar link and keeps the copy, off the UI thread.
 pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Signal<CalendarSync>) {
     let Some(cfg) = setup.peek().config.clone() else {
@@ -94,10 +113,15 @@ pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Sign
         return;
     }
     sync.write().refreshing = true;
-    let result = tokio::task::spawn_blocking(move || service::refresh_calendar(&cfg))
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r.map_err(|e| format!("{e:#}")));
+    // The download has its own timeouts; this one also ends a refresh stuck
+    // anywhere else, so `refreshing` never stays set.
+    let job = tokio::task::spawn_blocking(move || service::refresh_calendar(&cfg));
+    let result = match tokio::time::timeout(REFRESH_TIMEOUT, job).await {
+        Ok(joined) => joined
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| format!("{e:#}"))),
+        Err(_) => Err("no answer in time".to_string()),
+    };
     let mut s = sync.write();
     s.refreshing = false;
     match result {
@@ -126,6 +150,7 @@ pub fn calendar_age(fetched_at: DateTime<Utc>, now: DateTime<Tz>) -> String {
 /// calendar, loaded off the UI thread.
 #[derive(Clone)]
 pub struct Loaded {
+    pub month: vw_danlon::month::Month,
     pub trips: Vec<Trip>,
     /// The start times of the trips added by hand.
     pub manual: BTreeSet<DateTime<Tz>>,
@@ -145,11 +170,41 @@ pub async fn load(cfg: Config, month: vw_danlon::month::Month) -> Result<Loaded,
         let cal =
             service::month_calendar(&cfg, month, now.date_naive(), service::CalendarMode::Cached)?;
         Ok(Loaded {
+            month,
             trips,
             manual,
             occurrences: cal.occurrences,
             calendar_warning: cal.warning,
             calendar_fetched_at: cal.fetched_at,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// The month as the screens show it at `now`, with the state it was built
+/// from: computed off the UI thread (it reads and may write the database,
+/// see [`service::month_view`]).
+pub struct Computed {
+    pub month: vw_danlon::month::Month,
+    pub now: DateTime<Tz>,
+    pub view: service::MonthView,
+    pub state: state::State,
+}
+
+/// Builds [`Computed`] from `loaded` at the current time, off the UI thread.
+pub async fn compute(cfg: Config, loaded: Loaded) -> Result<Computed, String> {
+    tokio::task::spawn_blocking(move || -> Result<Computed> {
+        let now = now(&cfg);
+        let view =
+            service::month_view(&cfg, loaded.month, &loaded.trips, &loaded.occurrences, now)?;
+        let state = state::State::load(&cfg.database)?;
+        Ok(Computed {
+            month: loaded.month,
+            now,
+            view,
+            state,
         })
     })
     .await
@@ -166,6 +221,12 @@ pub enum Action {
     Stop,
     /// The real start, as typed, of the appointment started automatically.
     StartedAt(String),
+    /// Private time without an event that started earlier today, as typed.
+    StartAt(String),
+    /// At work without a departure: you left now without a trip.
+    LeaveWork,
+    /// Take back "left work" on that day.
+    UndoLeaveWork(NaiveDate),
     /// You did not go to the private appointment on that day with this
     /// title: it counts no private time.
     Skip(NaiveDate, String),
@@ -206,7 +267,9 @@ impl Action {
         match self {
             Action::Lunch(..) | Action::LunchAt { .. } => Panel::Lunch,
             Action::AddTrip(..) | Action::DeleteTrip(_) => Panel::Trips,
-            Action::HomeStart | Action::HomeStop => Panel::Home,
+            Action::HomeStart | Action::HomeStop | Action::LeaveWork | Action::UndoLeaveWork(_) => {
+                Panel::Home
+            }
             _ => Panel::Private,
         }
     }
@@ -262,6 +325,22 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
             let at = state::parse_time(at.trim())?;
             let r = service::start_private(cfg, cal, now, &EventChoice::Auto, Some(at), None)?;
             format!("Timer running since {} ({})", hm(r.start), r.label)
+        }
+        Action::StartAt(at) => {
+            let at = state::parse_time(at.trim())?;
+            let r = service::start_private(cfg, cal, now, &EventChoice::None, Some(at), None)?;
+            format!("Timer running since {} ({})", hm(r.start), r.label)
+        }
+        Action::LeaveWork => {
+            service::set_left_work(cfg, now.date_naive(), Some(now.naive_local()))?;
+            format!(
+                "Left work at {} · the time at work ends then",
+                hm(now.naive_local())
+            )
+        }
+        Action::UndoLeaveWork(date) => {
+            service::set_left_work(cfg, *date, None)?;
+            "Left work taken back".to_string()
         }
         Action::Skip(date, title) => {
             let w = service::skip_private(cfg, cal, *date, Some(title), now.naive_local())?;

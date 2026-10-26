@@ -578,6 +578,9 @@ pub enum WorkAction {
     PrivateWithoutEvent,
     /// Stop the home-working timer.
     StopWork,
+    /// At a work address without a departure: you left now without a trip
+    /// (see [`leave_work`]).
+    LeaveWork,
     /// Stop the private timer, or the appointment started automatically.
     StopPrivate,
 }
@@ -695,7 +698,7 @@ pub fn work_today(
     };
     let actions = match &state_now {
         WorkState::NotWorking { .. } => vec![WorkAction::StartWork],
-        WorkState::AtWork { .. } => private_actions().collect(),
+        WorkState::AtWork { .. } => private_actions().chain([WorkAction::LeaveWork]).collect(),
         WorkState::Home { .. } => private_actions()
             .chain(state.home.running.is_some().then_some(WorkAction::StopWork))
             .collect(),
@@ -709,6 +712,20 @@ pub fn work_today(
         next_private,
         actions,
     }
+}
+
+/// You left work at `at` without a trip ("Stop work (left early)"): an
+/// arrival at a work address that day without a departure ends then. None
+/// takes it back. A departure trip after the arrival still wins.
+pub fn set_left_work(cfg: &Config, date: NaiveDate, at: Option<NaiveDateTime>) -> Result<()> {
+    State::update(&cfg.database, |s| match at {
+        Some(at) => {
+            s.left_work.insert(date, at);
+        }
+        None => {
+            s.left_work.remove(&date);
+        }
+    })
 }
 
 fn occurrence_date(o: &Occurrence) -> NaiveDate {
@@ -2137,9 +2154,28 @@ mod tests {
             t.actions,
             [
                 WorkAction::PrivateForAppointment,
-                WorkAction::PrivateWithoutEvent
+                WorkAction::PrivateWithoutEvent,
+                WorkAction::LeaveWork
             ]
         );
+
+        // Left work at 10:40 without a trip: the period ends then and the
+        // day is not working any more; a later departure trip still wins.
+        let mut left = State::default();
+        left.left_work
+            .insert(at("2026-10-20 10:40").date(), at("2026-10-20 10:40"));
+        let t = w(&left, std::slice::from_ref(&arrive), "2026-10-20 11:00");
+        assert_eq!(t.state, WorkState::NotWorking { late_by: None });
+        assert_eq!(min(t.worked), 90);
+        let depart = Trip {
+            start: now("2026-10-20 10:50"),
+            end: now("2026-10-20 11:05"),
+            from: arrive.to.clone(),
+            to: arrive.from.clone(),
+            ..arrive.clone()
+        };
+        let t = w(&left, &[arrive.clone(), depart], "2026-10-20 12:00");
+        assert_eq!(min(t.worked), 100);
 
         // The Læge appointment started automatically at 13:00.
         let t = w(&st, std::slice::from_ref(&arrive), "2026-10-20 13:10");

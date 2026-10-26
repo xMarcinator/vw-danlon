@@ -451,6 +451,31 @@ Recorded home working counts as worked and is shown in the day's note (e.g.
 entries for it. A home-working timer still running past midnight or for more
 than 12 hours is flagged in the report like the private timer.
 
+### Today and the app's work card
+
+Today counts from the planned start up to now: the expected hours are the
+planned time that has passed minus the part of the lunch break that has
+passed, and an open period at work (or a running timer) counts up to now.
+Coming in late shows at once in the difference; after the planned end today
+is the whole day. Today is never flagged for an arrival without a departure
+or for no driving: the day is not over yet.
+
+On the app's Month screen one work card shows where today stands: **Start
+work** (the home-working timer) when you are not working; while you work (at
+a work address from the trips, or the home timer) a split button **Private
+time ▾** whose menu starts private time now or earlier and stops work
+(**Stop working from home**, or **Stop work (left early)** at a work address:
+the time at work ends now although no trip leaves, undone from the Day
+screen); while private time runs, **Stop private**. Under it the next
+private appointment has its own Start, and the chevron opens today's private
+list. The Day screen for today shows worked and expected so far, the
+difference and how late you were.
+
+Without `workplace`, the location of the calendar work event on the most
+working days in the 60 days up to the month's end (at least 3) is used as
+the fixed workplace; Settings and Mileage say it was detected and offer to
+save it, and Mileage warns when there is none.
+
 Addresses are compared loosely:
 - case, punctuation and "Danmark" are ignored
 - the same street and number with the same (or a missing) postal code counts
@@ -549,7 +574,7 @@ keystore.
 
 ```sh
 scripts/build-apk.sh             # -> dist/vw-danlon-<version>-arm64.apk
-adb install -r dist/vw-danlon-0.2.0-arm64.apk
+adb install -r dist/vw-danlon-0.3.0-arm64.apk
 ```
 
 The script runs `dx bundle --platform android --release`, rebuilds the

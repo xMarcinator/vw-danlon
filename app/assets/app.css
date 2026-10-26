@@ -845,6 +845,279 @@ table.days tr.flagged {
   background: var(--warn-bg);
 }
 
+/* Today's work card and private time. */
+.work-card {
+  position: relative;
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+
+.work-card.on {
+  border-color: var(--acc);
+}
+
+.work-card.running,
+.work-card.late {
+  border-color: var(--warn-line);
+}
+
+.work-card > .pt-status:first-child {
+  margin-top: 10px;
+}
+
+.pt-dot.on {
+  background: var(--acc);
+}
+
+.pt-dot.warn {
+  background: var(--warn);
+}
+
+.pt-dot.bad {
+  background: var(--bad);
+}
+
+.pt-title b.bad {
+  color: var(--bad);
+}
+
+.pt-title b.warn {
+  color: var(--warn);
+}
+
+.split {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.pt-btn.split-main {
+  border-radius: 10px 0 0 10px;
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.pt-btn.split-caret {
+  min-width: 0;
+  width: 36px;
+  padding: 0;
+  border-left: 1px solid color-mix(in srgb, var(--on-acc) 35%, transparent);
+  border-radius: 0 10px 10px 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pill-btn.split-main {
+  border-radius: 999px 0 0 999px;
+}
+
+.pill-btn.split-caret {
+  width: 28px;
+  padding: 0;
+  border-left: 1px solid color-mix(in srgb, var(--on-acc) 35%, transparent);
+  border-radius: 0 999px 999px 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+}
+
+.menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  min-width: 240px;
+  padding: 4px 0;
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 400;
+}
+
+.menu-item {
+  font: inherit;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 14px;
+  border: none;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.menu-item:hover,
+.menu-item:focus-visible {
+  background: var(--row);
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--row);
+}
+
+.menu-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+}
+
+.menu-edit input {
+  font-size: 14px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--text);
+}
+
+.next-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 4px 4px 4px 14px;
+  border-top: 1px solid var(--row);
+  font-size: 13px;
+}
+
+.small-btn.next-start {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--acc);
+  background: var(--surf);
+  color: var(--acc-text);
+  flex-shrink: 0;
+}
+
+.small-btn.next-start.running {
+  border-color: var(--warn-line);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.work-pill {
+  position: relative;
+  padding: 3px 4px 3px 12px;
+  gap: 8px;
+  color: var(--text);
+}
+
+.work-pill b {
+  font-weight: 600;
+}
+
+.work-pill.on {
+  border-color: var(--acc);
+}
+
+.work-pill.on .dot {
+  background: var(--acc);
+}
+
+.work-pill .dot {
+  background: var(--ctl);
+}
+
+.work-pill.running,
+.work-pill.late {
+  border-color: var(--warn-line);
+}
+
+.work-pill.running .dot {
+  background: var(--warn);
+}
+
+.work-pill.late .dot {
+  background: var(--bad);
+}
+
+.work-pill.running .pill-btn.stop {
+  background: var(--warn);
+  color: var(--bg);
+  border: none;
+}
+
+.next-note {
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.detected {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--info-bg);
+  color: var(--info);
+  font-size: 13px;
+}
+
+.detected.warn {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.alert.info {
+  align-items: center;
+  background: var(--info-bg);
+  border-color: var(--info-bg);
+  color: var(--info);
+}
+
+.now-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--acc);
+}
+
+.swatch.now {
+  width: 2px;
+  height: 14px;
+  background: var(--acc);
+}
+
+.step-dot.now {
+  border: 2px solid var(--acc);
+}
+
+.step-dot.planned {
+  border: 2px solid var(--ctl);
+}
+
+.step-dot.late {
+  border: 2px solid var(--bad);
+}
+
+@media (max-width: 719px) {
+  .pt-head.narrow-only {
+    display: flex !important;
+  }
+}
+
 /* Private time. */
 .pt-card {
   background: var(--surf);
@@ -871,10 +1144,6 @@ table.days tr.flagged {
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--ctl);
-}
-
-.pt-dot.on {
-  background: var(--warn);
 }
 
 .pt-title {
@@ -1963,16 +2232,6 @@ table.days td .chip.planned {
   background: var(--ctl);
 }
 
-.home-pill {
-  padding: 3px 4px 3px 12px;
-  gap: 8px;
-}
-
-.home-pill.on {
-  border-color: var(--acc);
-  color: var(--acc-text);
-}
-
 .pill-btn {
   font: inherit;
   font-size: 12px;
@@ -1990,29 +2249,6 @@ table.days td .chip.planned {
   background: var(--surf);
   color: var(--acc-text);
   border: 1px solid var(--acc);
-}
-
-.home-card.on {
-  border-color: var(--acc);
-}
-
-.home-head {
-  padding-right: 14px;
-}
-
-.pt-dot.home {
-  background: var(--acc);
-}
-
-.pt-btn.home-stop {
-  background: var(--surf);
-  color: var(--acc-text);
-  border: 1px solid var(--acc);
-}
-
-.pt-status.acc {
-  background: var(--acc-soft);
-  color: var(--acc-text);
 }
 
 .pt-status.auto {

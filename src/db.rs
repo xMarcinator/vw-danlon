@@ -24,8 +24,9 @@ pub const FILE_NAME: &str = "vw-danlon.db";
 /// The schema version, kept in `PRAGMA user_version`. Version 2 added the
 /// home-working timer ([`HOME_SCHEMA`]), version 3 the trip overrides
 /// ([`OVERRIDE_SCHEMA`]), version 4 calendar time and the deleted private
-/// appointments ([`CALENDAR_TIME_SCHEMA`]).
-const VERSION: i32 = 4;
+/// appointments ([`CALENDAR_TIME_SCHEMA`]), version 5 when you left work
+/// without a trip ([`WORK_END_SCHEMA`]).
+const VERSION: i32 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -100,6 +101,12 @@ const OVERRIDE_SCHEMA: &str = "
 CREATE TABLE trip_overrides (start TEXT PRIMARY KEY, business INTEGER NOT NULL);
 ";
 
+/// What version 5 added: per day, when you left work without a trip
+/// ("Stop work (left early)"), closing the open period at a work address.
+const WORK_END_SCHEMA: &str = "
+CREATE TABLE work_end (day TEXT PRIMARY KEY, at TEXT NOT NULL);
+";
+
 /// What version 4 added: whether a private interval is calendar time (the
 /// planned window of an appointment left untouched), and the private
 /// appointments whose time you deleted.
@@ -153,6 +160,9 @@ fn upgrade(conn: &mut Connection, path: &Path) -> Result<()> {
     }
     if version <= 3 {
         tx.execute_batch(CALENDAR_TIME_SCHEMA)?;
+    }
+    if version <= 4 {
+        tx.execute_batch(WORK_END_SCHEMA)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()
@@ -296,6 +306,7 @@ fn build(path: &Path, tmp: &Path) -> Result<Vec<PathBuf>> {
     tx.execute_batch(HOME_SCHEMA)?;
     tx.execute_batch(OVERRIDE_SCHEMA)?;
     tx.execute_batch(CALENDAR_TIME_SCHEMA)?;
+    tx.execute_batch(WORK_END_SCHEMA)?;
     let mut moved = Vec::new();
     if let Some(t) = &trips {
         crate::trip_store::insert(&tx, &t.trips)?;
@@ -497,7 +508,7 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
             "DROP TABLE home_intervals; DROP TABLE home_running; DROP TABLE trip_overrides; \
-             DROP TABLE private_dismissed; \
+             DROP TABLE private_dismissed; DROP TABLE work_end; \
              ALTER TABLE private_intervals DROP COLUMN calendar_time; \
              PRAGMA user_version = 1;",
         )
@@ -511,6 +522,7 @@ mod tests {
         assert!(!has_table(&conn, "home_intervals").unwrap());
         assert!(s.trip_overrides.is_empty());
         assert!(s.dismissed.is_empty());
+        assert!(s.left_work.is_empty());
         assert!(!has_column(&conn, "private_intervals", "calendar_time").unwrap());
         drop(conn);
 
@@ -524,6 +536,10 @@ mod tests {
         State::update(&db, |s| {
             s.trip_overrides.insert(trip_start, true);
             s.dismissed.insert(w.clone());
+            s.left_work.insert(
+                "2026-10-06".parse().unwrap(),
+                "2026-10-06T14:30:00".parse().unwrap(),
+            );
             s.home
                 .start("2026-10-06T08:00:00".parse().unwrap(), None, None)
                 .map(|_| ())
@@ -534,6 +550,7 @@ mod tests {
         assert_eq!((s.entered.len(), s.home.running.is_some()), (1, true));
         assert_eq!(s.trip_overrides.get(&trip_start), Some(&true));
         assert!(s.dismissed.contains(&w));
+        assert_eq!(s.left_work.len(), 1);
         let conn = open(&db).unwrap();
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
