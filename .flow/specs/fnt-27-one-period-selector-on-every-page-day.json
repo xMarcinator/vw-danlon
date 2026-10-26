@@ -1,0 +1,24 @@
+{
+  "branch_name": "fnt-27-one-period-selector-on-every-page-day",
+  "created_at": "2026-10-26T18:29:00.865746Z",
+  "depends_on_epics": [],
+  "id": "fnt-27-one-period-selector-on-every-page-day",
+  "next_task": 1,
+  "plan_review_status": "unknown",
+  "plan_reviewed_at": null,
+  "spec_path": ".flow/specs/fnt-27-one-period-selector-on-every-page-day.md",
+  "status": "open",
+  "title": "One period selector on every page, Day in Hours",
+  "tracker": {
+    "baseHashFlow": null,
+    "baseHashTracker": null,
+    "depRelations": [],
+    "id": null,
+    "identifier": "FNT-27",
+    "lastSyncedAt": null,
+    "mergeBaseFlow": null,
+    "mergeBaseTracker": null,
+    "url": null
+  },
+  "updated_at": "2026-10-26T18:29:01.228074Z"
+}

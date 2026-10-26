@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-26T18:29:01.948269Z",
+  "depends_on": [
+    "fnt-27-one-period-selector-on-every-page-day.1"
+  ],
+  "id": "fnt-27-one-period-selector-on-every-page-day.2",
+  "priority": null,
+  "spec": "fnt-27-one-period-selector-on-every-page-day",
+  "spec_path": ".flow/tasks/fnt-27-one-period-selector-on-every-page-day.2.md",
+  "status": "todo",
+  "title": "Selector on Mileage, Danl\u00f8n and Vacation; week filtering; release 0.6.0 prep",
+  "updated_at": "2026-10-26T18:29:01.948269Z"
+}
