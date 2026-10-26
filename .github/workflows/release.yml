@@ -94,6 +94,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_TOOLS: "36.1.0"
+      GRADLE_VERSION: "9.1.0"
       PLATFORM: android-36
     steps:
       - uses: actions/checkout@v4
@@ -148,6 +149,24 @@ jobs:
         run: |
           if ! dx --version 2>/dev/null | grep -q "^dioxus $DX_VERSION"; then
             cargo binstall -y --force --locked "dioxus-cli@$DX_VERSION"
+          fi
+      # The Gradle wrapper in dx's generated project downloads Gradle with a
+      # 10 s timeout. Download it here instead (retries, long timeout) into
+      # the folder the wrapper looks in, so it finds it and only unpacks it.
+      # GRADLE_VERSION must match the one dx 0.7.10's project asks for.
+      - name: Gradle distribution for the wrapper
+        run: |
+          url="https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+          hash=$(python3 -c 'import hashlib,sys; n=int.from_bytes(hashlib.md5(sys.argv[1].encode()).digest(),"big"); d="0123456789abcdefghijklmnopqrstuvwxyz"; s=""
+          while n: n,r=divmod(n,36); s=d[r]+s
+          print(s or "0")' "$url")
+          dir=$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/$hash
+          if [ -f "$dir/gradle-$GRADLE_VERSION-bin.zip" ] || ls -d "$dir"/gradle-$GRADLE_VERSION >/dev/null 2>&1; then
+            echo "Gradle $GRADLE_VERSION already in the cache"
+          else
+            mkdir -p "$dir"
+            curl -fL --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 30 --max-time 600 \
+              -o "$dir/gradle-$GRADLE_VERSION-bin.zip" "$url"
           fi
       # Gradle downloads itself with a 10 s timeout here, which fails now
       # and then on GitHub's runners: try up to three times.
