@@ -162,6 +162,12 @@ fn App() -> Element {
     let trip_sync = use_context_provider(|| Signal::new(screens::TripSync::default()));
     use_future(move || screens::sync_trips_now_and_then(setup, trip_sync));
     let resumed = use_context_provider(|| Signal::new(screens::Resumed::default()));
+    // Hours' period: kept while the app runs, across the tabs.
+    use_context_provider(|| {
+        Signal::new(screens::period::HoursPeriod::new(screens::month::today_of(
+            &setup.peek(),
+        )))
+    });
     use_future(move || screens::watch_resume(resumed));
     let theme = setup.read().settings.theme;
     let current = screen();

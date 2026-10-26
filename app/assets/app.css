@@ -601,37 +601,106 @@ body {
   cursor: pointer;
 }
 
-/* Show by Month | Week, and the way back to the current period. */
-.show-by {
+/* The period selector every page starts with: ‹ title › on top, then the
+   views and Today, enabled only away from the current period. */
+.period-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.period-bar {
+  flex: 0 1 520px;
+  min-width: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 12px;
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.period-head > .primary-sm {
+  margin-left: auto;
+}
+
+.period-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 12px;
+}
+
+.period-arrow {
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: none;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.period-title {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.period-title h1 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Kept one line high when empty, so the arrows do not move. */
+.period-sub {
+  min-height: 1.2em;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.period-row2 {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-left: 12px;
+  gap: 12px;
 }
 
-.segmented.show-seg {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  width: 150px;
-  gap: 3px;
-  padding: 2px;
-  border-radius: 8px;
+.segmented.period-seg {
+  flex: 1 1 auto;
 }
 
-.segmented.show-seg button {
-  min-height: 32px;
+.segmented.period-seg button {
+  min-height: 44px;
+  font-size: 15px;
+}
+
+.period-note {
+  flex: 1 1 auto;
   font-size: 13px;
-  border-radius: 6px;
+  color: var(--sub);
 }
 
-.now-btn {
-  font-size: 13px;
+.period-today {
+  font-size: 14px;
   font-weight: 500;
-  min-height: 36px;
-  padding: 0 12px;
-  margin-left: 4px;
+  min-height: 44px;
+  padding: 0 14px;
   border: 1px solid var(--acc);
-  border-radius: 8px;
-  background: var(--surf);
+  border-radius: 10px;
+  background: none;
   color: var(--acc-text);
   display: inline-flex;
   align-items: center;
@@ -640,8 +709,22 @@ body {
   cursor: pointer;
 }
 
-.week-sub::before {
-  content: "\00a0·\00a0";
+.period-today:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  opacity: 0.6;
+  cursor: default;
+}
+
+@media (max-width: 719px) {
+  .period-bar {
+    flex: 1 1 auto;
+  }
+}
+
+/* Day's own buttons, under the selector when wide. */
+.screen-head.day-actions {
+  justify-content: flex-end;
 }
 
 .primary-sm {
@@ -690,16 +773,6 @@ body {
   font-weight: 600;
   cursor: pointer;
   text-decoration: none;
-}
-
-.crumbs {
-  font-size: 13px;
-}
-
-.crumbs .link-btn {
-  color: var(--info);
-  font-weight: 400;
-  text-decoration: underline;
 }
 
 .chips {
@@ -1751,10 +1824,6 @@ table.days tr.flagged {
     display: flex !important;
   }
 
-  .content.full > .screen-head {
-    padding-top: 0;
-  }
-
   .month-nav h1 {
     flex-grow: 1;
     text-align: center;
@@ -1765,58 +1834,6 @@ table.days tr.flagged {
     height: 44px;
     border: none;
     background: none;
-  }
-
-  /* The Show by row above the arrows and the title. */
-  .show-by {
-    order: -1;
-    flex-basis: 100%;
-    justify-content: space-between;
-    gap: 8px;
-    margin-left: 0;
-    padding-top: 4px;
-  }
-
-  .segmented.show-seg {
-    width: 184px;
-    gap: 4px;
-    padding: 3px;
-    border-radius: 10px;
-  }
-
-  .segmented.show-seg button {
-    min-height: 44px;
-    font-size: 14px;
-    border-radius: 8px;
-  }
-
-  .now-btn {
-    font-size: 14px;
-    min-height: 44px;
-    padding: 0 14px;
-    margin-left: 0;
-    border-radius: 10px;
-  }
-
-  .month-nav h1.week-title {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    line-height: 1.2;
-  }
-
-  .week-sub {
-    font-size: 13px;
-    font-weight: 400;
-    color: var(--muted);
-  }
-
-  .week-sub::before {
-    content: none;
-  }
-
-  .screen-head .back {
-    margin-left: -10px;
   }
 
   .kpis {
@@ -3008,7 +3025,8 @@ table.rates td:first-child {
 .add-time:active,
 .add-trip:active,
 .src-chip:active,
-.now-btn:active,
+.period-arrow:active,
+.period-today:not(:disabled):active,
 .segmented button:active,
 .seg-tabs button:active,
 .mileage-tabs button:active {

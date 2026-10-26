@@ -1,16 +1,9 @@
-//! The Month screen's week view: one ISO week, Monday to Sunday, which can
+//! Hours' week view: one ISO week, Monday to Sunday, which can
 //! span two months. Its title and range, the months it needs and its totals.
 
 use chrono::{Datelike, Duration, NaiveDate};
 use vw_danlon::mileage::Entry;
 use vw_danlon::month::{Day, Month};
-
-/// Whether the Month screen shows a month or a week.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Show {
-    Month,
-    Week,
-}
 
 /// The Monday of the ISO week of `d`.
 pub fn monday_of(d: NaiveDate) -> NaiveDate {

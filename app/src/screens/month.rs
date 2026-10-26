@@ -1,20 +1,18 @@
-//! The Month screen: month or week navigation, today's work card (work,
-//! private time and today's private list), the totals and one row per day,
-//! as `report` computes them. A day opens the Day screen.
+//! The Hours screen: the period selector (Day · Week · Month), today's work
+//! card (work, private time and today's private list), the totals and one
+//! row per day, as `report` computes them. A day opens Day on that date.
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
 use dioxus::prelude::*;
 use vw_danlon::mileage::MileageMonth;
 use vw_danlon::month::{Day, Month, OffReason};
 use vw_danlon::service::{PrivateItem, PrivateState, WorkAction, WorkState, WorkToday};
 
-use super::week::{
-    self, Show, first_week, in_week, monday_of, month_of, week_mileage, week_months, week_range,
-    week_title,
-};
+use super::period::{HoursBar, HoursPeriod, View};
+use super::week::{self, in_week, month_of, week_mileage, week_months};
 use super::{
     Action, Computed, Loaded, Message, Panel, PrivateList, apply, diff_class, hm, hours, kroner,
     message_for, signed, status, weekday,
@@ -22,7 +20,7 @@ use super::{
 use crate::setup::Setup;
 use crate::{Icon, Screen};
 
-fn today_of(setup: &Setup) -> NaiveDate {
+pub(crate) fn today_of(setup: &Setup) -> NaiveDate {
     match &setup.config {
         Some(cfg) => super::now(cfg).date_naive(),
         None => chrono::Local::now().date_naive(),
@@ -116,17 +114,19 @@ fn today_items(items: &[PrivateItem], today: NaiveDate) -> Vec<PrivateItem> {
 
 #[component]
 pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
-    let month = use_signal(|| this_month(&setup.peek()));
-    // Month or week; in Week view `week` is the Monday shown and `month`
-    // its month.
-    let show = use_signal(|| Show::Month);
-    let week = use_signal(|| monday_of(today_of(&setup.peek())));
+    // The day, week or month shown, kept while the app runs.
+    let mut period = use_context::<Signal<HoursPeriod>>();
+    // The month it is loaded from: the day's, the week's Monday's or the
+    // month shown.
+    let month = use_memo(move || period().month());
     // The week's second month, when its Sunday is in the next one.
-    let month2 = use_memo(move || match show() {
-        Show::Week => week_months(week()).1,
-        Show::Month => None,
+    let month2 = use_memo(move || {
+        let p = period();
+        match p.view {
+            View::Week => week_months(p.monday()).1,
+            View::Day | View::Month => None,
+        }
     });
-    let mut open_day = use_signal(|| None::<NaiveDate>);
     let mut version = use_signal(|| 0u32);
     let expanded = use_signal(|| false);
     let mut message = use_signal(|| None as Message);
@@ -204,24 +204,29 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
     });
-    // Opening or leaving a day clears the last private-time message.
-    let go = use_callback(move |d: Option<NaiveDate>| {
+    // Another period clears the last private-time message and the open
+    // forms.
+    let change = use_callback(move |p: HoursPeriod| {
         message.set(None);
         adding.set(false);
         sheet.set(None);
-        open_day.set(d);
+        period.set(p);
         document::eval("document.querySelector('.content')?.scrollTo(0, 0)");
     });
+    // A day in the list opens Day on that date.
+    let go = use_callback(move |d: NaiveDate| change.call(HoursPeriod::day(d)));
     // True when the action was done; a refused one leaves its editor open.
-    // It runs with the calendar of the month of the open day, or of today:
-    // the week's second month when that is where it is.
+    // It runs with the calendar of the month of the day shown, or of
+    // today: the week's second month when that is where it is.
     let on_action = use_callback(move |a: Action| -> bool {
         let Some(cfg) = setup.peek().config.clone() else {
             return false;
         };
-        let target = open_day
-            .peek()
-            .unwrap_or_else(|| super::now(&cfg).date_naive());
+        let p = *period.peek();
+        let target = match p.view {
+            View::Day => p.anchor,
+            View::Week | View::Month => super::now(&cfg).date_naive(),
+        };
         let second = month2.peek().is_some_and(|m| m.contains(target));
         let result = if second {
             match &*loaded2.peek() {
@@ -252,19 +257,24 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         return rsx! {};
     };
     let m = month();
-    let shown = show();
-    let monday = week();
+    let p = period();
+    let monday = p.monday();
     let m2 = month2();
     let today_now = super::now(&cfg).date_naive();
     let head = move || {
         rsx! {
-            MonthHeader { month, show, week, today: today_now, screen }
+            div { class: "period-head",
+                HoursBar { period: p, today: today_now, on_change: change }
+                button {
+                    class: "primary-sm wide-only",
+                    onclick: move |_| { let mut sc = screen; sc.set(Screen::Danlon) },
+                    Icon { d: Screen::Danlon.icon(), size: 15 }
+                    "Danløn app checklist"
+                }
+            }
         }
     };
-    let title = match shown {
-        Show::Month => month_title(m),
-        Show::Week => format!("{} · {}", week_title(monday), week_range(monday)),
-    };
+    let title = p.title(today_now).0;
     let failed = |e: &str| {
         rsx! {
             {head()}
@@ -316,31 +326,30 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let now = computed.now;
     let today = now.date_naive();
 
-    if let Some(date) = open_day()
-        && let Some((l, c)) = pairs.iter().find(|(l, _)| l.month.contains(date))
+    if p.view == View::Day
+        && let Some((l, c)) = pairs.iter().find(|(l, _)| l.month.contains(p.anchor))
     {
-        return super::day::render(super::day::DayArgs {
-            cfg: &cfg,
-            view: &c.view,
-            state: &c.state,
-            loaded: l,
-            date,
-            now,
-            message: message(),
-            on_action,
-            on_back: Callback::new(move |_| go.call(None)),
-            adding,
-            sheet,
-        });
+        return rsx! {
+            {head()}
+            {super::day::render(super::day::DayArgs {
+                cfg: &cfg,
+                view: &c.view,
+                state: &c.state,
+                loaded: l,
+                date: p.anchor,
+                now,
+                message: message(),
+                on_action,
+                adding,
+                sheet,
+            })}
+        };
     }
 
-    let is_week = shown == Show::Week;
+    let is_week = p.view == View::Week;
     // The current month or week; another one shows no work card and no
     // days to check.
-    let current = match shown {
-        Show::Month => m == month_of(today),
-        Show::Week => monday == monday_of(today),
-    };
+    let current = p.is_current(today);
     let in_view = |d: &&Day| !is_week || in_week(monday, d.date);
     let days: Vec<&Day> = pairs
         .iter()
@@ -476,7 +485,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             if let Some(date) = first_check {
                 button {
                     class: "src-chip warn wide-only",
-                    onclick: move |_| go.call(Some(date)),
+                    onclick: move |_| go.call(date),
                     if to_check.len() == 1 {
                         "! 1 day to check"
                     } else {
@@ -541,7 +550,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 rsx! {
                     button {
                         class: "flag narrow-only",
-                        onclick: move |_| go.call(Some(date)),
+                        onclick: move |_| go.call(date),
                         span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                         span { class: "grow",
                             b { {date.format("%-d %b").to_string()} }
@@ -565,7 +574,7 @@ fn day_rows(
     today: NaiveDate,
     not_at_work_yet: bool,
     note: &str,
-    go: Callback<Option<NaiveDate>>,
+    go: Callback<NaiveDate>,
 ) -> Element {
     rsx! {
         section { class: "panel wide-only", "aria-labelledby": "days-h",
@@ -614,7 +623,7 @@ fn day_rows(
                                         td { class: "nowrap",
                                             button {
                                                 class: "link-btn",
-                                                onclick: move |_| go.call(Some(date)),
+                                                onclick: move |_| go.call(date),
                                                 {date.format("%-d %b").to_string()}
                                             }
                                             " "
@@ -680,7 +689,7 @@ fn day_rows(
                             li { key: "{date}", "aria-current": if is_today { "date" } else { "false" },
                                 button {
                                     class: "{class}",
-                                    onclick: move |_| go.call(Some(date)),
+                                    onclick: move |_| go.call(date),
                                     span { class: "day-num",
                                         b { "{date.day()}" }
                                         if is_today {
@@ -706,125 +715,6 @@ fn day_rows(
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// Shows `monday`'s week, in its month.
-fn go_week(mut week: Signal<NaiveDate>, mut month: Signal<Month>, monday: NaiveDate) {
-    week.set(monday);
-    month.set(month_of(monday));
-}
-
-/// The return arrow of the back button.
-const BACK_ICON: &str = "M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11";
-
-/// Month or week navigation with the Show by switch and, away from the
-/// current period, the way back to it; the Danløn checklist when wide.
-#[component]
-fn MonthHeader(
-    month: Signal<Month>,
-    show: Signal<Show>,
-    week: Signal<NaiveDate>,
-    today: NaiveDate,
-    screen: Signal<Screen>,
-) -> Element {
-    let m = month();
-    let shown = show();
-    let monday = week();
-    let this_week = monday_of(today);
-    let this_month = month_of(today);
-    let is_week = shown == Show::Week;
-    let current = if is_week {
-        monday == this_week
-    } else {
-        m == this_month
-    };
-    let by = move |by: i32| {
-        let mut month = month;
-        if is_week {
-            go_week(week, month, monday + Duration::days(7 * i64::from(by)));
-        } else {
-            month.set(step(m, by));
-        }
-    };
-    let pick = move |to: Show| {
-        let (mut month, mut show) = (month, show);
-        match (shown, to) {
-            (Show::Month, Show::Week) => {
-                let start = if m == this_month {
-                    this_week
-                } else {
-                    first_week(m)
-                };
-                go_week(week, month, start);
-            }
-            (Show::Week, Show::Month) => month.set(month_of(monday)),
-            _ => return,
-        }
-        show.set(to);
-    };
-    let back = move |_| {
-        let mut month = month;
-        if is_week {
-            go_week(week, month, this_week);
-        } else {
-            month.set(this_month);
-        }
-    };
-    rsx! {
-        div { class: "screen-head",
-            div { class: "month-nav",
-                button {
-                    class: "nav-btn",
-                    "aria-label": if is_week { "Previous week" } else { "Previous month" },
-                    onclick: move |_| by(-1),
-                    Icon { d: "m15 6-6 6 6 6", size: 18 }
-                }
-                if is_week {
-                    h1 { class: "week-title",
-                        "{week_title(monday)}"
-                        span { class: "week-sub", "{week_range(monday)}" }
-                    }
-                } else {
-                    h1 { "{month_title(m)}" }
-                }
-                button {
-                    class: "nav-btn",
-                    "aria-label": if is_week { "Next week" } else { "Next month" },
-                    onclick: move |_| by(1),
-                    Icon { d: "m9 6 6 6-6 6", size: 18 }
-                }
-                div { class: "show-by",
-                    div { class: "segmented show-seg", role: "radiogroup", "aria-label": "Show by",
-                        for (label , to) in [("Month", Show::Month), ("Week", Show::Week)] {
-                            button {
-                                r#type: "button",
-                                role: "radio",
-                                "aria-checked": if to == shown { "true" } else { "false" },
-                                onclick: move |_| pick(to),
-                                "{label}"
-                            }
-                        }
-                    }
-                    if !current {
-                        button { r#type: "button", class: "now-btn", onclick: back,
-                            Icon { d: BACK_ICON, size: 16 }
-                            if is_week {
-                                "This week"
-                            } else {
-                                "This month"
-                            }
-                        }
-                    }
-                }
-            }
-            button {
-                class: "primary-sm wide-only",
-                onclick: move |_| screen.set(Screen::Danlon),
-                Icon { d: Screen::Danlon.icon(), size: 15 }
-                "Danløn app checklist"
             }
         }
     }

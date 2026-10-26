@@ -1,4 +1,4 @@
-//! The Day screen: the day's numbers (worked, norm and the difference;
+//! Hours · Day: the day's numbers (worked, norm and the difference;
 //! today: worked and expected so far, the difference and how late), a
 //! timeline of planned time, time at work, private time, lunch and driving
 //! (today with the planned start, now and the planned end), the day as a
@@ -34,7 +34,6 @@ pub struct DayArgs<'a> {
     pub now: DateTime<Tz>,
     pub message: Message,
     pub on_action: Callback<Action, bool>,
-    pub on_back: Callback<()>,
     /// Whether the add-trip form is open.
     pub adding: Signal<bool>,
     /// The add or edit time sheet, when open.
@@ -187,7 +186,6 @@ pub fn render(a: DayArgs) -> Element {
         now: now_tz,
         message,
         on_action,
-        on_back,
         mut adding,
         mut sheet,
     } = a;
@@ -231,12 +229,6 @@ pub fn render(a: DayArgs) -> Element {
     let trips_sum = match view.mileage {
         Some(_) => format!("{} km · {}", km1(driven), kroner(amount)),
         None => format!("{} km", km1(driven)),
-    };
-    let month_title = date.format("%B %Y").to_string();
-    let title = if date == now_tz.date_naive() {
-        date.format("Today · %a %-d %b").to_string()
-    } else {
-        date.format("%A %-d %B").to_string()
     };
     let planned = d
         .planned
@@ -322,18 +314,7 @@ pub fn render(a: DayArgs) -> Element {
     };
 
     rsx! {
-        nav { class: "crumbs wide-only", "aria-label": "Breadcrumb",
-            button { class: "link-btn", onclick: move |_| on_back.call(()), "{month_title}" }
-            span { class: "muted", {format!(" / {}", date.format("%-d %b"))} }
-        }
-        div { class: "screen-head",
-            button {
-                class: "icon-btn narrow-only back",
-                "aria-label": "Back to {month_title}",
-                onclick: move |_| on_back.call(()),
-                Icon { d: "m15 6-6 6 6 6", size: 22 }
-            }
-            h1 { class: "grow", "{title}" }
+        div { class: "screen-head day-actions wide-only",
             button {
                 class: "small-btn wide-only",
                 "aria-expanded": if adding() { "true" } else { "false" },

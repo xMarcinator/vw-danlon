@@ -6,6 +6,7 @@ pub mod danlon;
 pub mod day;
 pub mod mileage;
 pub mod month;
+pub mod period;
 pub mod vacation;
 pub mod week;
 
