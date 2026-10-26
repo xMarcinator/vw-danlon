@@ -36,6 +36,9 @@
   --info: #27577a;
   --info-bg: #e4eef6;
   --drive: #7aa6c8;
+  --client: #5b3f8c;
+  --client-bg: #efe9f8;
+  --client-bar: #7a5bb5;
 }
 
 .app[data-theme="dark"] {
@@ -64,6 +67,9 @@
   --info: #8ab8dc;
   --info-bg: #1e2833;
   --drive: #5b8db5;
+  --client: #c3aef0;
+  --client-bg: #2a2238;
+  --client-bar: #9d82d6;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -93,6 +99,9 @@
     --info: #8ab8dc;
     --info-bg: #1e2833;
     --drive: #5b8db5;
+    --client: #c3aef0;
+    --client-bg: #2a2238;
+    --client-bar: #9d82d6;
   }
 }
 
@@ -728,6 +737,11 @@ body {
   color: var(--info);
 }
 
+.chip.client {
+  background: var(--client-bg);
+  color: var(--client);
+}
+
 .chip.warn {
   background: var(--warn-bg);
   color: var(--warn);
@@ -1227,17 +1241,11 @@ table.days tr.flagged {
 
 .now-mark {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: -3px;
+  height: 32px;
   width: 2px;
   margin-left: -1px;
-  background: var(--acc);
-}
-
-.swatch.now {
-  width: 2px;
-  height: 14px;
-  background: var(--acc);
+  background: var(--text);
 }
 
 .step-dot.now {
@@ -1456,7 +1464,6 @@ table.days tr.flagged {
   flex-wrap: wrap;
   align-items: center;
   gap: 14px;
-  margin-bottom: 10px;
 }
 
 .legend {
@@ -1474,16 +1481,35 @@ table.days tr.flagged {
   box-sizing: border-box;
 }
 
+.tl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tl-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+/* One line: the planned day as a dashed outline, everything else inside. */
 .tl {
   position: relative;
-  height: 74px;
+  height: 26px;
 }
 
 .bar {
   position: absolute;
-  height: 18px;
-  border-radius: 4px;
+  top: 5px;
+  height: 16px;
+  border-radius: 3px;
   box-sizing: border-box;
+}
+
+.bar.planned {
+  top: 0;
+  height: 100%;
 }
 
 .bar.planned,
@@ -1497,6 +1523,11 @@ table.days tr.flagged {
   background: var(--acc);
 }
 
+.bar.client,
+.swatch.client {
+  background: var(--client-bar);
+}
+
 .bar.private,
 .swatch.private {
   background: var(--info);
@@ -1504,17 +1535,13 @@ table.days tr.flagged {
 
 .bar.lunch,
 .swatch.lunch {
-  border: 2px solid var(--ctl);
+  background: var(--ctl);
 }
 
 .bar.drive,
 .swatch.drive,
 .step-dot.drive {
   background: var(--drive);
-}
-
-.bar.drive {
-  height: 14px;
 }
 
 .tl-ticks {

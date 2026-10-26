@@ -131,8 +131,8 @@ fn trips_text(n: usize) -> String {
 /// The "why it counts" chip of a trip: text and class.
 fn rule_chip(d: &Driven) -> (String, &'static str) {
     match &d.reason {
-        Reason::ClientVisit => ("Client visit".into(), "chip acc"),
-        Reason::DirectKm => ("Client visit · direct km".into(), "chip acc"),
+        Reason::ClientVisit => ("Client visit".into(), "chip client"),
+        Reason::DirectKm => ("Client visit · direct km".into(), "chip client"),
         Reason::SetByYou => ("Set by you".into(), "chip warn"),
         Reason::Commute => ("Commute".into(), "chip"),
         Reason::SixtyDays { day } => (format!("60-day rule · day {day}"), "chip"),

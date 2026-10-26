@@ -103,6 +103,9 @@ pub struct Day {
     /// Periods at a work address or working from home, minus private
     /// appointments; overlaps count once.
     pub segments: Vec<Span>,
+    /// The part of `segments` at a client: a work address that is not the
+    /// fixed workplace (without one, every work address).
+    pub clients: Vec<Span>,
     /// Start of the first and end of the last period at work.
     pub first_start: Option<DateTime<Tz>>,
     pub last_end: Option<DateTime<Tz>>,
@@ -607,18 +610,18 @@ pub fn build(
                 })
                 .collect();
             let mut open = None;
-            let (segments, mut note) = if !match_addresses {
+            let (segments, clients, mut note) = if !match_addresses {
                 // No calendar: first departure to last arrival.
                 let span = day_trips
                     .iter()
                     .map(|t| t.start)
                     .min()
                     .zip(day_trips.iter().map(|t| t.end).max());
-                (span.into_iter().collect(), None)
+                (span.into_iter().collect(), Vec::new(), None)
             } else if match_locations.is_empty() {
                 let note = (!day_trips.is_empty() && day_home.is_empty())
                     .then(|| "driving, but no work address in the calendar".to_string());
-                (Vec::new(), note)
+                (Vec::new(), Vec::new(), note)
             } else {
                 let w = work_segments(
                     day_trips,
@@ -626,7 +629,18 @@ pub fn build(
                     &cfg.known_places,
                     cfg.periods.count_travel_time,
                 );
+                let is_client = |loc: &str| {
+                    cfg.workplace
+                        .as_ref()
+                        .is_none_or(|work| !address::matches(loc, work))
+                };
                 let mut segments = w.segments;
+                let mut clients: Vec<Span> = w
+                    .located
+                    .iter()
+                    .filter(|(_, loc)| is_client(loc))
+                    .map(|(span, _)| *span)
+                    .collect();
                 // Left work without a trip ("Stop work (left early)"): the
                 // open period ends then.
                 let left = state
@@ -634,8 +648,11 @@ pub fn build(
                     .get(&date)
                     .and_then(|at| tz.from_local_datetime(at).earliest());
                 let open_now = match (w.open, left) {
-                    (Some((since, _)), Some(left)) if since < left => {
+                    (Some((since, loc)), Some(left)) if since < left => {
                         segments.push((since, left));
+                        if is_client(loc) {
+                            clients.push((since, left));
+                        }
                         None
                     }
                     (open, _) => open,
@@ -646,6 +663,9 @@ pub fn build(
                     (Some((since, loc)), true) => {
                         if let Some(now) = so_far.filter(|now| since < *now) {
                             segments.push((since, now));
+                            if is_client(loc) {
+                                clients.push((since, now));
+                            }
                             open = Some((since, loc.to_string()));
                         }
                         None
@@ -656,7 +676,7 @@ pub fn build(
                     }
                     (None, _) => None,
                 };
-                (segments, note)
+                (segments, merge(clients), note)
             };
             if note.is_none()
                 && let Some(summary) = missing_location.get(&date)
@@ -693,8 +713,10 @@ pub fn build(
             }
             let appointments: Vec<Span> = day_appointments.iter().map(|(span, _)| *span).collect();
             let mut segments = subtract(&segments, &appointments);
+            let mut clients = subtract(&clients, &appointments);
             if let Some(now) = so_far {
                 segments = clip(&segments, now);
+                clients = clip(&clients, now);
             }
 
             let worked_hours = worked(&segments, lunch.window, cfg.periods.round_to_minutes);
@@ -712,6 +734,7 @@ pub fn build(
                 appointments,
                 home: home_spans,
                 segments,
+                clients,
                 note,
                 check,
                 lunch,
@@ -919,7 +942,7 @@ fn clip(spans: &[Span], now: DateTime<Tz>) -> Vec<Span> {
 
 /// `spans` with every part covered by one of `windows` removed. Overlapping
 /// windows remove a time only once.
-fn subtract(spans: &[Span], windows: &[Span]) -> Vec<Span> {
+pub(crate) fn subtract<T: Copy + Ord>(spans: &[(T, T)], windows: &[(T, T)]) -> Vec<(T, T)> {
     let mut out = spans.to_vec();
     for (ws, we) in windows {
         out = out
@@ -949,7 +972,7 @@ fn work_segments<'a>(
     places: &Places,
     count_travel: bool,
 ) -> WorkSegments<'a> {
-    let mut segments: Vec<Span> = Vec::new();
+    let mut located: Vec<(Span, &str)> = Vec::new();
     let mut at: Option<(DateTime<Tz>, &str)> = None;
     for t in trips {
         let mut left_work = false;
@@ -957,7 +980,7 @@ fn work_segments<'a>(
             && places.at(&t.from, t.start_pos, loc)
         {
             let until = if count_travel { t.end } else { t.start };
-            segments.push((since, until));
+            located.push(((since, until), loc));
             at = None;
             left_work = true;
         }
@@ -973,9 +996,10 @@ fn work_segments<'a>(
         }
     }
     WorkSegments {
-        no_driving_to_work: at.is_none() && segments.is_empty() && !trips.is_empty(),
+        no_driving_to_work: at.is_none() && located.is_empty() && !trips.is_empty(),
         // Merge overlaps (travel between two work addresses with count_travel).
-        segments: merge(segments),
+        segments: merge(located.iter().map(|(span, _)| *span)),
+        located,
         open: at,
     }
 }
@@ -983,6 +1007,8 @@ fn work_segments<'a>(
 /// The periods at a work address from a day's trips.
 struct WorkSegments<'a> {
     segments: Vec<Span>,
+    /// Each period at a work address with that address, unmerged.
+    located: Vec<(Span, &'a str)>,
     /// Arrived at this address then, without a departure after.
     open: Option<(DateTime<Tz>, &'a str)>,
     /// The day has trips, none of them to or from work.
@@ -1382,6 +1408,13 @@ END:VEVENT
         assert_eq!(r.days[5].periods_text(), "08:00–15:00");
         assert_eq!(r.days[6].periods_text(), "08:00–16:30");
         assert_eq!(r.days[6].note, None);
+        // At the customer from leaving the office; the office is no client.
+        let at = |s: &str| parse_time(s, cfg.timezone).unwrap();
+        assert_eq!(
+            r.days[5].clients,
+            vec![(at("2026-10-06 09:00"), at("2026-10-06 15:00"))]
+        );
+        assert!(r.days[6].clients.is_empty());
     }
 
     #[test]

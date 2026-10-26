@@ -2,6 +2,8 @@
 //! private time and today's private list), the totals and one row per day,
 //! as `report` computes them. A day opens the Day screen.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
 use dioxus::prelude::*;
@@ -61,8 +63,22 @@ fn note_class(d: &Day) -> &'static str {
         "chip"
     } else if !d.appointments.is_empty() || !d.home.is_empty() {
         "chip info"
+    } else if !d.clients.is_empty() {
+        "chip client"
     } else {
         "chip"
+    }
+}
+
+/// The day's note; on a client visit without one, the km driven for it.
+fn remark(d: &Day, business_km: &BTreeMap<NaiveDate, f64>) -> String {
+    let remark = d.remark();
+    if !remark.is_empty() || d.clients.is_empty() {
+        return remark;
+    }
+    match business_km.get(&d.date) {
+        Some(km) if *km > 0.0 => format!("{km:.1} km business").replace('.', ","),
+        _ => "Client visit".to_string(),
     }
 }
 
@@ -405,6 +421,13 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             "",
         ));
     }
+    // The km reimbursed per day, for the client visits' note.
+    let mut business_km: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    for mil in pairs.iter().filter_map(|(_, c)| c.view.mileage.as_ref()) {
+        for e in &mil.entries {
+            *business_km.entry(e.start.date_naive()).or_default() += e.km;
+        }
+    }
     let first_check = to_check.first().map(|d| d.date);
     // Newest first, today on top; the days after today are not listed.
     let listed = week::listed(&days, today);
@@ -530,7 +553,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
 
-        {day_rows(&listed, today, not_at_work_yet, days_note, go)}
+        {day_rows(&listed, &business_km, today, not_at_work_yet, days_note, go)}
     }
 }
 
@@ -538,6 +561,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
 /// first, today on top and marked; no days after today.
 fn day_rows(
     days: &[&Day],
+    business_km: &BTreeMap<NaiveDate, f64>,
     today: NaiveDate,
     not_at_work_yet: bool,
     note: &str,
@@ -579,7 +603,7 @@ fn day_rows(
                                 } else {
                                     ""
                                 };
-                                let remark = d.remark();
+                                let remark = remark(d, business_km);
                                 let place = if is_today && not_at_work_yet {
                                     "Not at work yet".to_string()
                                 } else {
@@ -631,7 +655,7 @@ fn day_rows(
                     {
                         let date = d.date;
                         let is_today = date == today;
-                        let mut remark = d.remark();
+                        let mut remark = remark(d, business_km);
                         let place = if is_today && not_at_work_yet {
                             "Not at work yet".to_string()
                         } else {

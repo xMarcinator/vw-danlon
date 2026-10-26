@@ -11,7 +11,10 @@ use dioxus::prelude::*;
 use vw_danlon::config::Config;
 use vw_danlon::mileage::Status;
 use vw_danlon::month::{Day, LunchSource};
-use vw_danlon::service::{self, LunchChoice, ManualTripForm, MonthView, PrivateItem, PrivateState};
+use vw_danlon::service::{
+    self, LocalSpan, LunchChoice, ManualTripForm, MonthView, PrivateItem, PrivateState,
+    TimelineKind,
+};
 use vw_danlon::state::State;
 
 use super::{
@@ -544,9 +547,31 @@ pub fn render(a: DayArgs) -> Element {
     }
 }
 
-/// Wide: bars for planned time, time at work, private time, lunch and
-/// driving. Narrow: the same as a list of steps, private time and home
-/// working with Edit, and Add time under it.
+/// The timeline's legend: the class of each kind and its name.
+const LEGEND: [(&str, &str); 6] = [
+    ("planned", "Planned"),
+    ("work", "Work"),
+    ("client", "Client"),
+    ("private", "Private"),
+    ("lunch", "Lunch"),
+    ("drive", "Driving"),
+];
+
+fn timeline_class(kind: TimelineKind) -> &'static str {
+    match kind {
+        TimelineKind::Planned => "planned",
+        TimelineKind::Work => "work",
+        TimelineKind::Client => "client",
+        TimelineKind::Private => "private",
+        TimelineKind::Lunch => "lunch",
+        TimelineKind::Drive => "drive",
+    }
+}
+
+/// The timeline on one line: the planned day as a dashed outline, time at
+/// work, at a client, private time, the lunch break and driving inside it,
+/// and today a line at now. Narrow, under it: the day as a list of steps,
+/// private time and home working with Edit, and Add time under it.
 fn timeline(
     d: &Day,
     private: &[PrivateItem],
@@ -557,24 +582,28 @@ fn timeline(
 ) -> Element {
     let now = now_tz.naive_local();
     let naive = |t: chrono::DateTime<chrono_tz::Tz>| t.naive_local();
-    let mut spans: Vec<(NaiveDateTime, NaiveDateTime, u32, &'static str)> = Vec::new();
-    if let Some((s, e)) = d.planned {
-        spans.push((naive(s), naive(e), 0, "bar planned"));
-    }
-    for (s, e) in &d.segments {
-        spans.push((naive(*s), naive(*e), 1, "bar work"));
-    }
-    for i in private {
-        if let Some((s, e)) = private_span(i, now) {
-            spans.push((s, e, 1, "bar private"));
-        }
-    }
-    if let Some((s, e)) = d.lunch.window {
-        spans.push((naive(s), naive(e), 1, "bar lunch"));
-    }
-    for (t, _) in trips {
-        spans.push((naive(t.start), naive(t.end), 2, "bar drive"));
-    }
+    let local = |spans: &[(DateTime<Tz>, DateTime<Tz>)]| -> Vec<LocalSpan> {
+        spans.iter().map(|(s, e)| (naive(*s), naive(*e))).collect()
+    };
+    let private_spans: Vec<LocalSpan> = private
+        .iter()
+        .filter_map(|i| private_span(i, now))
+        .collect();
+    let drives: Vec<LocalSpan> = trips
+        .iter()
+        .map(|(t, _)| (naive(t.start), naive(t.end)))
+        .collect();
+    let spans: Vec<(NaiveDateTime, NaiveDateTime, &'static str)> = service::day_timeline(
+        d.planned.map(|(s, e)| (naive(s), naive(e))),
+        &local(&d.segments),
+        &local(&d.clients),
+        d.lunch.window.map(|(s, e)| (naive(s), naive(e))),
+        &private_spans,
+        &drives,
+    )
+    .into_iter()
+    .map(|(s, e, kind)| (s, e, timeline_class(kind)))
+    .collect();
     let day_start = d.date.and_hms_opt(0, 0, 0).unwrap();
     let hour = |t: NaiveDateTime| (t - day_start).num_minutes() as f64 / 60.0;
     let from = spans
@@ -711,32 +740,34 @@ fn timeline(
         });
     }
     steps.sort_by_key(|s| s.at);
-    let label = spans
+    let mut label = spans
         .iter()
-        .map(|(s, e, _, class)| {
-            format!("{} {}–{}", class.trim_start_matches("bar "), hm(*s), hm(*e))
-        })
+        .map(|(s, e, class)| format!("{class} {}–{}", hm(*s), hm(*e)))
         .collect::<Vec<_>>()
         .join("; ");
+    if d.so_far {
+        label.push_str(&format!("; now {}", hm(now)));
+    }
+    let legend = rsx! {
+        for (class , text) in LEGEND {
+            span { class: "legend",
+                span { class: "swatch {class}" }
+                "{text}"
+            }
+        }
+    };
 
     rsx! {
-        section { class: "panel pad wide-only", "aria-labelledby": "tl-h",
-            div { class: "tl-head",
-                h2 { id: "tl-h", class: "grow", "Timeline" }
-                span { class: "legend", span { class: "swatch planned" } "Planned" }
-                span { class: "legend", span { class: "swatch work" } "At work" }
-                span { class: "legend", span { class: "swatch private" } "Private" }
-                span { class: "legend", span { class: "swatch lunch" } "Lunch" }
-                span { class: "legend", span { class: "swatch drive" } "Driving" }
-                if d.so_far {
-                    span { class: "legend", span { class: "swatch now" } "Now" }
-                }
+        section { class: "panel pad tl-panel", "aria-label": "Timeline",
+            div { class: "tl-head wide-only",
+                h2 { class: "grow", "Timeline" }
+                {legend.clone()}
             }
             div { class: "tl", role: "img", "aria-label": "{label}",
-                for (s , e , row , class) in spans.iter() {
+                for (s , e , class) in spans.iter() {
                     span {
-                        class: "{class}",
-                        style: "left: {pct(*s)}%; width: {(pct(*e) - pct(*s)).max(0.4)}%; top: {4 + row * 26}px",
+                        class: "bar {class}",
+                        style: "left: {pct(*s)}%; width: {(pct(*e) - pct(*s)).max(0.4)}%",
                     }
                 }
                 if d.so_far {
@@ -747,6 +778,9 @@ fn timeline(
                 for h in ticks {
                     span { style: "left: {(h as f64 - from) / (to - from) * 100.0}%", "{h:02}" }
                 }
+            }
+            div { class: "narrow-only",
+                div { class: "tl-legend", {legend} }
             }
         }
         section { class: "panel narrow-only", "aria-labelledby": "steps-h",
