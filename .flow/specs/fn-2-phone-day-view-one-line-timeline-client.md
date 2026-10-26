@@ -23,4 +23,4 @@ Build the approved phone Day view design (mockups at https://claude.ai/artifact/
 ## Boundaries
 
 - Danløn field names "Komme/gå" and "Kørsel" stay Danish.
-- Build the APK with scripts/build-apk.sh (needs the release keystore in ~/.config/vw-danlon/ on the build machine).
+- The APK is built and signed only by the GitHub release workflow from a version tag.
