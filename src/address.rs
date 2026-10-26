@@ -48,13 +48,44 @@ fn street_and_number(street: &str) -> (&str, Option<&str>) {
     let at = match words.as_slice() {
         [.., n] if starts_with_digit(n) => words.len() - 1,
         [.., n, letter] if starts_with_digit(n) && letter.chars().count() == 1 => words.len() - 2,
-        _ => return (street, None),
+        // A floor and door written without commas after the number
+        // ("arendalsvej 192 2 tv"): the number is the word before them.
+        _ => match (1..words.len()).find(|&i| {
+            starts_with_digit(words[i]) && words[i + 1..].iter().all(|w| is_floor_or_door(w))
+        }) {
+            Some(i) if i + 1 < words.len() => i,
+            _ => return (street, None),
+        },
     };
     if at == 0 {
         return (street, None);
     }
     let name_len = words[..at].join(" ").len();
-    (&street[..name_len], Some(&street[name_len + 1..]))
+    let number = words[at];
+    (&street[..name_len], Some(number))
+}
+
+/// A floor or door word in a Danish address: "2", "st", "kl", "tv", "th",
+/// "mf", "sal" or a single letter.
+fn is_floor_or_door(w: &str) -> bool {
+    matches!(w, "st" | "kl" | "tv" | "th" | "mf" | "sal")
+        || (w.len() <= 2 && w.chars().all(|c| c.is_ascii_digit()))
+        || w.chars().count() == 1
+}
+
+/// The street part and the rest of a normalised address: before and after
+/// the first comma, or, when it has no commas ("arendalsvej 192 2 tv 8600
+/// silkeborg"), before and from the postal code.
+fn split_street(n: &str) -> Option<(&str, &str)> {
+    if let Some(parts) = n.split_once(',') {
+        return Some(parts);
+    }
+    let at = n.split(' ').position(is_postal_code)?;
+    if at == 0 {
+        return None;
+    }
+    let street_len = n.split(' ').take(at).collect::<Vec<_>>().join(" ").len();
+    Some((&n[..street_len], &n[street_len + 1..]))
 }
 
 /// The words after the street part that are not a postal code (town names,
@@ -80,7 +111,7 @@ pub fn matches(a: &str, b: &str) -> bool {
         return true;
     }
     let (Some((street_a, rest_a)), Some((street_b, rest_b))) =
-        (na.split_once(','), nb.split_once(','))
+        (split_street(&na), split_street(&nb))
     else {
         return false;
     };
@@ -157,6 +188,26 @@ mod tests {
             "Vestergade 14, 5000 Odense C"
         ));
         assert!(!matches("", ""));
+    }
+
+    #[test]
+    fn address_written_without_punctuation() {
+        // As typed into the phone app's Settings.
+        let home = "Arendalsvej 192 2 tv 8600 Silkeborg";
+        assert!(matches("Arendalsvej, 8600 Silkeborg", home));
+        assert!(matches("Arendalsvej 192, 2. tv., 8600 Silkeborg", home));
+        assert!(matches("Arendalsvej, 8600 Gødvad", home));
+        assert!(!matches("Arendalsvej 12, 8600 Silkeborg", home));
+        assert!(!matches("Arendalsvej, 7400 Herning", home));
+        assert!(matches(
+            "Lysbrohøjen, Lysbro",
+            "Lysbrohøjen 3 8600 Silkeborg"
+        ));
+        // A digit in the street name is not taken for a house number.
+        assert!(matches(
+            "Christian 8.s Vej 10, 8600 Silkeborg",
+            "Christian 8 s Vej 10 8600 Silkeborg"
+        ));
     }
 
     #[test]
