@@ -69,13 +69,7 @@ the same name. The program stops if the link points at another calendar.
   - Edit a single occurrence, or add an event, for days at another address,
     e.g. a customer.
   - With `norm_from_calendar = true` the events set each day's norm.
-- **Timed events whose title has a word from `private_keywords`** (default
-  `Læge`, `Tandlæge`, `Fysioterapeut`; whole word, any case) are private
-  appointments, e.g. a doctor's visit. They are not working time and need no
-  address. "Lægemiddelfirma" does not match `Læge`. Set `private_keywords =
-  []` to switch this off.
-- **All-day events** are ferie and fridage. These days get norm 0, also when
-  the title has a private word.
+- **All-day events** are ferie and fridage. These days get norm 0.
 - `default_location` (optional) is used on days with no located entry.
 
 Share it: Settings → All settings → Calendars → (calendar) → *Share with
@@ -95,19 +89,6 @@ the calendar says you are elsewhere. If a colleague drives you from the
 office to a customer, the car only shows you arriving at and leaving the
 office, and that is your working time. A drive from one work address to
 another (office → customer) is working time too.
-
-Each day's worked time is worked out in this order:
-1. the periods at a work address, from the trips
-2. minus any private appointment overlapping them (overlaps are counted once)
-3. minus the break
-4. rounding
-
-The day's norm stays as planned, so an appointment shows as hours to make
-up. The note shows it, e.g. `Læge 10:00–11:15 · private`.
-
-A trip arriving at or leaving an appointment's address that day, or starting
-during an appointment, is private. It is never a business trip in the
-mileage logbook or the Danløn export.
 
 Addresses are compared loosely:
 - case, punctuation and "Danmark" are ignored
