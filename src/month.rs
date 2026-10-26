@@ -72,6 +72,9 @@ impl std::fmt::Display for Month {
 /// A start and end time on one day.
 pub type Span = (DateTime<Tz>, DateTime<Tz>);
 
+/// Note on a work day without trips to or from the work address.
+pub const NO_DRIVING: &str = "no driving to or from the work address";
+
 #[derive(Debug, Clone)]
 pub struct Day {
     pub date: NaiveDate,
@@ -672,7 +675,7 @@ pub fn build(
                     }
                     (Some((_, loc)), false) => Some(format!("arrived at {loc}, no departure")),
                     (None, false) if w.no_driving_to_work && day_home.is_empty() => {
-                        Some("no driving to or from the work address".to_string())
+                        Some(NO_DRIVING.to_string())
                     }
                     (None, _) => None,
                 };
@@ -689,7 +692,10 @@ pub fn build(
             if !(work_days.contains(&date) || !day_home.is_empty() || norm_hours > 0.0) {
                 note = None;
             }
-            let check = note.clone();
+            // No trips to or from work is shown, but is not something to fix:
+            // a holiday, a day off not in the calendar, or a lift with a
+            // colleague all look like this.
+            let check = note.clone().filter(|n| n != NO_DRIVING);
             for ((s, e), label) in &day_home {
                 let text = format!("{label} {}–{} · home", s.format("%H:%M"), e.format("%H:%M"));
                 note = Some(match note {
@@ -1935,11 +1941,17 @@ END:VEVENT
             assert!(c[0].as_deref().unwrap().contains(", no departure"));
             assert_eq!(c[1], None, "{today:?}");
         }
-        let c = checks(Today::from(date(28)));
-        assert_eq!(
-            c[1].as_deref(),
-            Some("no driving to or from the work address")
+        // Once the day is over, no trips is noted but is not a check.
+        let r = build(
+            &cfg,
+            m,
+            &trips,
+            &occ,
+            &State::default(),
+            Today::from(date(28)),
         );
+        assert_eq!(r.days[26].check, None);
+        assert_eq!(r.days[26].note.as_deref(), Some(NO_DRIVING));
     }
 
     #[test]
