@@ -67,6 +67,11 @@ sed -i "s/versionCode = [0-9]*/versionCode = $version_code/" "$gradle_dir/app/bu
 # common ones in place instead.
 sed -i 's/android:configChanges="[^"]*"/android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|fontScale|fontWeightAdjustment|density|locale|layoutDirection|colorMode"/' \
   "$gradle_dir/app/src/main/AndroidManifest.xml"
+# The WebView answers prefers-color-scheme from the activity theme, and
+# dx's is light-only, so the System theme never went dark. DayNight
+# follows the phone, also when it switches while the app is open.
+sed -i 's/Theme.AppCompat.Light.NoActionBar/Theme.AppCompat.DayNight.NoActionBar/' \
+  "$gradle_dir/app/src/main/res/values/styles.xml"
 # The launcher icon (app/icons/icon.svg, rendered into app/icons/android/res)
 # replaces dx's default one.
 rm -f "$gradle_dir"/app/src/main/res/mipmap-*/ic_launcher*
