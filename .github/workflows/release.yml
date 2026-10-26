@@ -193,6 +193,7 @@ jobs:
   cli:
     needs: [version, test]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -210,6 +211,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli
+      # The keychain support (keyring, Secret Service) links D-Bus on Linux.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - run: cargo build --release --locked -p vw-danlon --bin vw-danlon
       - name: Package
         shell: bash
