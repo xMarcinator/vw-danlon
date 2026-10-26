@@ -33,6 +33,79 @@ pub struct DayArgs<'a> {
     pub on_back: Callback<()>,
     /// Whether the add-trip form is open.
     pub adding: Signal<bool>,
+    /// The add or edit time sheet, when open.
+    pub sheet: Signal<Option<Sheet>>,
+}
+
+/// The time sheet: adding private time or home working to a day, or
+/// editing a recorded interval (`edit`: its id).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Sheet {
+    pub edit: Option<u32>,
+    pub home: bool,
+    pub label: String,
+    pub start: String,
+    pub end: String,
+}
+
+impl Sheet {
+    fn edit(home: bool, id: u32, label: &str, start: NaiveDateTime, end: NaiveDateTime) -> Self {
+        Sheet {
+            edit: Some(id),
+            home,
+            label: label.to_string(),
+            start: hm(start),
+            end: hm(end),
+        }
+    }
+}
+
+/// A recorded home-working interval of the day, or the timer running.
+struct HomeEntry {
+    id: Option<u32>,
+    label: String,
+    start: NaiveDateTime,
+    end: Option<NaiveDateTime>,
+}
+
+fn home_entries(state: &State, date: NaiveDate) -> Vec<HomeEntry> {
+    let mut out: Vec<HomeEntry> = state
+        .home
+        .intervals
+        .iter()
+        .filter(|i| i.start.date() == date)
+        .map(|i| HomeEntry {
+            id: Some(i.id),
+            label: i.label.clone(),
+            start: i.start,
+            end: Some(i.end),
+        })
+        .collect();
+    if let Some(r) = state
+        .home
+        .running
+        .as_ref()
+        .filter(|r| r.start.date() == date)
+    {
+        out.push(HomeEntry {
+            id: None,
+            label: r.label.clone(),
+            start: r.start,
+            end: None,
+        });
+    }
+    out.sort_by_key(|e| e.start);
+    out
+}
+
+/// How a home-working entry is titled: its label, or "Worked from home"
+/// for the default one.
+fn home_title(label: &str) -> String {
+    if label == vw_danlon::state::HOME_LABEL {
+        "Worked from home".to_string()
+    } else {
+        label.to_string()
+    }
 }
 
 fn lunch_source(s: LunchSource) -> &'static str {
@@ -77,6 +150,8 @@ struct Step {
     title: String,
     sub: String,
     kind: &'static str,
+    /// Private time or home working recorded: Edit opens it.
+    edit: Option<Sheet>,
 }
 
 pub fn render(a: DayArgs) -> Element {
@@ -91,6 +166,7 @@ pub fn render(a: DayArgs) -> Element {
         on_action,
         on_back,
         mut adding,
+        mut sheet,
     } = a;
     let Some(d) = view.report.days.iter().find(|d| d.date == date) else {
         return rsx! {};
@@ -165,6 +241,17 @@ pub fn render(a: DayArgs) -> Element {
         None => format!("of {}", hours(d.norm_hours)),
     };
     let left_work = state.left_work.get(&date).copied();
+    let home = home_entries(state, date);
+    let planned_hm = d
+        .planned
+        .map(|(s, e)| (s.format("%H:%M").to_string(), e.format("%H:%M").to_string()));
+    let open_add = move |_| {
+        sheet.set(if sheet.peek().as_ref().is_some_and(|s| s.edit.is_none()) {
+            None
+        } else {
+            Some(Sheet::default())
+        })
+    };
 
     rsx! {
         nav { class: "crumbs wide-only", "aria-label": "Breadcrumb",
@@ -179,6 +266,20 @@ pub fn render(a: DayArgs) -> Element {
                 Icon { d: "m15 6-6 6 6 6", size: 22 }
             }
             h1 { class: "grow", "{title}" }
+            button {
+                class: "small-btn wide-only",
+                "aria-expanded": if adding() { "true" } else { "false" },
+                onclick: move |_| adding.set(!adding()),
+                Icon { d: "M12 5v14M5 12h14", size: 15 }
+                "Add missing trip"
+            }
+            button {
+                class: "small-btn acc wide-only",
+                "aria-expanded": if sheet().is_some_and(|s| s.edit.is_none()) { "true" } else { "false" },
+                onclick: open_add,
+                Icon { d: "M12 5v14M5 12h14", size: 15 }
+                "Add time"
+            }
         }
 
         div { class: "kpis",
@@ -237,7 +338,7 @@ pub fn render(a: DayArgs) -> Element {
         if let Some(at) = left_work {
             div { class: "alert info", role: "status",
                 span { class: "grow",
-                    "You left work at {hm(at)} without a trip (set by you): the time at work ends then."
+                    "Left work at {hm(at)} (set by you)"
                 }
                 button {
                     class: "small-btn",
@@ -250,7 +351,11 @@ pub fn render(a: DayArgs) -> Element {
         }
         {status(message_for(&message, Panel::Home))}
 
-        {timeline(d, &private.items, &trips, now_tz)}
+        if sheet().is_some() {
+            TimeSheet { date, sheet, planned: planned_hm, on_action }
+        }
+
+        {timeline(d, &private.items, &home, &trips, now_tz, sheet)}
 
         LunchPanel {
             date,
@@ -268,22 +373,88 @@ pub fn render(a: DayArgs) -> Element {
             on_action,
         }
 
-        section { class: "panel", "aria-labelledby": "priv-h",
+        section { class: "panel wide-only", "aria-labelledby": "priv-h",
             div { class: "panel-head",
-                h2 { id: "priv-h", "Private time" }
-                span { class: "note", "Not company time. Recorded time replaces the planned window it was started for." }
+                h2 { id: "priv-h", "Private time and home working" }
             }
             {status(message_for(&message, Panel::Private))}
-            if private.items.is_empty() {
-                p { class: "empty", "No private appointments or recorded private time." }
+            if private.items.is_empty() && home.is_empty() {
+                p { class: "empty", "Nothing recorded." }
             } else {
                 ul { class: "pt-list",
                     PrivateList {
-                        items: private.items.clone(),
+                        items: private
+                            .items
+                            .iter()
+                            .filter(|i| !matches!(i.state, PrivateState::Recorded { .. }))
+                            .cloned()
+                            .collect::<Vec<_>>(),
                         current: None,
                         today,
                         auto_start: cfg.private.auto_start,
                         on_action,
+                    }
+                    for i in private.items.iter() {
+                        if let PrivateState::Recorded { id, start, end, .. } = i.state {
+                            {
+                                let edit = Sheet::edit(false, id, &i.label, start, end);
+                                rsx! {
+                                    li { class: "pt-item",
+                                        div { class: "pt-row",
+                                            span { class: "pt-text",
+                                                span {
+                                                    b { "{i.label}" }
+                                                    " · "
+                                                    span { class: "num", "{hm(start)}–{hm(end)}" }
+                                                }
+                                            }
+                                            span { class: "chip info", "Private" }
+                                            button {
+                                                class: "small-btn",
+                                                "aria-label": "Edit {i.label}",
+                                                onclick: move |_| sheet.set(Some(edit.clone())),
+                                                "Edit"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for e in home.iter() {
+                        {
+                            let title = home_title(&e.label);
+                            let when = match e.end {
+                                Some(end) => format!("{}–{}", hm(e.start), hm(end)),
+                                None => format!("since {}", hm(e.start)),
+                            };
+                            let edit = e
+                                .id
+                                .zip(e.end)
+                                .map(|(id, end)| Sheet::edit(true, id, &e.label, e.start, end));
+                            rsx! {
+                                li { class: "pt-item",
+                                    div { class: "pt-row",
+                                        span { class: "pt-text",
+                                            span {
+                                                b { "{title}" }
+                                                " · "
+                                                span { class: "num", "{when}" }
+                                            }
+                                        }
+                                        span { class: "chip acc", "Home" }
+                                        if let Some(edit) = edit {
+                                            button {
+                                                class: "small-btn",
+                                                "aria-label": "Edit {title}",
+                                                onclick: move |_| sheet.set(Some(edit.clone())),
+                                                "Edit"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -292,9 +463,9 @@ pub fn render(a: DayArgs) -> Element {
         section { class: "panel", "aria-labelledby": "trips-h",
             div { class: "panel-head",
                 h2 { id: "trips-h", "Trips" }
-                span { class: "note grow", "The first arrival at and the last departure from a calendar address are business trips" }
+                span { class: "grow" }
                 button {
-                    class: "small-btn",
+                    class: "small-btn narrow-only",
                     "aria-expanded": if adding() { "true" } else { "false" },
                     onclick: move |_| adding.set(!adding()),
                     Icon { d: "M12 5v14M5 12h14", size: 15 }
@@ -374,12 +545,15 @@ pub fn render(a: DayArgs) -> Element {
 }
 
 /// Wide: bars for planned time, time at work, private time, lunch and
-/// driving. Narrow: the same as a list of steps.
+/// driving. Narrow: the same as a list of steps, private time and home
+/// working with Edit, and Add time under it.
 fn timeline(
     d: &Day,
     private: &[PrivateItem],
+    home: &[HomeEntry],
     trips: &[(&vw_danlon::trips::Trip, Option<Status>)],
     now_tz: DateTime<Tz>,
+    mut sheet: Signal<Option<Sheet>>,
 ) -> Element {
     let now = now_tz.naive_local();
     let naive = |t: chrono::DateTime<chrono_tz::Tz>| t.naive_local();
@@ -432,6 +606,7 @@ fn timeline(
                 format!("until {}", e.format("%H:%M"))
             },
             kind: "work",
+            edit: None,
         });
     }
     // Today: counting starts at the planned start; now; the planned end.
@@ -439,33 +614,34 @@ fn timeline(
         && let Some((ps, pe)) = d.planned
     {
         let late = match d.first_start {
-            Some(first) if first > ps => format!(
-                " · {} until you arrived",
-                minutes_text((first - ps).num_minutes())
-            ),
-            None if ps < now_tz => " · not at work yet".to_string(),
+            Some(first) if first > ps => {
+                format!("{} late", minutes_text((first - ps).num_minutes()))
+            }
+            None if ps < now_tz => "Not at work yet".to_string(),
             _ => String::new(),
         };
         steps.push(Step {
             at: naive(ps),
             title: "Planned start".into(),
-            sub: format!("Counting from here{late}"),
             kind: if late.is_empty() { "planned" } else { "late" },
+            sub: late,
+            edit: None,
         });
         if ps < now_tz && now_tz < pe {
             steps.push(Step {
                 at: now,
                 title: "Now".into(),
                 sub: if d.open.is_some() {
-                    "Still at work · no drive home yet is fine until the day is over".into()
+                    "At work".into()
                 } else if d.home.iter().any(|(_, e)| *e == now_tz) {
                     "Working from home".into()
                 } else if d.first_start.is_none() {
-                    "Not at work yet · the planned time that has passed counts".into()
+                    "Not at work yet".into()
                 } else {
                     "Not at work".into()
                 },
                 kind: "now",
+                edit: None,
             });
             steps.push(Step {
                 at: naive(pe),
@@ -475,29 +651,49 @@ fn timeline(
                     hours((d.norm_hours - d.expected_hours).max(0.0))
                 ),
                 kind: "planned",
+                edit: None,
             });
         }
     }
     for i in private {
         if let Some((s, e)) = private_span(i, now) {
+            let edit = match i.state {
+                PrivateState::Recorded { id, start, end, .. } => {
+                    Some(Sheet::edit(false, id, &i.label, start, end))
+                }
+                _ => None,
+            };
             steps.push(Step {
                 at: s,
                 title: i.label.clone(),
-                sub: format!("Private · {}–{} · not company time", hm(s), hm(e)),
+                sub: format!("Private · {}–{}", hm(s), hm(e)),
                 kind: "private",
+                edit,
             });
         }
+    }
+    for e in home {
+        steps.push(Step {
+            at: e.start,
+            title: home_title(&e.label),
+            sub: match e.end {
+                Some(end) => format!("{}–{}", hm(e.start), hm(end)),
+                None => format!("since {}", hm(e.start)),
+            },
+            kind: "work",
+            edit: e
+                .id
+                .zip(e.end)
+                .map(|(id, end)| Sheet::edit(true, id, &e.label, e.start, end)),
+        });
     }
     if let Some((s, e)) = d.lunch.window {
         steps.push(Step {
             at: naive(s),
             title: "Lunch break".into(),
-            sub: format!(
-                "{} min · {}",
-                (e - s).num_minutes(),
-                lunch_source(d.lunch.source).to_lowercase()
-            ),
+            sub: format!("{} min", (e - s).num_minutes()),
             kind: "lunch",
+            edit: None,
         });
     }
     for (t, status) in trips {
@@ -511,6 +707,7 @@ fn timeline(
             title: format!("Drive {} → {}", t.from, t.to),
             sub: format!("{}{km}", if kind.is_empty() { "Trip" } else { kind }),
             kind: "drive",
+            edit: None,
         });
     }
     steps.sort_by_key(|s| s.at);
@@ -532,7 +729,7 @@ fn timeline(
                 span { class: "legend", span { class: "swatch lunch" } "Lunch" }
                 span { class: "legend", span { class: "swatch drive" } "Driving" }
                 if d.so_far {
-                    span { class: "legend", span { class: "swatch now" } "Now · no drive home yet is fine" }
+                    span { class: "legend", span { class: "swatch now" } "Now" }
                 }
             }
             div { class: "tl", role: "img", "aria-label": "{label}",
@@ -564,9 +761,191 @@ fn timeline(
                             span { class: "step-dot {s.kind}", "aria-hidden": "true" }
                             span { class: "step-text",
                                 span { "{s.title}" }
-                                span { class: "step-sub {s.kind}", "{s.sub}" }
+                                if !s.sub.is_empty() {
+                                    span { class: "step-sub {s.kind}", "{s.sub}" }
+                                }
+                            }
+                            if let Some(edit) = s.edit {
+                                button {
+                                    class: "step-edit",
+                                    "aria-label": "Edit {s.title}",
+                                    onclick: move |_| sheet.set(Some(edit.clone())),
+                                    "Edit"
+                                }
                             }
                         }
+                    }
+                }
+            }
+            div { class: "steps-add",
+                button {
+                    class: "add-time",
+                    onclick: move |_| sheet.set(Some(Sheet::default())),
+                    Icon { d: "M12 5v14M5 12h14", size: 16 }
+                    "Add time"
+                }
+            }
+        }
+    }
+}
+
+/// Adds private time or home working to the day, or edits a recorded
+/// interval: a bottom sheet on a phone, a panel on a wide screen.
+#[component]
+fn TimeSheet(
+    date: NaiveDate,
+    sheet: Signal<Option<Sheet>>,
+    planned: Option<(String, String)>,
+    on_action: Callback<Action, bool>,
+) -> Element {
+    let Some(form) = sheet() else {
+        return rsx! {};
+    };
+    let mut set = move |f: fn(&mut Sheet, String), v: String| {
+        if let Some(s) = sheet.write().as_mut() {
+            f(s, v);
+        }
+    };
+    let adding = form.edit.is_none();
+    let home = form.home;
+    let title = match (form.edit, home) {
+        (None, _) => format!("Add time · {}", date.format("%a %-d %b")),
+        (Some(_), true) => format!("Edit home working · {}", date.format("%-d %b")),
+        (Some(_), false) => format!("Edit private time · {}", date.format("%-d %b")),
+    };
+    let mut close = move || sheet.set(None);
+    let mut run = move |a: Action| {
+        if on_action.call(a) {
+            sheet.set(None);
+        }
+    };
+    let submit = {
+        let form = form.clone();
+        move |_| {
+            let f = form.clone();
+            run(match f.edit {
+                None => Action::AddTime {
+                    date,
+                    home: f.home,
+                    label: f.label,
+                    start: f.start,
+                    end: f.end,
+                },
+                Some(id) => Action::Change {
+                    home: f.home,
+                    id,
+                    label: f.label,
+                    start: f.start,
+                    end: f.end,
+                },
+            })
+        }
+    };
+    let seg = |on: bool| if on { "true" } else { "false" };
+    rsx! {
+        div { class: "sheet-backdrop narrow-only", onclick: move |_| close() }
+        section {
+            class: "time-sheet",
+            role: "dialog",
+            "aria-labelledby": "ts-h",
+            span { class: "sheet-grip narrow-only", "aria-hidden": "true" }
+            div { class: "ts-head",
+                h2 { id: "ts-h", class: "grow", "{title}" }
+                if adding {
+                    div { class: "segmented ts-kind", role: "radiogroup", "aria-label": "Kind of time",
+                        button {
+                            r#type: "button",
+                            role: "radio",
+                            "aria-checked": seg(!home),
+                            onclick: move |_| {
+                                if let Some(s) = sheet.write().as_mut() {
+                                    s.home = false;
+                                }
+                            },
+                            "Private time"
+                        }
+                        button {
+                            r#type: "button",
+                            role: "radio",
+                            "aria-checked": seg(home),
+                            onclick: move |_| {
+                                if let Some(s) = sheet.write().as_mut() {
+                                    s.home = true;
+                                }
+                            },
+                            "Worked from home"
+                        }
+                    }
+                }
+            }
+            div { class: "ts-fields",
+                div { class: "field",
+                    label { r#for: "ts-what", "What" }
+                    input {
+                        id: "ts-what",
+                        r#type: "text",
+                        placeholder: if home { "Home" } else { "Private" },
+                        value: "{form.label}",
+                        oninput: move |e| set(|s, v| s.label = v, e.value()),
+                    }
+                }
+                div { class: "field",
+                    label { r#for: "ts-from", "From" }
+                    input {
+                        id: "ts-from",
+                        r#type: "time",
+                        value: "{form.start}",
+                        oninput: move |e| set(|s, v| s.start = v, e.value()),
+                    }
+                }
+                div { class: "field",
+                    label { r#for: "ts-to", "To" }
+                    input {
+                        id: "ts-to",
+                        r#type: "time",
+                        value: "{form.end}",
+                        oninput: move |e| set(|s, v| s.end = v, e.value()),
+                    }
+                }
+            }
+            if adding && home {
+                if let Some((s, e)) = planned {
+                    button {
+                        r#type: "button",
+                        class: "small-btn ts-planned",
+                        onclick: move |_| {
+                            if let Some(f) = sheet.write().as_mut() {
+                                f.start = s.clone();
+                                f.end = e.clone();
+                            }
+                        },
+                        "Planned day {s}–{e}"
+                    }
+                }
+            }
+            if adding {
+                div { class: "ts-note", role: "note",
+                    if home {
+                        "Counts as worked time."
+                    } else {
+                        "Not company time. Trips in this window are private."
+                    }
+                }
+            }
+            div { class: "ts-actions",
+                if let Some(id) = form.edit {
+                    button {
+                        class: "ts-btn danger",
+                        onclick: move |_| run(Action::Delete { home, id }),
+                        "Delete"
+                    }
+                }
+                button { class: "ts-btn", onclick: move |_| close(), "Cancel" }
+                button { class: "ts-btn primary", onclick: submit,
+                    if adding {
+                        "Add"
+                    } else {
+                        "Save"
                     }
                 }
             }
@@ -612,9 +991,7 @@ fn LunchPanel(
                 span { class: "muted", "{minutes} min" }
             }
             span { class: "chip", "{source}" }
-            span { class: "note grow",
-                "Only lunch inside your time at work is deducted. A “{title}” event in the calendar sets another time."
-            }
+            span { class: "grow", title: "A “{title}” event in the calendar sets another time" }
             button {
                 class: "small-btn",
                 "aria-expanded": if editing() { "true" } else { "false" },
@@ -728,9 +1105,6 @@ fn TripForm(
                     |f| &f.purpose,
                     |f, v| f.purpose = v,
                 )
-            }
-            span { class: "note span-all",
-                "Added by you and marked so: a later import or sync of the same trip (same start minute) does not add it twice."
             }
             div { class: "pt-edit-actions",
                 span { class: "grow" }

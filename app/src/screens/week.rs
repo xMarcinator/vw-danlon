@@ -101,6 +101,16 @@ pub fn totals(days: &[&Day], today: NaiveDate) -> Totals {
     }
 }
 
+/// The days the Hours screen lists: newest first, today on top, none after
+/// today.
+pub fn listed<'a>(days: &[&'a Day], today: NaiveDate) -> Vec<&'a Day> {
+    days.iter()
+        .rev()
+        .copied()
+        .filter(|d| d.date <= today)
+        .collect()
+}
+
 /// The mileage allowance of the week's business trips: amount, km and the
 /// number of trips.
 pub fn week_mileage<'a>(
@@ -250,6 +260,22 @@ mod tests {
         // One that has not started counts none.
         let t = totals(&refs, d("2026-11-20"));
         assert_eq!((t.norm, t.worked), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_days_are_listed_newest_first_up_to_today() {
+        let days = [
+            day("2026-11-23", 7.5, 7.5, 7.67),
+            day("2026-11-24", 7.5, 1.17, 0.0),
+            day("2026-11-25", 7.5, 7.5, 0.0),
+        ];
+        let refs: Vec<&Day> = days.iter().collect();
+        let dates: Vec<NaiveDate> = listed(&refs, d("2026-11-24"))
+            .iter()
+            .map(|x| x.date)
+            .collect();
+        assert_eq!(dates, [d("2026-11-24"), d("2026-11-23")]);
+        assert!(listed(&refs, d("2026-11-22")).is_empty());
     }
 
     #[test]

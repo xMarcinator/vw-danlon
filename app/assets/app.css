@@ -1,3 +1,13 @@
+/* No WebView tap highlight (Android shows a blue square); buttons show a
+   pressed state instead, and keyboard focus keeps its ring. */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
 /* Design-system tokens from the mockup palette (light and dark). */
 .app,
 .app[data-theme="light"] {
@@ -2596,4 +2606,363 @@ table.rates td:first-child {
   .hw-check {
     padding-bottom: 0;
   }
+}
+
+/* Work card (one row of buttons) and private time in blue. */
+.work-card.private,
+.work-pill.private {
+  border-color: var(--info);
+}
+
+.pt-dot.private,
+.work-pill.private .dot {
+  background: var(--info);
+}
+
+.pt-title b.private {
+  color: var(--info);
+}
+
+.pt-btn.private,
+.pill-btn.private {
+  background: var(--info);
+  color: var(--on-acc);
+}
+
+.card-actions .card-split {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+}
+
+.card-actions .card-split .pt-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.card-actions .card-split .pt-btn.split-caret {
+  flex: 0 0 44px;
+  width: 44px;
+  padding: 0;
+}
+
+.card-actions .pt-btn.stop-work {
+  flex: 0 0 auto;
+  padding: 0 16px;
+  border: 1px solid var(--ctl);
+  background: var(--surf);
+  color: var(--bad);
+}
+
+.card-earlier .grow {
+  flex-grow: 1;
+}
+
+/* Day: Edit on the steps, Add time and its sheet. */
+.steps li {
+  grid-template-columns: 44px 12px minmax(0, 1fr) auto;
+}
+
+.step-edit {
+  font: inherit;
+  font-size: 14px;
+  min-height: 44px;
+  margin: -12px 0;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--acc-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.steps-add {
+  border-top: 1px solid var(--row);
+  padding: 12px 14px 14px;
+  display: flex;
+}
+
+.add-time {
+  font: inherit;
+  font-size: 14px;
+  min-height: 44px;
+  flex: 1 1 0;
+  padding: 0 10px;
+  border: 1px solid var(--acc);
+  border-radius: 10px;
+  background: var(--surf);
+  color: var(--acc-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.small-btn.acc {
+  border-color: var(--acc);
+  color: var(--acc-text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.screen-head .small-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.time-sheet {
+  background: var(--surf);
+  border: 2px solid var(--acc);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.ts-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.ts-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.segmented.ts-kind {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 300px;
+  max-width: 100%;
+}
+
+.ts-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  max-width: 720px;
+}
+
+.ts-fields input {
+  font: inherit;
+  font-size: 14px;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--text);
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.ts-planned {
+  align-self: flex-start;
+}
+
+.ts-note {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--info-bg);
+  color: var(--info);
+  font-size: 13px;
+  line-height: 1.4;
+  max-width: 720px;
+}
+
+.ts-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ts-btn {
+  font: inherit;
+  font-size: 13px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--surf);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ts-btn.primary {
+  border: none;
+  background: var(--acc);
+  color: var(--on-acc);
+  font-weight: 500;
+}
+
+.ts-btn.danger {
+  color: var(--bad);
+}
+
+@media (max-width: 719px) {
+  .sheet-backdrop.narrow-only {
+    display: block !important;
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: rgba(10, 14, 12, 0.32);
+  }
+
+  .time-sheet {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 21;
+    max-height: 90vh;
+    overflow-y: auto;
+    border: none;
+    border-radius: 16px 16px 0 0;
+    padding: 8px 16px 28px;
+    box-shadow: 0 -6px 18px rgba(0, 0, 0, 0.2);
+  }
+
+  .sheet-grip.narrow-only {
+    display: block !important;
+    align-self: center;
+    width: 40px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--ctl);
+  }
+
+  .ts-head h2 {
+    font-size: 18px;
+  }
+
+  .segmented.ts-kind {
+    width: 100%;
+  }
+
+  .ts-fields {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .ts-fields .field:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .ts-fields input {
+    font-size: 16px;
+    height: 48px;
+    padding: 0 12px;
+    border-radius: 10px;
+  }
+
+  .ts-planned {
+    min-height: 44px;
+  }
+
+  .ts-btn {
+    flex: 1 1 0;
+    min-height: 48px;
+    font-size: 15px;
+    border-radius: 10px;
+  }
+}
+
+/* Pressed states (the tap highlight is off). */
+.tab:active .pill,
+.icon-btn:active,
+.nav-item:active,
+.menu-item:active,
+.step-edit:active,
+.day-row:active,
+.link-btn:active {
+  background: var(--row);
+}
+
+.nav-btn:active,
+.small-btn:not(.primary-sm):active,
+.ts-btn:not(.primary):active,
+.add-time:active,
+.src-chip:active,
+.now-btn:active,
+.segmented button:active,
+.seg-tabs button:active,
+.mileage-tabs button:active {
+  background: var(--row);
+}
+
+.pt-btn:active,
+.pill-btn:active,
+.primary:active,
+.primary-sm:active,
+.small-btn.primary-sm:active,
+.ts-btn.primary:active {
+  filter: brightness(0.9);
+}
+
+/* The sidebar collapsed to a rail of icons (wide layout only; the phone
+   has the bottom tabs). */
+.brand {
+  padding: 0 0 12px;
+  gap: 6px;
+}
+
+.brand-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.rail-toggle {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--sub);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.rail-toggle:hover,
+.rail-toggle:active {
+  background: var(--row);
+}
+
+.sidebar.collapsed {
+  flex: 0 0 64px;
+  width: 64px;
+  padding: 16px 8px;
+}
+
+.sidebar.collapsed .brand {
+  flex-direction: column;
+}
+
+.sidebar.collapsed .brand-name {
+  flex-grow: 0;
+}
+
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar.collapsed .theme-switch {
+  flex-direction: column;
+  align-self: center;
+  margin-left: 0;
 }

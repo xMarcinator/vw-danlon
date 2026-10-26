@@ -12,7 +12,7 @@ use vw_danlon::checklist::{self, ChecklistDay, Korsel, Status};
 use vw_danlon::config::Config;
 use vw_danlon::month::Month;
 use vw_danlon::service;
-use vw_danlon::timesheet::weekday_da;
+
 use vw_danlon::trips::Trip;
 
 use super::month::{month_title, step, this_month};
@@ -327,7 +327,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                 class: if Some(date) == next { "next" },
                                 span { class: "dl-date",
                                     b { "{date.day()} {date.format(\"%b\")}" }
-                                    span { class: "small muted", "{weekday_da(date.weekday())}" }
+                                    span { class: "small muted", "{super::weekday(date)}" }
                                     if Some(date) == next {
                                         span { class: "chip acc", "next to enter" }
                                     }

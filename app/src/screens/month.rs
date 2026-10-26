@@ -8,7 +8,6 @@ use dioxus::prelude::*;
 use vw_danlon::mileage::MileageMonth;
 use vw_danlon::month::{Day, Month, OffReason};
 use vw_danlon::service::{PrivateItem, PrivateState, WorkAction, WorkState, WorkToday};
-use vw_danlon::timesheet::weekday_da;
 
 use super::week::{
     self, Show, first_week, in_week, monday_of, month_of, week_mileage, week_months, week_range,
@@ -16,7 +15,7 @@ use super::week::{
 };
 use super::{
     Action, Computed, Loaded, Message, Panel, PrivateList, apply, diff_class, hm, hours, kroner,
-    message_for, signed, status,
+    message_for, signed, status, weekday,
 };
 use crate::setup::Setup;
 use crate::{Icon, Screen};
@@ -71,23 +70,6 @@ fn quiet(d: &Day) -> bool {
     d.norm_hours == 0.0 && d.worked_hours == 0.0
 }
 
-/// Hours worked from home on a day.
-fn home_hours(d: &Day) -> f64 {
-    d.home
-        .iter()
-        .map(|(s, e)| (*e - *s).num_minutes() as f64 / 60.0)
-        .sum()
-}
-
-/// The note of a day after today: its planned norm only.
-fn planned_note(d: &Day) -> String {
-    match &d.off_reason {
-        Some(r) => r.to_string(),
-        None if d.norm_hours > 0.0 => "Planned".to_string(),
-        None => String::new(),
-    }
-}
-
 fn planned(d: &Day) -> String {
     d.planned
         .map(|(s, e)| format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")))
@@ -116,13 +98,6 @@ fn today_items(items: &[PrivateItem], today: NaiveDate) -> Vec<PrivateItem> {
         .collect()
 }
 
-/// The first part of the planned working time today that has passed:
-/// "08:00–09:10", while it is counting.
-fn counting_window(d: &Day, now: DateTime<Tz>) -> Option<String> {
-    let (s, e) = d.planned?;
-    (d.so_far && s < now).then(|| format!("{}–{}", s.format("%H:%M"), e.min(now).format("%H:%M")))
-}
-
 #[component]
 pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let month = use_signal(|| this_month(&setup.peek()));
@@ -140,6 +115,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let expanded = use_signal(|| false);
     let mut message = use_signal(|| None as Message);
     let mut adding = use_signal(|| false);
+    let mut sheet = use_signal(|| None::<super::day::Sheet>);
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
     let mut loaded = use_resource(move || {
         let m = month();
@@ -212,6 +188,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let go = use_callback(move |d: Option<NaiveDate>| {
         message.set(None);
         adding.set(false);
+        sheet.set(None);
         open_day.set(d);
         document::eval("document.querySelector('.content')?.scrollTo(0, 0)");
     });
@@ -333,11 +310,11 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             on_action,
             on_back: Callback::new(move |_| go.call(None)),
             adding,
+            sheet,
         });
     }
 
     let is_week = shown == Show::Week;
-    let word = if is_week { "week" } else { "month" };
     // The current month or week; another one shows no work card and no
     // days to check.
     let current = match shown {
@@ -354,26 +331,8 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         .copied()
         .filter(|d| current && d.check.is_some())
         .collect();
-    let working_days = days.iter().filter(|d| d.norm_hours > 0.0).count();
-    let vacation_days = days
-        .iter()
-        .filter(|d| {
-            matches!(
-                d.off_reason,
-                Some(OffReason::Leave {
-                    working_day: true,
-                    ..
-                })
-            )
-        })
-        .count();
     let totals = week::totals(&days, today);
     let diff = totals.difference();
-    let from_home: f64 = days
-        .iter()
-        .filter(|d| d.date <= today)
-        .map(|d| home_hours(d))
-        .sum();
     let trips_shown: usize = pairs
         .iter()
         .map(|(l, _)| {
@@ -403,74 +362,18 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         work_view.and_then(|v| v.work.as_ref()).map(|w| &w.state),
         Some(WorkState::NotWorking { late_by: Some(_) })
     ) && today_day.is_some_and(|d| d.worked_hours == 0.0);
-    let first = days.first().map_or(today, |d| d.date);
-    let last = days.last().map_or(today, |d| d.date);
-    let passed = last <= today;
-    let not_started = first > today;
-    let norm_sub = if passed {
-        if vacation_days > 0 || !is_week {
-            format!("{working_days} working days · {vacation_days} vacation days")
-        } else {
-            format!("{working_days} working days")
-        }
-    } else if not_started {
-        format!("{word} not started · {} planned", hours(totals.whole_norm))
-    } else if let Some(w) = today_day.and_then(|d| counting_window(d, now)) {
-        format!(
-            "today counts {w} · {} for the {word}",
-            hours(totals.whole_norm)
-        )
-    } else {
-        format!(
-            "until today, {} · {} for the whole {word}",
-            today.format("%-d %b"),
-            hours(totals.whole_norm)
-        )
-    };
-    let worked_sub = if not_at_work_yet {
-        "not at work yet today".to_string()
-    } else if from_home > 0.0 {
-        format!(
-            "incl. {} h from home · after lunch and private time",
-            hours(from_home)
-        )
-    } else {
-        "after lunch and private time".to_string()
-    };
-    let checks = match to_check.len() {
-        0 => None,
-        1 => Some("1 day to check".to_string()),
-        n => Some(format!("{n} days to check")),
-    };
-    let diff_sub = if !current && passed {
-        format!("for the whole {word}")
-    } else if not_started {
-        format!("{word} not started")
-    } else {
-        match (today_day.filter(|d| d.expected_hours > 0.0), checks) {
-            (Some(d), Some(c)) => format!("today {} so far · {c}", signed(d.difference())),
-            (Some(d), None) => format!("today {} so far", signed(d.difference())),
-            (None, Some(c)) => c,
-            (None, None) => "nothing to check".to_string(),
-        }
-    };
     let to_date = if current { " to date" } else { "" };
+    // (label, label on a phone, value, class)
     let mut kpis = vec![
-        (format!("Norm{to_date}"), hours(totals.norm), norm_sub, ""),
-        (
-            format!("Worked{to_date}"),
-            hours(totals.worked),
-            worked_sub,
-            "",
-        ),
+        (format!("Norm{to_date}"), None, hours(totals.norm), ""),
+        (format!("Worked{to_date}"), None, hours(totals.worked), ""),
         (
             format!("Difference{to_date}"),
+            None,
             signed(diff),
-            diff_sub,
             diff_class(diff),
         ),
     ];
-    let km_text = |km: f64| format!("{:.1}", km).replace('.', ",");
     if is_week {
         let logs: Vec<&MileageMonth> = pairs
             .iter()
@@ -482,42 +385,26 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     .iter()
                     .filter(|e| mil.month.contains(e.start.date_naive()))
             });
-            let (amount, km, n) = week_mileage(entries, monday);
-            let sub = match n {
-                0 if current => "no business trips yet this week".to_string(),
-                0 => "no business trips this week".to_string(),
-                1 => format!("{} km · 1 business trip", km_text(km)),
-                n => format!("{} km · {n} business trips", km_text(km)),
-            };
-            kpis.push(("Mileage allowance".to_string(), kroner(amount), sub, ""));
+            let (amount, _, _) = week_mileage(entries, monday);
+            kpis.push((
+                "Mileage allowance".to_string(),
+                Some("Mileage"),
+                kroner(amount),
+                "",
+            ));
         }
     } else if let Some(mil) = &view.mileage {
         kpis.push((
             "Mileage allowance".to_string(),
+            Some("Mileage"),
             kroner(mil.total_amount()),
-            format!(
-                "{} km · {} business trips",
-                km_text(mil.total_km()),
-                mil.entries.len()
-            ),
             "",
         ));
     }
     let first_check = to_check.first().map(|d| d.date);
-    let lunch_rule = format!(
-        "Working time = time at the work address, minus lunch ({} min from {}) and private time",
-        cfg.lunch.minutes,
-        cfg.lunch.start.format("%H:%M")
-    );
-    let days_note = if passed && !current {
-        format!("All days have passed · totals for the whole {word}. {lunch_rule}")
-    } else if not_started {
-        format!("The days are planned only. {lunch_rule}")
-    } else {
-        format!(
-            "Totals count up to today (today from the planned start up to now) · days after today are planned only. {lunch_rule}"
-        )
-    };
+    // Newest first, today on top; the days after today are not listed.
+    let listed = week::listed(&days, today);
+    let days_note = if current { "Totals to today" } else { "" };
     let calendar_chip = match loaded.calendar_fetched_at {
         Some(at) => format!("{calendar_name} · {}", super::calendar_age(at, now)),
         None => calendar_name.to_string(),
@@ -529,10 +416,6 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         }
         _ => place,
     };
-    let place_today = today_day
-        .and_then(|d| d.work_locations.first().cloned())
-        .map(short)
-        .unwrap_or_default();
     let work = work_view.and_then(|v| v.work.clone()).map(|mut w| {
         if let WorkState::AtWork { place, .. } = &mut w.state {
             *place = short(std::mem::take(place));
@@ -561,7 +444,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
             span { class: "src-chip",
                 span { class: if loaded.trips.is_empty() { "dot warn" } else { "dot" }, "aria-hidden": "true" }
-                "{trips_shown} trips this {word}"
+                "{trips_shown} trips"
             }
             if let Some(date) = first_check {
                 button {
@@ -601,12 +484,10 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 work: work.clone(),
                 items,
                 running_replaces,
-                place: place_today,
                 today,
                 now: now.naive_local(),
                 tz: cfg.timezone,
                 auto_start: cfg.private.auto_start,
-                grace_minutes: cfg.private.grace_minutes,
                 expanded,
                 message: message_for(&message(), Panel::Private)
                     .or_else(|| message_for(&message(), Panel::Home)),
@@ -615,11 +496,14 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         }
 
         div { class: "kpis",
-            for (label , value , sub , class) in kpis {
+            for (label , short , value , class) in kpis {
                 section { class: "kpi",
-                    h2 { "{label}" }
+                    if let Some(short) = short {
+                        h2 { span { class: "wide-only", "{label}" } span { class: "narrow-only", "{short}" } }
+                    } else {
+                        h2 { "{label}" }
+                    }
                     span { class: "kpi-value {class}", "{value}" }
-                    span { class: "kpi-sub", "{sub}" }
                 }
             }
         }
@@ -642,12 +526,12 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
 
-        {day_rows(&days, today, not_at_work_yet, &days_note, go)}
+        {day_rows(&listed, today, not_at_work_yet, days_note, go)}
     }
 }
 
-/// The days, one row each: a table when wide, a list when narrow. Today is
-/// marked, the days after it show their plan only.
+/// The days, one row each: a table when wide, a list when narrow. Newest
+/// first, today on top and marked; no days after today.
 fn day_rows(
     days: &[&Day],
     today: NaiveDate,
@@ -659,7 +543,9 @@ fn day_rows(
         section { class: "panel wide-only", "aria-labelledby": "days-h",
             div { class: "panel-head",
                 h2 { id: "days-h", "Days" }
-                span { class: "note", "{note}" }
+                if !note.is_empty() {
+                    span { class: "note", "{note}" }
+                }
             }
             div { class: "scroll-x",
                 table { class: "days",
@@ -679,11 +565,8 @@ fn day_rows(
                         for d in days.iter().copied() {
                             {
                                 let date = d.date;
-                                let future = date > today;
                                 let is_today = date == today;
-                                let row = if future {
-                                    "quiet"
-                                } else if d.check.is_some() {
+                                let row = if d.check.is_some() {
                                     "flagged"
                                 } else if is_today {
                                     "today"
@@ -692,15 +575,14 @@ fn day_rows(
                                 } else {
                                     ""
                                 };
-                                let remark = if future { planned_note(d) } else { d.remark() };
-                                let note_class = if future { "chip planned" } else { note_class(d) };
+                                let remark = d.remark();
                                 let place = if is_today && not_at_work_yet {
                                     "Not at work yet".to_string()
                                 } else {
                                     place(d)
                                 };
                                 rsx! {
-                                    tr { class: "{row}", "aria-current": if is_today { "date" } else { "false" },
+                                    tr { key: "{date}", class: "{row}", "aria-current": if is_today { "date" } else { "false" },
                                         td { class: "nowrap",
                                             button {
                                                 class: "link-btn",
@@ -708,40 +590,26 @@ fn day_rows(
                                                 {date.format("%-d %b").to_string()}
                                             }
                                             " "
-                                            span { class: "muted", "{weekday_da(date.weekday())}" }
+                                            span { class: "muted", "{weekday(date)}" }
                                             if is_today {
                                                 " "
                                                 span { class: "chip today", "Today" }
                                             }
                                         }
                                         td { class: "nowrap", "{planned(d)}" }
-                                        if future {
-                                            td {}
-                                            td {}
-                                            td {}
-                                        } else {
-                                            td { "{place}" }
-                                            td { class: "mono small", "{d.periods_text()}" }
-                                            td { class: "r", "{hours(d.worked_hours)}" }
-                                        }
-                                        td { class: "r",
-                                            if !future || d.norm_hours > 0.0 {
-                                                "{hours(d.norm_hours)}"
-                                            }
-                                        }
-                                        if future {
-                                            td {}
-                                        } else {
-                                            td { class: "r strong {diff_class(d.difference())}",
-                                                "{signed(d.difference())}"
-                                                if d.so_far {
-                                                    span { class: "muted small", " so far" }
-                                                }
+                                        td { "{place}" }
+                                        td { class: "mono small", "{d.periods_text()}" }
+                                        td { class: "r", "{hours(d.worked_hours)}" }
+                                        td { class: "r", "{hours(d.norm_hours)}" }
+                                        td { class: "r strong {diff_class(d.difference())}",
+                                            "{signed(d.difference())}"
+                                            if d.so_far {
+                                                span { class: "muted small", " so far" }
                                             }
                                         }
                                         td {
                                             if !remark.is_empty() {
-                                                span { class: "{note_class}", "{remark}" }
+                                                span { class: "{note_class(d)}", "{remark}" }
                                             }
                                         }
                                     }
@@ -758,13 +626,12 @@ fn day_rows(
                 for d in days.iter().copied() {
                     {
                         let date = d.date;
-                        let future = date > today;
                         let is_today = date == today;
-                        let mut remark = if future { String::new() } else { d.remark() };
-                        let place = match (&d.off_reason, future) {
-                            (None, true) if d.norm_hours > 0.0 => "Planned".to_string(),
-                            _ if is_today && not_at_work_yet => "Not at work yet".to_string(),
-                            _ => place(d),
+                        let mut remark = d.remark();
+                        let place = if is_today && not_at_work_yet {
+                            "Not at work yet".to_string()
+                        } else {
+                            place(d)
                         };
                         if is_today
                             && not_at_work_yet
@@ -775,14 +642,14 @@ fn day_rows(
                         }
                         let class = if is_today {
                             "day-row today"
-                        } else if future || quiet(d) {
+                        } else if quiet(d) {
                             "day-row quiet"
                         } else {
                             "day-row"
                         };
                         let chip = if is_today && not_at_work_yet { "chip info" } else { note_class(d) };
                         rsx! {
-                            li { "aria-current": if is_today { "date" } else { "false" },
+                            li { key: "{date}", "aria-current": if is_today { "date" } else { "false" },
                                 button {
                                     class: "{class}",
                                     onclick: move |_| go.call(Some(date)),
@@ -791,7 +658,7 @@ fn day_rows(
                                         if is_today {
                                             span { class: "today-label", "Today" }
                                         } else {
-                                            span { "{weekday_da(date.weekday())}" }
+                                            span { "{weekday(date)}" }
                                         }
                                     }
                                     span { class: "day-mid",
@@ -801,11 +668,7 @@ fn day_rows(
                                         }
                                     }
                                     span { class: "day-nums",
-                                        if future {
-                                            if d.norm_hours > 0.0 {
-                                                span { class: "quiet", "{hours(d.norm_hours)}" }
-                                            }
-                                        } else if !quiet(d) || d.so_far && d.expected_hours > 0.0 {
+                                        if !quiet(d) || d.so_far && d.expected_hours > 0.0 {
                                             b { "{hours(d.worked_hours)}" }
                                             span { class: "{diff_class(d.difference())}", "{signed(d.difference())}" }
                                         }
@@ -939,107 +802,86 @@ fn MonthHeader(
     }
 }
 
-/// The head of the work card: kicker, title, the title's and the dot's
-/// class, and the status line with its class.
+/// The head of the work card: kicker, title and tone (the dot's, the
+/// title's and the card's class).
 struct WorkHead {
     kicker: String,
     title: String,
     tone: &'static str,
-    status: Option<(String, &'static str)>,
 }
 
-fn work_head(w: &WorkToday, place: &str, now: NaiveDateTime) -> WorkHead {
+/// "07:58", or "Mon 23 Nov 16:00" for a time on another day.
+fn since_text(t: NaiveDateTime, now: NaiveDateTime) -> String {
+    if t.date() == now.date() {
+        hm(t)
+    } else {
+        t.format("%a %-d %b %H:%M").to_string()
+    }
+}
+
+fn work_head(w: &WorkToday, now: NaiveDateTime) -> WorkHead {
     let worked = hmm(minutes(w.worked));
     let at = |t: DateTime<Tz>| hm(t.naive_local());
+    let not_working = || {
+        if w.worked > 0.0 {
+            format!("Not working · {worked}")
+        } else {
+            "Not working".into()
+        }
+    };
     match &w.state {
-        WorkState::NotWorking { late_by: Some(_) } => {
-            let start = w.planned.map(|(s, _)| at(s)).unwrap_or_default();
-            WorkHead {
-                kicker: format!("Today · planned from {start} · now {}", hm(now)),
-                title: format!("Not at work · {} so far", hmm(minutes(w.difference()))),
-                tone: "bad",
-                status: Some((
-                    format!(
-                        "Counting since {start}: the planned time that has passed counts against you until you start."
-                    ),
-                    "bad",
-                )),
-            }
-        }
-        WorkState::NotWorking { late_by: None } => {
-            let place_part = if place.is_empty() {
-                String::new()
-            } else {
-                format!(" · {place}")
-            };
-            match w.planned {
-                Some((s, e)) if now < s.naive_local() => WorkHead {
-                    kicker: format!("Today · planned {}–{}{place_part}", at(s), at(e)),
-                    title: "Not working yet".into(),
-                    tone: "",
-                    status: Some((
-                        format!(
-                            "Starts by itself when you arrive at {}, or tap Start work at home.",
-                            if place.is_empty() { "work" } else { place }
-                        ),
-                        "info",
-                    )),
+        WorkState::NotWorking { late_by: Some(_) } => WorkHead {
+            kicker: match w.planned {
+                Some((s, _)) => format!("Planned from {}", at(s)),
+                None => String::new(),
+            },
+            title: format!("Not at work · {}", hmm(minutes(w.difference()))),
+            tone: "bad",
+        },
+        WorkState::NotWorking { late_by: None } => match w.planned {
+            Some((s, e)) => WorkHead {
+                kicker: format!("Planned {}–{}", at(s), at(e)),
+                title: if now < s.naive_local() && w.worked == 0.0 {
+                    "Not working yet".into()
+                } else {
+                    not_working()
                 },
-                Some((s, e)) => WorkHead {
-                    kicker: format!("Today · planned {}–{}{place_part}", at(s), at(e)),
-                    title: if w.worked > 0.0 {
-                        format!("Not working · {worked} today")
-                    } else {
-                        "Not working".into()
-                    },
-                    tone: "",
-                    status: None,
-                },
-                None => WorkHead {
-                    kicker: "Today · nothing planned".into(),
-                    title: if w.worked > 0.0 {
-                        format!("Not working · {worked} today")
-                    } else {
-                        "Not working".into()
-                    },
-                    tone: "",
-                    status: None,
-                },
-            }
-        }
+                tone: "",
+            },
+            None => WorkHead {
+                kicker: "Nothing planned".into(),
+                title: not_working(),
+                tone: "",
+            },
+        },
         WorkState::AtWork { place, since } => WorkHead {
-            kicker: format!("Working · {place}"),
-            title: format!("Since {} · {worked} today", at(*since)),
+            kicker: if place.is_empty() {
+                "At work".into()
+            } else {
+                format!("At work · {place}")
+            },
+            title: format!("Since {} · {worked}", at(*since)),
             tone: "on",
-            status: None,
         },
         WorkState::Home { since } => WorkHead {
             kicker: "Working from home".into(),
-            title: format!("Since {} · {worked} today", at(*since)),
+            title: format!("Since {} · {worked}", at(*since)),
             tone: "on",
-            status: None,
         },
         WorkState::Private { label, since, .. } => {
-            let since_local = since.naive_local();
-            let elapsed = hmm((now - since_local).num_minutes().max(0));
-            let since_text = if since_local.date() == now.date() {
-                hm(since_local)
-            } else {
-                since_local.format("%a %-d %b %H:%M").to_string()
-            };
+            let since = since.naive_local();
+            let elapsed = hmm((now - since).num_minutes().max(0));
             WorkHead {
                 kicker: format!("Private time · {label}"),
-                title: format!("{elapsed} · since {since_text}"),
-                tone: "warn",
-                status: None,
+                title: format!("Since {} · {elapsed}", since_text(since, now)),
+                tone: "private",
             }
         }
     }
 }
 
-/// Today's work: on a narrow screen the status over the full width, then
-/// its buttons in a row of their own ([`CardActions`]) and Stop work as a
-/// link at the bottom; the next private appointment with its own Start, and
+/// Today's work: on a narrow screen the status, then one row of buttons
+/// ([`CardActions`]); the next private appointment with its own Start, and
 /// today's private list under the chevron. On a wide screen the head and
 /// buttons are the header's [`WorkPill`].
 #[component]
@@ -1047,12 +889,10 @@ fn WorkCard(
     work: WorkToday,
     items: Vec<PrivateItem>,
     running_replaces: Option<(NaiveDateTime, NaiveDateTime)>,
-    place: String,
     today: NaiveDate,
     now: NaiveDateTime,
     tz: Tz,
     auto_start: bool,
-    grace_minutes: u32,
     expanded: Signal<bool>,
     message: Option<Result<String, String>>,
     on_action: Callback<Action, bool>,
@@ -1069,43 +909,17 @@ fn WorkCard(
     });
     let _ = tick();
     let live = chrono::Utc::now().with_timezone(&tz).naive_local().max(now);
-    let head = work_head(&work, &place, live);
+    let head = work_head(&work, live);
     let open = expanded();
     let private_now = match &work.state {
         WorkState::Private { label, since, auto } => Some((label.clone(), *since, *auto)),
         _ => None,
     };
-    // The appointment started automatically: its planned end, for AutoStatus.
-    let auto = private_now
+    // An appointment started automatically can get its real start.
+    let auto_since = private_now
         .as_ref()
         .filter(|p| p.2)
-        .and_then(|(label, since, _)| {
-            items
-                .iter()
-                .find(|i| {
-                    matches!(i.state, PrivateState::StartedAutomatically { .. })
-                        && &i.label == label
-                })
-                .and_then(|i| i.planned)
-                .map(|(_, end)| (label.clone(), since.naive_local(), end))
-        });
-    let status = match (&private_now, &head.status) {
-        (Some((_, since, false)), _) => {
-            let planned = running_replaces
-                .map(|(s, e)| format!(" Planned {}–{}; the real time replaces it.", hm(s), hm(e)))
-                .unwrap_or_default();
-            let forgotten = if since.date_naive() < today {
-                " Still running from an earlier day? Stop it and fix the end time."
-            } else {
-                ""
-            };
-            Some((
-                format!("Work continues when you stop.{planned}{forgotten}"),
-                "warn",
-            ))
-        }
-        (_, s) => s.clone(),
-    };
+        .map(|(_, since, _)| since.naive_local());
     let next = work.next_private.clone();
     let next_today = next
         .as_ref()
@@ -1115,60 +929,37 @@ fn WorkCard(
         .as_ref()
         .and_then(|n| items.iter().position(|i| i == n));
     let card_class = match head.tone {
-        "on" => "work-card on",
-        "warn" => "work-card running",
-        "bad" => "work-card late",
-        _ => "work-card",
-    };
-    let working = matches!(
-        work.state,
-        WorkState::AtWork { .. } | WorkState::Home { .. }
-    );
-    let stop = if !working {
-        None
-    } else if work.actions.contains(&WorkAction::StopWork) {
-        Some(("Stop working from home", Action::HomeStop))
-    } else if work.actions.contains(&WorkAction::LeaveWork) {
-        Some(("Stop work (left early)", Action::LeaveWork))
-    } else {
-        None
+        "" => "work-card".to_string(),
+        tone => format!("work-card {tone}"),
     };
     rsx! {
         section { class: "{card_class}", "aria-label": "Work today",
             div { class: "pt-head narrow-only",
                 span { class: "pt-dot {head.tone}", "aria-hidden": "true" }
                 span { class: "pt-title",
-                    span { class: "pt-kicker", "{head.kicker}" }
+                    if !head.kicker.is_empty() {
+                        span { class: "pt-kicker", "{head.kicker}" }
+                    }
                     b { class: "{head.tone}", "{head.title}" }
                 }
             }
-            if let Some((label, since, end)) = auto {
-                AutoStatus {
-                    label,
-                    since,
-                    end,
-                    now,
-                    grace_minutes,
-                    on_action,
-                }
-            } else if let Some((text, class)) = status {
-                div { class: "pt-status {class}", role: "status", "{text}" }
-            }
             CardActions { work: work.clone(), now: live, on_action }
-            {status_line(message)}
+            if let Some(since) = auto_since {
+                AutoStart { since, on_action }
+            }
+            {status(message)}
             div { class: "next-row",
                 span { class: "pt-title",
                     if let Some((label, since, _)) = &private_now {
                         span { class: "pt-kicker", "Running now" }
-                        span { class: "next-line", b { "{label}" } }
                         {
-                            let planned = running_replaces
-                                .map(|(s, e)| format!(" · planned {}–{}", hm(s), hm(e)))
-                                .unwrap_or_default();
-                            rsx! { span { class: "next-sub", "Since {hm(since.naive_local())}{planned}" } }
+                            let when = running_replaces
+                                .map(|(s, e)| format!("{}–{}", hm(s), hm(e)))
+                                .unwrap_or_else(|| format!("since {}", hm(since.naive_local())));
+                            rsx! { span { class: "next-line", b { "{label}" } " · {when}" } }
                         }
                     } else if let Some(n) = &next {
-                        span { class: "pt-kicker", if next_today { "Next private · today" } else { "Next private" } }
+                        span { class: "pt-kicker", "Next private" }
                         {
                             let (s, e) = n.planned.unwrap_or((n.start(), n.start()));
                             let when = if next_today {
@@ -1176,16 +967,11 @@ fn WorkCard(
                             } else {
                                 super::when(s, Some(e), today)
                             };
-                            rsx! {
-                                span { class: "next-line", b { "{n.label}" } " · {when}" }
-                                if auto_start && next_today {
-                                    span { class: "next-sub", "Starts automatically at {hm(s)}" }
-                                }
-                            }
+                            rsx! { span { class: "next-line", b { "{n.label}" } " · {when}" } }
                         }
                     } else {
                         span { class: "pt-kicker", "Next private" }
-                        span { class: "muted", "No private appointments coming" }
+                        span { class: "muted", "None planned" }
                     }
                 }
                 if let Some(n) = next.as_ref().filter(|_| next_today && private_now.is_none()) {
@@ -1207,7 +993,7 @@ fn WorkCard(
                     class: "icon-btn",
                     "aria-expanded": if open { "true" } else { "false" },
                     "aria-controls": "pt-list",
-                    "aria-label": if open { "Hide today's private time" } else { "Show today's private time" },
+                    "aria-label": if open { "Hide private time list" } else { "Show private time list" },
                     onclick: move |_| expanded.set(!open),
                     span { class: if open { "chevron up" } else { "chevron" },
                         Icon { d: "m6 9 6 6 6-6", size: 20 }
@@ -1231,127 +1017,125 @@ fn WorkCard(
                     }
                 }
             }
-            if let Some((label, action)) = stop {
-                div { class: "card-stop narrow-only",
-                    button {
-                        class: "link-btn bad",
-                        onclick: move |_| {
-                            on_action.call(action.clone());
-                        },
-                        "{label}"
-                    }
-                }
-            }
         }
     }
 }
 
-/// The work card's buttons on a narrow screen, in a row of their own under
-/// the status so neither is cut off: Start work, Stop private time, or
-/// Start private time and Started earlier… (its time field opens in place,
-/// not in a menu over the list).
+/// The work card's one row of buttons on a narrow screen: Start work ▾ when
+/// not working; Private time ▾ and Stop work at work or at home; Stop
+/// private time while it runs. ▾ opens "Started at" in place, for a start
+/// earlier today.
 #[component]
 fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, bool>) -> Element {
     let mut earlier = use_signal(|| false);
     let mut at = use_signal(String::new);
-    match &work.state {
-        WorkState::NotWorking { .. } => rsx! {
-            if work.actions.contains(&WorkAction::StartWork) {
-                div { class: "card-actions narrow-only",
-                    button {
-                        class: "pt-btn",
-                        onclick: move |_| {
-                            on_action.call(Action::HomeStart);
-                        },
-                        "Start work"
-                    }
-                }
-            }
-        },
-        WorkState::Private { .. } => rsx! {
-            div { class: "card-actions narrow-only",
+    let has = |a: WorkAction| work.actions.contains(&a);
+    let (main, main_action, caret_label, stop) = match &work.state {
+        WorkState::NotWorking { .. } if has(WorkAction::StartWork) => (
+            "Start work",
+            Action::HomeStart,
+            Some("Started work earlier"),
+            None,
+        ),
+        WorkState::NotWorking { .. } => return rsx! {},
+        WorkState::Private { .. } => ("Stop private time", Action::Stop, None, None),
+        WorkState::AtWork { .. } | WorkState::Home { .. } => (
+            "Private time",
+            Action::Start(None),
+            Some("Private time started earlier"),
+            if has(WorkAction::StopWork) {
+                Some(Action::HomeStop)
+            } else if has(WorkAction::LeaveWork) {
+                Some(Action::LeaveWork)
+            } else {
+                None
+            },
+        ),
+    };
+    let working = matches!(
+        work.state,
+        WorkState::AtWork { .. } | WorkState::Home { .. }
+    );
+    let private = matches!(work.state, WorkState::Private { .. });
+    let open = earlier() && caret_label.is_some();
+    rsx! {
+        div { class: "card-actions narrow-only",
+            span { class: "split card-split", role: "group", "aria-label": "{main}",
                 button {
-                    class: "pt-btn stop",
+                    class: if private { "pt-btn private" } else if caret_label.is_some() { "pt-btn split-main" } else { "pt-btn" },
                     onclick: move |_| {
-                        on_action.call(Action::Stop);
+                        earlier.set(false);
+                        on_action.call(main_action.clone());
                     },
-                    "Stop private time"
+                    "{main}"
                 }
-            }
-        },
-        WorkState::AtWork { .. } | WorkState::Home { .. } => {
-            let open = earlier();
-            rsx! {
-                div { class: "card-actions narrow-only",
+                if let Some(label) = caret_label {
                     button {
-                        class: "pt-btn",
-                        onclick: move |_| {
-                            earlier.set(false);
-                            on_action.call(Action::Start(None));
-                        },
-                        "Start private time"
-                    }
-                    button {
-                        class: "pt-btn secondary",
+                        class: "pt-btn split-caret",
                         "aria-expanded": if open { "true" } else { "false" },
                         "aria-controls": "pt-earlier-row",
+                        "aria-label": "{label}",
                         onclick: move |_| {
                             at.set(hm(now));
                             earlier.set(!open);
                         },
-                        "Started earlier…"
+                        Icon { d: "m6 9 6 6 6-6", size: 16 }
                     }
                 }
-                if open {
-                    div { id: "pt-earlier-row", class: "card-earlier narrow-only",
-                        label { r#for: "pt-earlier-card", "Started at" }
-                        input {
-                            id: "pt-earlier-card",
-                            r#type: "time",
-                            value: "{at}",
-                            oninput: move |e| at.set(e.value()),
+            }
+            if let Some(action) = stop {
+                button {
+                    class: "pt-btn stop-work",
+                    onclick: move |_| {
+                        earlier.set(false);
+                        on_action.call(action.clone());
+                    },
+                    "Stop work"
+                }
+            }
+        }
+        if open {
+            div { id: "pt-earlier-row", class: "card-earlier narrow-only",
+                label { r#for: "pt-earlier-card", "Started at" }
+                input {
+                    id: "pt-earlier-card",
+                    r#type: "time",
+                    value: "{at}",
+                    oninput: move |e| at.set(e.value()),
+                }
+                button {
+                    class: "small-btn primary-sm",
+                    onclick: move |_| {
+                        let action = if working {
+                            Action::StartAt(at())
+                        } else {
+                            Action::HomeStartAt(at())
+                        };
+                        if on_action.call(action) {
+                            earlier.set(false);
                         }
-                        button { class: "small-btn", onclick: move |_| earlier.set(false), "Cancel" }
-                        button {
-                            class: "small-btn primary-sm",
-                            onclick: move |_| {
-                                if on_action.call(Action::StartAt(at())) {
-                                    earlier.set(false);
-                                }
-                            },
-                            "Start"
-                        }
-                    }
+                    },
+                    "Start"
                 }
             }
         }
     }
 }
 
-/// The status line of the last action.
-fn status_line(message: Option<Result<String, String>>) -> Element {
-    status(message)
-}
-
-/// The work buttons: Start work, Stop private, or the split button
-/// Private time ▾ whose menu starts private time now or earlier and stops
-/// work. `pill` for the wide header.
+/// The work buttons for the wide header: Start work, Stop private, or the
+/// split button Private time ▾ whose menu starts private time now or
+/// earlier and stops work.
 #[component]
-fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -> Element {
+fn WorkButtons(work: WorkToday, on_action: Callback<Action, bool>) -> Element {
     let mut menu = use_signal(|| false);
     let mut earlier = use_signal(|| false);
     let mut at = use_signal(String::new);
-    let (btn, stop) = if pill {
-        ("pill-btn", "pill-btn stop")
-    } else {
-        ("pt-btn", "pt-btn stop")
-    };
     let has = |a: WorkAction| work.actions.contains(&a);
     match &work.state {
         WorkState::NotWorking { .. } => rsx! {
             if has(WorkAction::StartWork) {
                 button {
-                    class: "{btn}",
+                    class: "pill-btn",
                     onclick: move |_| {
                         on_action.call(Action::HomeStart);
                     },
@@ -1361,18 +1145,18 @@ fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -
         },
         WorkState::Private { .. } => rsx! {
             button {
-                class: "{stop}",
+                class: "pill-btn private",
                 onclick: move |_| {
                     on_action.call(Action::Stop);
                 },
-                "Stop private"
+                "Stop private time"
             }
         },
         WorkState::AtWork { .. } | WorkState::Home { .. } => {
             let stop_item = if has(WorkAction::StopWork) {
-                Some(("Stop working from home", Action::HomeStop))
+                Some(Action::HomeStop)
             } else if has(WorkAction::LeaveWork) {
-                Some(("Stop work (left early)", Action::LeaveWork))
+                Some(Action::LeaveWork)
             } else {
                 None
             };
@@ -1382,9 +1166,9 @@ fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -
                 earlier.set(false);
             };
             rsx! {
-                span { class: if pill { "split pill" } else { "split" }, role: "group", "aria-label": "Work actions",
+                span { class: "split pill", role: "group", "aria-label": "Work actions",
                     button {
-                        class: "{btn} split-main",
+                        class: "pill-btn split-main",
                         onclick: move |_| {
                             close();
                             on_action.call(Action::Start(None));
@@ -1392,7 +1176,7 @@ fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -
                         "Private time"
                     }
                     button {
-                        class: "{btn} split-caret",
+                        class: "pill-btn split-caret",
                         "aria-haspopup": "menu",
                         "aria-expanded": if open { "true" } else { "false" },
                         "aria-label": "More work actions",
@@ -1414,7 +1198,6 @@ fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -
                                         value: "{at}",
                                         oninput: move |e| at.set(e.value()),
                                     }
-                                    button { class: "small-btn", onclick: move |_| earlier.set(false), "Cancel" }
                                     button {
                                         class: "small-btn primary-sm",
                                         onclick: move |_| {
@@ -1433,7 +1216,7 @@ fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -
                                         close();
                                         on_action.call(Action::Start(None));
                                     },
-                                    "Start private time now"
+                                    "Private time now"
                                 }
                                 button {
                                     class: "menu-item",
@@ -1442,9 +1225,9 @@ fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -
                                         at.set(hm(chrono::Local::now().naive_local()));
                                         earlier.set(true);
                                     },
-                                    "Private time started earlier…"
+                                    "Private time started at…"
                                 }
-                                if let Some((label, action)) = stop_item {
+                                if let Some(action) = stop_item {
                                     div { class: "menu-sep", role: "separator" }
                                     button {
                                         class: "menu-item",
@@ -1453,7 +1236,7 @@ fn WorkButtons(work: WorkToday, pill: bool, on_action: Callback<Action, bool>) -
                                             close();
                                             on_action.call(action.clone());
                                         },
-                                        "{label}"
+                                        "Stop work"
                                     }
                                 }
                             }
@@ -1474,12 +1257,16 @@ fn WorkPill(work: WorkToday, today: NaiveDate, on_action: Callback<Action, bool>
         WorkState::NotWorking { late_by: Some(_) } => (
             "late",
             "Not at work".to_string(),
-            format!(" · {} so far", hmm(minutes(work.difference()))),
+            format!(" · {}", hmm(minutes(work.difference()))),
         ),
         WorkState::NotWorking { late_by: None } => ("", "Not working".to_string(), String::new()),
         WorkState::AtWork { place, since } => (
             "on",
-            format!("Working · {place}"),
+            if place.is_empty() {
+                "At work".to_string()
+            } else {
+                format!("At work · {place}")
+            },
             format!(" since {}", at(*since)),
         ),
         WorkState::Home { since } => (
@@ -1488,7 +1275,7 @@ fn WorkPill(work: WorkToday, today: NaiveDate, on_action: Callback<Action, bool>
             format!(" since {}", at(*since)),
         ),
         WorkState::Private { label, since, .. } => (
-            "running",
+            "private",
             format!("Private time · {label}"),
             format!(" since {}", at(*since)),
         ),
@@ -1499,23 +1286,23 @@ fn WorkPill(work: WorkToday, today: NaiveDate, on_action: Callback<Action, bool>
         .filter(|_| !matches!(work.state, WorkState::Private { .. }))
         .and_then(|i| i.planned.map(|(s, _)| (i.label.clone(), s)))
         .map(|(label, s)| {
-            let day = if s.date() == today {
-                "today".to_string()
+            let when = if s.date() == today {
+                hm(s)
             } else {
-                s.format("%a %-d %b").to_string()
+                s.format("%a %-d %b %H:%M").to_string()
             };
-            (label, format!(" {day} {}", hm(s)))
+            (label, format!(" {when}"))
         });
     rsx! {
         span { class: "src-chip work-pill {class}",
             span { class: "dot", "aria-hidden": "true" }
             b { "{label}" }
             "{rest}"
-            WorkButtons { work: work.clone(), pill: true, on_action }
+            WorkButtons { work: work.clone(), on_action }
         }
         if let Some((label, when)) = next {
             span { class: "next-note",
-                "Next private: "
+                "Next: "
                 b { "{label}" }
                 "{when}"
             }
@@ -1523,64 +1310,38 @@ fn WorkPill(work: WorkToday, today: NaiveDate, on_action: Callback<Action, bool>
     }
 }
 
-/// An appointment started automatically: when, what happens if it is left
-/// alone, and "Started at …" to set the real start.
+/// An appointment started automatically: "Started at …" sets its real
+/// start.
 #[component]
-fn AutoStatus(
-    label: String,
-    since: NaiveDateTime,
-    end: NaiveDateTime,
-    now: NaiveDateTime,
-    grace_minutes: u32,
-    on_action: Callback<Action, bool>,
-) -> Element {
+fn AutoStart(since: NaiveDateTime, on_action: Callback<Action, bool>) -> Element {
     let mut editing = use_signal(|| false);
     let mut at = use_signal(|| hm(since));
-    let settles = end + chrono::Duration::minutes(i64::from(grace_minutes));
-    let grace = if grace_minutes % 60 == 0 {
-        format!("{} h", grace_minutes / 60)
-    } else {
-        format!("{grace_minutes} min")
-    };
-    let on_now = if now < end {
-        format!("{label} is on your calendar now")
-    } else {
-        format!("{label} planned until {}", hm(end))
-    };
     rsx! {
-        div { class: "pt-status warn auto", role: "status",
-            span {
-                b { "Started automatically at {hm(since)}" }
-                " · {on_now}"
-            }
-            span { class: "pt-auto-sub",
-                "Left earlier? Set the real start. Not touched by {hm(settles)} ({grace} after the planned end), the calendar time {hm(since)}–{hm(end)} is used."
-            }
+        div { class: "card-earlier narrow-only",
             if editing() {
-                div { class: "pt-auto-edit",
-                    label { r#for: "pt-auto-at", "Started at" }
-                    input {
-                        id: "pt-auto-at",
-                        r#type: "time",
-                        value: "{at}",
-                        oninput: move |e| at.set(e.value()),
-                    }
-                    button { class: "small-btn", onclick: move |_| editing.set(false), "Cancel" }
-                    button {
-                        class: "small-btn primary-sm",
-                        onclick: move |_| {
-                            if on_action.call(Action::StartedAt(at())) {
-                                editing.set(false);
-                            }
-                        },
-                        "Save"
-                    }
+                label { r#for: "pt-auto-at", "Started at" }
+                input {
+                    id: "pt-auto-at",
+                    r#type: "time",
+                    value: "{at}",
+                    oninput: move |e| at.set(e.value()),
+                }
+                button { class: "small-btn", onclick: move |_| editing.set(false), "Cancel" }
+                button {
+                    class: "small-btn primary-sm",
+                    onclick: move |_| {
+                        if on_action.call(Action::StartedAt(at())) {
+                            editing.set(false);
+                        }
+                    },
+                    "Save"
                 }
             } else {
+                span { class: "muted small grow", "Started by itself at {hm(since)}" }
                 button {
-                    class: "small-btn pt-auto-btn",
+                    class: "small-btn",
                     onclick: move |_| editing.set(true),
-                    "Started at …"
+                    "Started at…"
                 }
             }
         }

@@ -68,7 +68,7 @@ pub enum Screen {
 impl Screen {
     fn label(self) -> &'static str {
         match self {
-            Screen::Month => "Month",
+            Screen::Month => "Hours",
             Screen::Vacation => "Vacation",
             Screen::Mileage => "Mileage",
             Screen::Danlon => "Danløn",
@@ -208,7 +208,7 @@ fn App() -> Element {
 }
 
 #[component]
-fn Sidebar(screen: Signal<Screen>, setup: Signal<Setup>) -> Element {
+fn Sidebar(screen: Signal<Screen>, mut setup: Signal<Setup>) -> Element {
     let current = screen();
     let s = setup.read();
     let calendar_ok = s.config.as_ref().is_some_and(|c| c.calendar.is_some());
@@ -218,33 +218,65 @@ fn Sidebar(screen: Signal<Screen>, setup: Signal<Setup>) -> Element {
         .any(|p| matches!(p, Problem::NoTrips | Problem::BadTrips(_)))
         && s.trips.is_some();
     let theme = s.settings.theme;
+    let collapsed = s.settings.sidebar_collapsed;
+    let toggle_label = if collapsed {
+        "Expand sidebar"
+    } else {
+        "Collapse sidebar"
+    };
+    let toggle_icon = if collapsed {
+        "m13 17 5-5-5-5M6 17l5-5-5-5"
+    } else {
+        "m11 17-5-5 5-5M18 17l-5-5 5-5"
+    };
     rsx! {
-        nav { class: "sidebar", "aria-label": "Main",
+        nav { class: if collapsed { "sidebar collapsed" } else { "sidebar" }, "aria-label": "Main",
             div { class: "brand",
-                svg { "aria-hidden": "true", width: "26", height: "26", view_box: "0 0 256 256",
-                    rect { width: "256", height: "256", rx: "56", fill: "var(--acc)" }
-                    circle { cx: "128", cy: "128", r: "70", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22" }
-                    path { d: "M128 82v50l32 20", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22", stroke_linecap: "round" }
+                span { class: "brand-name", "aria-label": "vw-danlon",
+                    svg { "aria-hidden": "true", width: "26", height: "26", view_box: "0 0 256 256",
+                        rect { width: "256", height: "256", rx: "56", fill: "var(--acc)" }
+                        circle { cx: "128", cy: "128", r: "70", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22" }
+                        path { d: "M128 82v50l32 20", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22", stroke_linecap: "round" }
+                    }
+                    if !collapsed {
+                        "vw-danlon"
+                    }
                 }
-                "vw-danlon"
+                button {
+                    class: "rail-toggle",
+                    "aria-label": "{toggle_label}",
+                    title: "{toggle_label}",
+                    "aria-expanded": if collapsed { "false" } else { "true" },
+                    onclick: move |_| {
+                        // Applies even when it can't be remembered.
+                        let _ = setup.write().set_sidebar_collapsed(!collapsed);
+                    },
+                    Icon { d: toggle_icon, size: 18 }
+                }
             }
             for item in SIDEBAR {
                 button {
                     class: "nav-item",
                     "aria-current": if item == current { "page" } else { "false" },
+                    "aria-label": collapsed.then(|| item.label()),
+                    title: collapsed.then(|| item.label()),
                     onclick: move |_| screen.set(item),
                     Icon { d: item.icon(), size: 16 }
-                    "{item.label()}"
+                    if !collapsed {
+                        "{item.label()}"
+                    }
                 }
             }
-            div { class: "nav-head", "Sources" }
-            div { class: "source",
-                span { class: if calendar_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
-                "Calendar"
-            }
-            div { class: "source",
-                span { class: if trips_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
-                "Trips file"
+            if !collapsed {
+                div { class: "nav-head", "Sources" }
+                div { class: "source",
+                    span { class: if calendar_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
+                    "Calendar"
+                }
+                div { class: "source",
+                    span { class: if trips_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
+                    "Trips file"
+                }
             }
             div { class: "grow" }
             div { class: "theme-switch", role: "group", "aria-label": "Color theme",

@@ -59,6 +59,9 @@ pub struct AppSettings {
     /// Keep secrets in this file (relative to the directory, readable only
     /// by you) instead of the platform's secret store. Off unless set.
     pub secret_file: Option<String>,
+    /// The wide layout's sidebar shows as a rail of icons.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sidebar_collapsed: bool,
 }
 
 /// The file name used when the user opts in to keeping secrets in a file.
@@ -258,6 +261,12 @@ impl Setup {
     /// Saves the theme in `app.toml`.
     pub fn set_theme(&mut self, theme: Theme) -> Result<()> {
         self.settings.theme = theme;
+        write_app_settings(&self.app_path(), &self.settings)
+    }
+
+    /// Saves whether the sidebar is collapsed in `app.toml`.
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) -> Result<()> {
+        self.settings.sidebar_collapsed = collapsed;
         write_app_settings(&self.app_path(), &self.settings)
     }
 
@@ -1021,8 +1030,11 @@ pub mod tests {
         let mut s = Setup::load(Ok(dir.clone()));
         assert_eq!(s.settings.secret_file.as_deref(), Some(SECRET_FILE));
         s.set_theme(Theme::Dark).unwrap();
+        assert!(!s.settings.sidebar_collapsed);
+        s.set_sidebar_collapsed(true).unwrap();
         let s = Setup::load(Ok(dir.clone()));
         assert_eq!(s.settings.theme, Theme::Dark);
+        assert!(s.settings.sidebar_collapsed);
         assert_eq!(s.settings.secret_file.as_deref(), Some(SECRET_FILE));
 
         let mut settings = s.settings.clone();
