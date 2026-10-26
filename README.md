@@ -533,72 +533,26 @@ arrival.
 ## Android phone app
 
 The phone app is sideloaded as a signed release APK (arm64); it is not in a
-store.
+store. It is built only by GitHub Actions (see Releases below): download
+`vw-danlon-<version>-arm64.apk` from the repository's Releases page.
 
-### Prerequisites
-
-- [Dioxus CLI](https://dioxuslabs.com/learn/0.7/getting_started/) `dx`
-  0.7.10 (`cargo install dioxus-cli --version 0.7.10`) and the Rust target
-  `rustup target add aarch64-linux-android`.
-- [Android SDK](https://developer.android.com/studio#command-line-tools-only)
-  in `~/Android/Sdk` with build-tools (`zipalign`, `apksigner`, `aapt2`) and
-  the [NDK](https://developer.android.com/ndk/downloads); the script picks
-  the newest of each unless `ANDROID_HOME` / `ANDROID_NDK_HOME` are set.
-- JDK 21 (`JAVA_HOME`, default `/usr/lib/jvm/java-21-openjdk`) for Gradle
-  and `keytool`.
-- [adb](https://developer.android.com/tools/adb) (SDK platform-tools).
-- On Windows, run the script from Git Bash; the SDK defaults to
-  `%LOCALAPPDATA%\Android\Sdk`.
+On the phone, open the downloaded APK and allow *Install unknown apps* for
+the browser or Files app when asked. Installing a newer version over the
+old one keeps the app's data.
 
 The launcher icon is `app/icons/icon.svg` (the sidebar mark). After changing
 it, re-render the PNGs in `app/icons/android/res/mipmap-*` with
-[resvg](https://github.com/linebender/resvg); the script copies that folder
-over dx's default icon.
+[resvg](https://github.com/linebender/resvg); the release build copies that
+folder over dx's default icon.
 
-### Release keystore (once)
+### The signing key
 
-The APK is signed with a local keystore that never goes into the repository:
-`~/.config/vw-danlon/release.jks`, with its password in
-`~/.config/vw-danlon/release.jks.pass` (mode 0600). To create it on a new
-machine:
-
-```sh
-mkdir -p ~/.config/vw-danlon && chmod 700 ~/.config/vw-danlon
-cd ~/.config/vw-danlon
-(umask 077; head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32 > release.jks.pass)
-KP=$(cat release.jks.pass) keytool -genkeypair -keystore release.jks \
-  -storetype PKCS12 -alias vw-danlon -keyalg RSA -keysize 4096 \
-  -validity 10000 -dname "CN=vw-danlon" -storepass:env KP -keypass:env KP
-chmod 600 release.jks
-```
-
-Back up both files. Android only installs an update over the app when it is
-signed with the same key: if the keystore is lost, uninstall the app (its
-data on the phone goes with it) before installing a build signed with a new
-keystore.
-
-### Build and install
-
-```sh
-scripts/build-apk.sh             # -> dist/vw-danlon-<version>-arm64.apk
-adb install -r dist/vw-danlon-0.3.0-arm64.apk
-```
-
-The script runs `dx bundle --platform android --release`, rebuilds the
-generated Gradle project's release variant with the native library
-stripped, then `zipalign`s, signs with the keystore and checks the result
-with `apksigner verify`. `VW_DANLON_KEYSTORE` / `VW_DANLON_KEYSTORE_PASS`
-point it at another keystore. `dist/` is git-ignored.
-
-On the phone:
-
-- **USB (adb):** enable Developer options (Settings → About phone → tap
-  *Build number* seven times), turn on *USB debugging*, connect, accept the
-  computer's key, then run `adb install -r` as above.
-- **Without adb:** copy the APK to the phone, open it from the Files app and
-  allow *Install unknown apps* for that app when asked.
-
-`-r` keeps the app's data when updating.
+Android only installs an update over the app when it is signed with the
+same key. The release keystore (PKCS12, alias `vw-danlon`) lives only in
+the repository's GitHub secrets `ANDROID_KEYSTORE_BASE64` (the keystore,
+base64) and `ANDROID_KEYSTORE_PASSWORD`. Keep a private backup of it: if it
+is lost, phones must uninstall the app (and its data) before a build signed
+with a new key installs.
 
 ## Code layout
 

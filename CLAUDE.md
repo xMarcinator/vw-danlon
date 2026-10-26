@@ -21,8 +21,11 @@ Releases page, on any computer.
   and attaches them to the release with `SHA256SUMS.txt`.
 - A failed run can be rebuilt from the Actions tab (Run workflow, with the
   existing tag).
-- Do not build signed APKs locally for others or attach local builds to a
-  release. `scripts/build-apk.sh` stays for local testing on a phone.
+- APKs are never built or signed locally; there is no local build script.
+  The APK build steps live in the workflow's `apk` job (dx bundle, then the
+  generated Gradle project's release variant, then zipalign and apksigner).
+- The workflow caches Cargo (registry, target, `~/.cargo/bin` incl. `dx`),
+  the Android NDK/build-tools/platform and Gradle between runs.
 
 ## The signing key
 
