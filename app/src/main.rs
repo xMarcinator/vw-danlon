@@ -145,6 +145,18 @@ fn Icon(d: &'static str, size: u32) -> Element {
     }
 }
 
+/// Runs before Dioxus's document-level `contextmenu` blocker (capture
+/// phase on window) and stops it for text fields, so their native menu
+/// with Paste appears.
+const ALLOW_FIELD_MENU_JS: &str = r#"
+window.addEventListener('contextmenu', function (e) {
+  var t = e.target;
+  if (t && t.closest && t.closest('input, textarea, [contenteditable="true"]')) {
+    e.stopImmediatePropagation();
+  }
+}, true);
+"#;
+
 #[component]
 fn App() -> Element {
     let setup = use_signal(|| Setup::load(setup::data_dir()));
@@ -154,6 +166,12 @@ fn App() -> Element {
         } else {
             Screen::Settings
         }
+    });
+    // Dioxus release builds block the context menu for the whole page,
+    // which also hides Paste (long-press on a phone, right-click on a
+    // desktop) in text fields. Let it through for fields only.
+    use_hook(|| {
+        document::eval(ALLOW_FIELD_MENU_JS);
     });
     let cal_sync = use_context_provider(|| Signal::new(screens::CalendarSync::default()));
     // The screens show the kept calendar; it is refreshed now and then.
