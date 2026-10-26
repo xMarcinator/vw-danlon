@@ -737,6 +737,8 @@ pub struct Fradrag {
     pub days: Vec<NaiveDate>,
     /// Days driven to the workplace that do not count, and why.
     pub excluded: Vec<(NaiveDate, &'static str)>,
+    /// All trips recorded in the year, commuting or not.
+    pub trips_in_year: usize,
 }
 
 impl Fradrag {
@@ -831,6 +833,7 @@ pub fn fradrag(
         one_way_km,
         days,
         excluded: out,
+        trips_in_year: driven.len(),
     })
 }
 
@@ -1624,5 +1627,25 @@ mod tests {
         // 140 km a day: 96 km at 3,17 and 20 km at 1,59 (3,51 in a yderkommune).
         assert_eq!(fradrag_for(70.0, false).per_day(), 336.12);
         assert_eq!(fradrag_for(70.0, true).per_day(), 374.52);
+    }
+
+    #[test]
+    fn fradrag_counts_the_years_trips_even_without_commuting() {
+        let f = fradrag_for(9.0, false);
+        assert_eq!(f.trips_in_year, 11);
+        // Trips, but none between home and the workplace.
+        let trips = [trip("2026-10-05 07:30", "Hjem", "Bager", "", 3.0)];
+        let f = fradrag(
+            &cfg(),
+            WORK,
+            &Places::default(),
+            2026,
+            &trips,
+            &[],
+            &BTreeMap::new(),
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!((f.one_way_km, f.trips_in_year), (None, 1));
     }
 }

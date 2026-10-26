@@ -1166,7 +1166,11 @@ fn print_fradrag(f: &mileage::Fradrag) {
             "  Home → workplace: {km:.1} km (median of the year's commuting trips), {:.1} km a day",
             f.round_trip_km()
         ),
-        None => println!("  No commuting trips in {}", f.year),
+        None if f.trips_in_year == 0 => println!("  No trips recorded in {}", f.year),
+        None => println!(
+            "  None of the {} trips in {} qualify: no trip runs between home and the workplace",
+            f.trips_in_year, f.year
+        ),
     }
     println!(
         "  Rates {}: {} kr/km from 25 to 120 km a day, {} kr/km above{}",

@@ -719,10 +719,12 @@ fn fradrag_view(
             section { class: "panel",
                 {head}
                 p { class: "empty",
-                    if f.is_none() {
-                        "Needs home and the workplace in Settings."
-                    } else {
-                        "No commuting trips in {year} yet."
+                    match f.map(|f| f.trips_in_year) {
+                        None => "Needs home and the workplace in Settings.".to_string(),
+                        Some(0) => format!("No trips recorded in {year} yet."),
+                        Some(n) => format!(
+                            "None of your {n} trips in {year} qualify: no trip runs between home and the workplace."
+                        ),
                     }
                 }
             }
