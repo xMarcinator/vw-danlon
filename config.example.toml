@@ -34,6 +34,9 @@ source = "examples/arbejdstid.ics"   # or "https://calendar.proton.me/api/calend
 name = "Arbejdstid"                   # refuse to run if the link points at another calendar
 norm_from_calendar = true
 days_off_keywords = []                # e.g. ["ferie", "fri"] to filter all-day events
+# Timed events with one of these whole words in the title are private
+# appointments: their time is not worked time. [] turns this off.
+private_keywords = ["Læge", "Tandlæge", "Fysioterapeut"]
 # default_location = "Kontorvej 1, 8000 Aarhus C"   # for days without a located entry
 
 [periods]
