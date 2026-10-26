@@ -93,13 +93,13 @@ impl Screen {
                 "M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"
             }
             Screen::Settings => {
-                "M12 15a3 3 0 1 0 0-6a3 3 0 1 0 0 6zM12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"
+                "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z"
             }
         }
     }
 }
 
-/// Sidebar order; the phone tabs leave Settings to the top bar, as in the
+/// Sidebar order; the phone tabs, with Settings as the last tab, as in the
 /// mockup.
 const SIDEBAR: [Screen; 5] = [
     Screen::Month,
@@ -108,11 +108,12 @@ const SIDEBAR: [Screen; 5] = [
     Screen::Danlon,
     Screen::Settings,
 ];
-const TABS: [Screen; 4] = [
+const TABS: [Screen; 5] = [
     Screen::Month,
     Screen::Mileage,
     Screen::Danlon,
     Screen::Vacation,
+    Screen::Settings,
 ];
 
 fn theme_icon(t: Theme) -> &'static str {
@@ -170,23 +171,7 @@ fn App() -> Element {
             Sidebar { screen, setup }
             div { class: "main-col",
                 header { class: if current == Screen::Month { "topbar hidden" } else { "topbar" },
-                    if current == Screen::Settings {
-                        button {
-                            class: "icon-btn",
-                            "aria-label": "Back to Month",
-                            onclick: move |_| { let mut s = screen; s.set(Screen::Month) },
-                            Icon { d: "m15 6-6 6 6 6", size: 22 }
-                        }
-                    }
                     h1 { "{current.title()}" }
-                    if current != Screen::Settings {
-                        button {
-                            class: "icon-btn",
-                            "aria-label": "Settings",
-                            onclick: move |_| { let mut s = screen; s.set(Screen::Settings) },
-                            Icon { d: Screen::Settings.icon(), size: 22 }
-                        }
-                    }
                 }
                 main { class: if current == Screen::Month { "content full" } else { "content" },
                     if current != Screen::Month {

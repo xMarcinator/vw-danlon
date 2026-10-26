@@ -291,6 +291,7 @@ body {
 
   .tab {
     flex: 1;
+    min-width: 0;
     min-height: 56px;
     display: flex;
     flex-direction: column;
@@ -545,6 +546,7 @@ body {
 
 .month-nav {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   flex-grow: 1;
@@ -565,6 +567,49 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+
+/* Show by Month | Week, and the way back to the current period. */
+.show-by {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 12px;
+}
+
+.segmented.show-seg {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 150px;
+  gap: 3px;
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.segmented.show-seg button {
+  min-height: 32px;
+  font-size: 13px;
+  border-radius: 6px;
+}
+
+.now-btn {
+  font-size: 13px;
+  font-weight: 500;
+  min-height: 36px;
+  padding: 0 12px;
+  margin-left: 4px;
+  border: 1px solid var(--acc);
+  border-radius: 8px;
+  background: var(--surf);
+  color: var(--acc-text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.week-sub::before {
+  content: "\00a0·\00a0";
 }
 
 .primary-sm {
@@ -1669,6 +1714,54 @@ table.days tr.flagged {
     height: 44px;
     border: none;
     background: none;
+  }
+
+  /* The Show by row above the arrows and the title. */
+  .show-by {
+    order: -1;
+    flex-basis: 100%;
+    justify-content: space-between;
+    gap: 8px;
+    margin-left: 0;
+    padding-top: 4px;
+  }
+
+  .segmented.show-seg {
+    width: 184px;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 10px;
+  }
+
+  .segmented.show-seg button {
+    min-height: 44px;
+    font-size: 14px;
+    border-radius: 8px;
+  }
+
+  .now-btn {
+    font-size: 14px;
+    min-height: 44px;
+    padding: 0 14px;
+    margin-left: 0;
+    border-radius: 10px;
+  }
+
+  .month-nav h1.week-title {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    line-height: 1.2;
+  }
+
+  .week-sub {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--muted);
+  }
+
+  .week-sub::before {
+    content: none;
   }
 
   .screen-head .back {

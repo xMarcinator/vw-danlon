@@ -1,30 +1,35 @@
-//! The Month screen: month navigation, today's work card (work, private
-//! time and today's private list), the totals and one row per day, as
-//! `report` computes them. A day opens the Day screen.
+//! The Month screen: month or week navigation, today's work card (work,
+//! private time and today's private list), the totals and one row per day,
+//! as `report` computes them. A day opens the Day screen.
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
 use dioxus::prelude::*;
+use vw_danlon::mileage::MileageMonth;
 use vw_danlon::month::{Day, Month, OffReason};
 use vw_danlon::service::{PrivateItem, PrivateState, WorkAction, WorkState, WorkToday};
 use vw_danlon::timesheet::weekday_da;
 
+use super::week::{
+    self, Show, first_week, in_week, monday_of, month_of, week_mileage, week_months, week_range,
+    week_title,
+};
 use super::{
-    Action, Message, Panel, PrivateList, apply, diff_class, hm, hours, kroner, message_for, signed,
-    status,
+    Action, Computed, Loaded, Message, Panel, PrivateList, apply, diff_class, hm, hours, kroner,
+    message_for, signed, status,
 };
 use crate::setup::Setup;
 use crate::{Icon, Screen};
 
-pub(super) fn this_month(setup: &Setup) -> Month {
-    let today = match &setup.config {
+fn today_of(setup: &Setup) -> NaiveDate {
+    match &setup.config {
         Some(cfg) => super::now(cfg).date_naive(),
         None => chrono::Local::now().date_naive(),
-    };
-    Month {
-        year: today.year(),
-        month: today.month(),
     }
+}
+
+pub(super) fn this_month(setup: &Setup) -> Month {
+    month_of(today_of(setup))
 }
 
 pub(super) fn step(m: Month, by: i32) -> Month {
@@ -121,6 +126,15 @@ fn counting_window(d: &Day, now: DateTime<Tz>) -> Option<String> {
 #[component]
 pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let month = use_signal(|| this_month(&setup.peek()));
+    // Month or week; in Week view `week` is the Monday shown and `month`
+    // its month.
+    let show = use_signal(|| Show::Month);
+    let week = use_signal(|| monday_of(today_of(&setup.peek())));
+    // The week's second month, when its Sunday is in the next one.
+    let month2 = use_memo(move || match show() {
+        Show::Week => week_months(week()).1,
+        Show::Month => None,
+    });
     let mut open_day = use_signal(|| None::<NaiveDate>);
     let mut version = use_signal(|| 0u32);
     let expanded = use_signal(|| false);
@@ -135,6 +149,17 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             match cfg {
                 Some(cfg) => super::load(cfg, m).await,
                 None => Err("no config".to_string()),
+            }
+        }
+    });
+    let mut loaded2 = use_resource(move || {
+        let m = month2();
+        let _ = cal_sync.read().version;
+        let cfg = setup.read().config.clone();
+        async move {
+            match (cfg, m) {
+                (Some(cfg), Some(m)) => Some(super::load(cfg, m).await),
+                _ => None,
             }
         }
     });
@@ -167,6 +192,22 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
     });
+    // The same for the week's second month.
+    let computed2 = use_resource(move || {
+        let _ = minute();
+        let _ = version();
+        let cfg = setup.read().config.clone();
+        let l = match &*loaded2.read() {
+            Some(Some(Ok(l))) => Some(l.clone()),
+            _ => None,
+        };
+        async move {
+            match (cfg, l) {
+                (Some(cfg), Some(l)) => Some(super::compute(cfg, l).await),
+                _ => None,
+            }
+        }
+    });
     // Opening or leaving a day clears the last private-time message.
     let go = use_callback(move |d: Option<NaiveDate>| {
         message.set(None);
@@ -175,18 +216,35 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         document::eval("document.querySelector('.content')?.scrollTo(0, 0)");
     });
     // True when the action was done; a refused one leaves its editor open.
+    // It runs with the calendar of the month of the open day, or of today:
+    // the week's second month when that is where it is.
     let on_action = use_callback(move |a: Action| -> bool {
         let Some(cfg) = setup.peek().config.clone() else {
             return false;
         };
-        let result = match &*loaded.peek() {
-            Some(Ok(l)) => apply(&cfg, &l.occurrences, &a).map_err(|e| format!("{e:#}")),
-            _ => Err("the month is still loading".to_string()),
+        let target = open_day
+            .peek()
+            .unwrap_or_else(|| super::now(&cfg).date_naive());
+        let second = month2.peek().is_some_and(|m| m.contains(target));
+        let result = if second {
+            match &*loaded2.peek() {
+                Some(Some(Ok(l))) => apply(&cfg, &l.occurrences, &a).map_err(|e| format!("{e:#}")),
+                _ => Err("the month is still loading".to_string()),
+            }
+        } else {
+            match &*loaded.peek() {
+                Some(Ok(l)) => apply(&cfg, &l.occurrences, &a).map_err(|e| format!("{e:#}")),
+                _ => Err("the month is still loading".to_string()),
+            }
         };
         let done = result.is_ok();
         if done && a.panel() == Panel::Trips {
             // The trips are reread; the day stays open.
-            loaded.restart();
+            if second {
+                loaded2.restart();
+            } else {
+                loaded.restart();
+            }
         }
         message.set(Some((a.panel(), result)));
         version += 1;
@@ -197,51 +255,78 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         return rsx! {};
     };
     let m = month();
+    let shown = show();
+    let monday = week();
+    let m2 = month2();
+    let today_now = super::now(&cfg).date_naive();
+    let head = move || {
+        rsx! {
+            MonthHeader { month, show, week, today: today_now, screen }
+        }
+    };
+    let title = match shown {
+        Show::Month => month_title(m),
+        Show::Week => format!("{} · {}", week_title(monday), week_range(monday)),
+    };
+    let failed = |e: &str| {
+        rsx! {
+            {head()}
+            div { class: "alert", role: "alert",
+                span { "aria-hidden": "true", style: "font-weight: 700", "!" }
+                div { b { "The month can't be shown: " } "{e}" }
+            }
+        }
+    };
+    let loading = || {
+        rsx! {
+            {head()}
+            p { class: "placeholder", role: "status", "Loading {title}…" }
+        }
+    };
     let loaded = loaded.read();
     let loaded = match &*loaded {
         Some(Ok(l)) if l.month == m => l,
-        Some(Err(e)) => {
-            return rsx! {
-                MonthHeader { month, screen }
-                div { class: "alert", role: "alert",
-                    span { "aria-hidden": "true", style: "font-weight: 700", "!" }
-                    div { b { "The month can't be shown: " } "{e}" }
-                }
-            };
-        }
-        _ => {
-            return rsx! {
-                MonthHeader { month, screen }
-                p { class: "placeholder", role: "status", "Loading {month_title(m)}…" }
-            };
-        }
+        Some(Err(e)) => return failed(e),
+        _ => return loading(),
     };
     let computed = computed.read();
     let computed = match &*computed {
         Some(Some(Ok(c))) if c.month == m => c,
-        Some(Some(Err(e))) => {
-            return rsx! {
-                MonthHeader { month, screen }
-                div { class: "alert", role: "alert", "{e}" }
+        Some(Some(Err(e))) => return failed(e),
+        _ => return loading(),
+    };
+    let loaded2 = loaded2.read();
+    let computed2 = computed2.read();
+    let second: Option<(&Loaded, &Computed)> = match m2 {
+        None => None,
+        Some(m2) => {
+            let l2 = match &*loaded2 {
+                Some(Some(Ok(l))) if l.month == m2 => l,
+                Some(Some(Err(e))) => return failed(e),
+                _ => return loading(),
             };
-        }
-        _ => {
-            return rsx! {
-                MonthHeader { month, screen }
-                p { class: "placeholder", role: "status", "Loading {month_title(m)}…" }
+            let c2 = match &*computed2 {
+                Some(Some(Ok(c))) if c.month == m2 => c,
+                Some(Some(Err(e))) => return failed(e),
+                _ => return loading(),
             };
+            Some((l2, c2))
         }
     };
+    let pairs: Vec<(&Loaded, &Computed)> =
+        std::iter::once((loaded, computed)).chain(second).collect();
     let view = &computed.view;
     let now = computed.now;
     let today = now.date_naive();
 
-    if let Some(date) = open_day().filter(|d| m.contains(*d)) {
+    if let Some(date) = open_day()
+        && let Some((l, c)) = pairs.iter().find(|(l, _)| l.month.contains(date))
+    {
         return super::day::render(super::day::DayArgs {
             cfg: &cfg,
-            view,
-            state: &computed.state,
-            loaded,
+            view: &c.view,
+            state: &c.state,
+            loaded: l,
             date,
             now,
             message: message(),
@@ -251,11 +336,26 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         });
     }
 
-    let report = &view.report;
-    let to_check: Vec<&Day> = report.days.iter().filter(|d| d.check.is_some()).collect();
-    let working_days = report.days.iter().filter(|d| d.norm_hours > 0.0).count();
-    let vacation_days = report
-        .days
+    let is_week = shown == Show::Week;
+    let word = if is_week { "week" } else { "month" };
+    // The current month or week; another one shows no work card and no
+    // days to check.
+    let current = match shown {
+        Show::Month => m == month_of(today),
+        Show::Week => monday == monday_of(today),
+    };
+    let in_view = |d: &&Day| !is_week || in_week(monday, d.date);
+    let days: Vec<&Day> = pairs
+        .iter()
+        .flat_map(|(_, c)| c.view.report.days.iter().filter(in_view))
+        .collect();
+    let to_check: Vec<&Day> = days
+        .iter()
+        .copied()
+        .filter(|d| current && d.check.is_some())
+        .collect();
+    let working_days = days.iter().filter(|d| d.norm_hours > 0.0).count();
+    let vacation_days = days
         .iter()
         .filter(|d| {
             matches!(
@@ -267,14 +367,23 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             )
         })
         .count();
-    let diff = report.worked_total() - report.norm_total();
-    let month_norm = report.month_norm_total();
-    let from_home: f64 = report.to_date().map(home_hours).sum();
-    let trips_in_month = loaded
-        .trips
+    let totals = week::totals(&days, today);
+    let diff = totals.difference();
+    let from_home: f64 = days
         .iter()
-        .filter(|t| m.contains(t.start.date_naive()))
-        .count();
+        .filter(|d| d.date <= today)
+        .map(|d| home_hours(d))
+        .sum();
+    let trips_shown: usize = pairs
+        .iter()
+        .map(|(l, _)| {
+            l.trips
+                .iter()
+                .map(|t| t.start.date_naive())
+                .filter(|&d| l.month.contains(d) && (!is_week || in_week(monday, d)))
+                .count()
+        })
+        .sum();
     let calendar_name = cfg
         .calendar
         .as_ref()
@@ -282,23 +391,40 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         .map(|n| format!("Calendar “{n}”"))
         .unwrap_or_else(|| "Calendar".to_string());
     let has_calendar = cfg.calendar.is_some();
-    // Today so far, when it is in this month.
-    let today_day = report.days.iter().find(|d| d.date == today && d.so_far);
+    // Today's work, from the month holding today, in the current period.
+    let work_view = pairs
+        .iter()
+        .map(|(_, c)| &c.view)
+        .find(|v| v.work.is_some())
+        .filter(|_| current);
+    // Today so far, when it is shown.
+    let today_day = days.iter().copied().find(|d| d.date == today && d.so_far);
     let not_at_work_yet = matches!(
-        view.work.as_ref().map(|w| &w.state),
+        work_view.and_then(|v| v.work.as_ref()).map(|w| &w.state),
         Some(WorkState::NotWorking { late_by: Some(_) })
     ) && today_day.is_some_and(|d| d.worked_hours == 0.0);
-    let norm_sub = if m.last_day() <= report.today {
-        format!("{working_days} working days · {vacation_days} vacation days")
-    } else if m.first_day() > report.today {
-        format!("month not started · {} planned", hours(month_norm))
+    let first = days.first().map_or(today, |d| d.date);
+    let last = days.last().map_or(today, |d| d.date);
+    let passed = last <= today;
+    let not_started = first > today;
+    let norm_sub = if passed {
+        if vacation_days > 0 || !is_week {
+            format!("{working_days} working days · {vacation_days} vacation days")
+        } else {
+            format!("{working_days} working days")
+        }
+    } else if not_started {
+        format!("{word} not started · {} planned", hours(totals.whole_norm))
     } else if let Some(w) = today_day.and_then(|d| counting_window(d, now)) {
-        format!("today counts {w} · {} for the month", hours(month_norm))
+        format!(
+            "today counts {w} · {} for the {word}",
+            hours(totals.whole_norm)
+        )
     } else {
         format!(
-            "until today, {} · {} for the whole month",
-            report.today.format("%-d %b"),
-            hours(month_norm)
+            "until today, {} · {} for the whole {word}",
+            today.format("%-d %b"),
+            hours(totals.whole_norm)
         )
     };
     let worked_sub = if not_at_work_yet {
@@ -316,34 +442,62 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         1 => Some("1 day to check".to_string()),
         n => Some(format!("{n} days to check")),
     };
-    let diff_sub = match (today_day.filter(|d| d.expected_hours > 0.0), checks) {
-        (Some(d), Some(c)) => format!("today {} so far · {c}", signed(d.difference())),
-        (Some(d), None) => format!("today {} so far", signed(d.difference())),
-        (None, Some(c)) => c,
-        (None, None) => "nothing to check".to_string(),
+    let diff_sub = if !current && passed {
+        format!("for the whole {word}")
+    } else if not_started {
+        format!("{word} not started")
+    } else {
+        match (today_day.filter(|d| d.expected_hours > 0.0), checks) {
+            (Some(d), Some(c)) => format!("today {} so far · {c}", signed(d.difference())),
+            (Some(d), None) => format!("today {} so far", signed(d.difference())),
+            (None, Some(c)) => c,
+            (None, None) => "nothing to check".to_string(),
+        }
     };
+    let to_date = if current { " to date" } else { "" };
     let mut kpis = vec![
-        ("Norm to date", hours(report.norm_total()), norm_sub, ""),
+        (format!("Norm{to_date}"), hours(totals.norm), norm_sub, ""),
         (
-            "Worked to date",
-            hours(report.worked_total()),
+            format!("Worked{to_date}"),
+            hours(totals.worked),
             worked_sub,
             "",
         ),
         (
-            "Difference to date",
+            format!("Difference{to_date}"),
             signed(diff),
             diff_sub,
             diff_class(diff),
         ),
     ];
-    if let Some(mil) = &view.mileage {
+    let km_text = |km: f64| format!("{:.1}", km).replace('.', ",");
+    if is_week {
+        let logs: Vec<&MileageMonth> = pairs
+            .iter()
+            .filter_map(|(_, c)| c.view.mileage.as_ref())
+            .collect();
+        if !logs.is_empty() {
+            let entries = logs.iter().flat_map(|mil| {
+                mil.entries
+                    .iter()
+                    .filter(|e| mil.month.contains(e.start.date_naive()))
+            });
+            let (amount, km, n) = week_mileage(entries, monday);
+            let sub = match n {
+                0 if current => "no business trips yet this week".to_string(),
+                0 => "no business trips this week".to_string(),
+                1 => format!("{} km · 1 business trip", km_text(km)),
+                n => format!("{} km · {n} business trips", km_text(km)),
+            };
+            kpis.push(("Mileage allowance".to_string(), kroner(amount), sub, ""));
+        }
+    } else if let Some(mil) = &view.mileage {
         kpis.push((
-            "Mileage allowance",
+            "Mileage allowance".to_string(),
             kroner(mil.total_amount()),
             format!(
                 "{} km · {} business trips",
-                format!("{:.1}", mil.total_km()).replace('.', ","),
+                km_text(mil.total_km()),
                 mil.entries.len()
             ),
             "",
@@ -355,6 +509,15 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         cfg.lunch.minutes,
         cfg.lunch.start.format("%H:%M")
     );
+    let days_note = if passed && !current {
+        format!("All days have passed · totals for the whole {word}. {lunch_rule}")
+    } else if not_started {
+        format!("The days are planned only. {lunch_rule}")
+    } else {
+        format!(
+            "Totals count up to today (today from the planned start up to now) · days after today are planned only. {lunch_rule}"
+        )
+    };
     let calendar_chip = match loaded.calendar_fetched_at {
         Some(at) => format!("{calendar_name} · {}", super::calendar_age(at, now)),
         None => calendar_name.to_string(),
@@ -370,16 +533,22 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         .and_then(|d| d.work_locations.first().cloned())
         .map(short)
         .unwrap_or_default();
-    let work = view.work.clone().map(|mut w| {
+    let work = work_view.and_then(|v| v.work.clone()).map(|mut w| {
         if let WorkState::AtWork { place, .. } = &mut w.state {
             *place = short(std::mem::take(place));
         }
         w
     });
-    let items = today_items(&view.private.items, today);
+    let items = work_view
+        .map(|v| today_items(&v.private.items, today))
+        .unwrap_or_default();
+    let running_replaces = work_view
+        .and_then(|v| v.private.running.as_ref())
+        .and_then(|r| r.replaces.as_ref())
+        .map(|w| (w.start, w.end));
 
     rsx! {
-        MonthHeader { month, screen }
+        {head()}
 
         div { class: "chips wide-only",
             span { class: "src-chip",
@@ -392,7 +561,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
             span { class: "src-chip",
                 span { class: if loaded.trips.is_empty() { "dot warn" } else { "dot" }, "aria-hidden": "true" }
-                "{trips_in_month} trips this month"
+                "{trips_shown} trips this {word}"
             }
             if let Some(date) = first_check {
                 button {
@@ -431,12 +600,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             WorkCard {
                 work: work.clone(),
                 items,
-                running_replaces: view
-                    .private
-                    .running
-                    .as_ref()
-                    .and_then(|r| r.replaces.as_ref())
-                    .map(|w| (w.start, w.end)),
+                running_replaces,
                 place: place_today,
                 today,
                 now: now.naive_local(),
@@ -478,12 +642,24 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
 
+        {day_rows(&days, today, not_at_work_yet, &days_note, go)}
+    }
+}
+
+/// The days, one row each: a table when wide, a list when narrow. Today is
+/// marked, the days after it show their plan only.
+fn day_rows(
+    days: &[&Day],
+    today: NaiveDate,
+    not_at_work_yet: bool,
+    note: &str,
+    go: Callback<Option<NaiveDate>>,
+) -> Element {
+    rsx! {
         section { class: "panel wide-only", "aria-labelledby": "days-h",
             div { class: "panel-head",
                 h2 { id: "days-h", "Days" }
-                span { class: "note",
-                    "Totals count up to today (today from the planned start up to now) · days after today are planned only. {lunch_rule}"
-                }
+                span { class: "note", "{note}" }
             }
             div { class: "scroll-x",
                 table { class: "days",
@@ -500,11 +676,11 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         }
                     }
                     tbody {
-                        for d in report.days.iter() {
+                        for d in days.iter().copied() {
                             {
                                 let date = d.date;
-                                let future = date > report.today;
-                                let is_today = date == report.today;
+                                let future = date > today;
+                                let is_today = date == today;
                                 let row = if future {
                                     "quiet"
                                 } else if d.check.is_some() {
@@ -579,11 +755,11 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
 
         section { class: "panel narrow-only", "aria-label": "Days",
             ul { class: "day-list",
-                for d in report.days.iter() {
+                for d in days.iter().copied() {
                     {
                         let date = d.date;
-                        let future = date > report.today;
-                        let is_today = date == report.today;
+                        let future = date > today;
+                        let is_today = date == today;
                         let mut remark = if future { String::new() } else { d.remark() };
                         let place = match (&d.off_reason, future) {
                             (None, true) if d.norm_hours > 0.0 => "Planned".to_string(),
@@ -644,26 +820,113 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     }
 }
 
-/// Month navigation; the Danløn checklist when wide, the Settings gear
-/// when narrow.
+/// Shows `monday`'s week, in its month.
+fn go_week(mut week: Signal<NaiveDate>, mut month: Signal<Month>, monday: NaiveDate) {
+    week.set(monday);
+    month.set(month_of(monday));
+}
+
+/// The return arrow of the back button.
+const BACK_ICON: &str = "M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11";
+
+/// Month or week navigation with the Show by switch and, away from the
+/// current period, the way back to it; the Danløn checklist when wide.
 #[component]
-fn MonthHeader(month: Signal<Month>, screen: Signal<Screen>) -> Element {
+fn MonthHeader(
+    month: Signal<Month>,
+    show: Signal<Show>,
+    week: Signal<NaiveDate>,
+    today: NaiveDate,
+    screen: Signal<Screen>,
+) -> Element {
     let m = month();
+    let shown = show();
+    let monday = week();
+    let this_week = monday_of(today);
+    let this_month = month_of(today);
+    let is_week = shown == Show::Week;
+    let current = if is_week {
+        monday == this_week
+    } else {
+        m == this_month
+    };
+    let by = move |by: i32| {
+        let mut month = month;
+        if is_week {
+            go_week(week, month, monday + Duration::days(7 * i64::from(by)));
+        } else {
+            month.set(step(m, by));
+        }
+    };
+    let pick = move |to: Show| {
+        let (mut month, mut show) = (month, show);
+        match (shown, to) {
+            (Show::Month, Show::Week) => {
+                let start = if m == this_month {
+                    this_week
+                } else {
+                    first_week(m)
+                };
+                go_week(week, month, start);
+            }
+            (Show::Week, Show::Month) => month.set(month_of(monday)),
+            _ => return,
+        }
+        show.set(to);
+    };
+    let back = move |_| {
+        let mut month = month;
+        if is_week {
+            go_week(week, month, this_week);
+        } else {
+            month.set(this_month);
+        }
+    };
     rsx! {
         div { class: "screen-head",
             div { class: "month-nav",
                 button {
                     class: "nav-btn",
-                    "aria-label": "Previous month",
-                    onclick: move |_| month.set(step(m, -1)),
+                    "aria-label": if is_week { "Previous week" } else { "Previous month" },
+                    onclick: move |_| by(-1),
                     Icon { d: "m15 6-6 6 6 6", size: 18 }
                 }
-                h1 { "{month_title(m)}" }
+                if is_week {
+                    h1 { class: "week-title",
+                        "{week_title(monday)}"
+                        span { class: "week-sub", "{week_range(monday)}" }
+                    }
+                } else {
+                    h1 { "{month_title(m)}" }
+                }
                 button {
                     class: "nav-btn",
-                    "aria-label": "Next month",
-                    onclick: move |_| month.set(step(m, 1)),
+                    "aria-label": if is_week { "Next week" } else { "Next month" },
+                    onclick: move |_| by(1),
                     Icon { d: "m9 6 6 6-6 6", size: 18 }
+                }
+                div { class: "show-by",
+                    div { class: "segmented show-seg", role: "radiogroup", "aria-label": "Show by",
+                        for (label , to) in [("Month", Show::Month), ("Week", Show::Week)] {
+                            button {
+                                r#type: "button",
+                                role: "radio",
+                                "aria-checked": if to == shown { "true" } else { "false" },
+                                onclick: move |_| pick(to),
+                                "{label}"
+                            }
+                        }
+                    }
+                    if !current {
+                        button { r#type: "button", class: "now-btn", onclick: back,
+                            Icon { d: BACK_ICON, size: 16 }
+                            if is_week {
+                                "This week"
+                            } else {
+                                "This month"
+                            }
+                        }
+                    }
                 }
             }
             button {
@@ -671,12 +934,6 @@ fn MonthHeader(month: Signal<Month>, screen: Signal<Screen>) -> Element {
                 onclick: move |_| screen.set(Screen::Danlon),
                 Icon { d: Screen::Danlon.icon(), size: 15 }
                 "Danløn app checklist"
-            }
-            button {
-                class: "icon-btn narrow-only",
-                "aria-label": "Settings",
-                onclick: move |_| screen.set(Screen::Settings),
-                Icon { d: Screen::Settings.icon(), size: 20 }
             }
         }
     }
