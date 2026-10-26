@@ -447,22 +447,11 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         let Some(cfg) = setup.peek().config.clone() else {
             return;
         };
-        let result = service::set_trip_override(&cfg, start, business)
-            .map(|t| {
-                let how = match business {
-                    Some(true) => "as business",
-                    Some(false) => "as private",
-                    None => "by the rules",
-                };
-                format!(
-                    "{} {} → {} now counts {how}",
-                    t.start.format("%-d %b %H:%M"),
-                    t.from,
-                    t.to
-                )
-            })
-            .map_err(|e| format!("{e:#}"));
-        message.set(Some(result));
+        // The list updates by itself; only a failure is worth a message.
+        match service::set_trip_override(&cfg, start, business) {
+            Ok(_) => message.set(None),
+            Err(e) => message.set(Some(Err(format!("{e:#}")))),
+        }
         reload.restart();
     };
 
