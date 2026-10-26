@@ -5,6 +5,11 @@
 # the release keystore kept in the repository's GitHub secrets, so every
 # computer publishes with the same key and nobody signs locally.
 #
+# The release appears at once as a pre-release, each file is uploaded to it
+# as soon as its job has built it, and the release is completed (marked as
+# the latest release, with notes and SHA256SUMS.txt) when the APK and the
+# command-line builds succeeded. A failed build leaves it a pre-release.
+#
 # Secrets:
 #   ANDROID_KEYSTORE_BASE64    release.jks, base64 encoded
 #   ANDROID_KEYSTORE_PASSWORD  its password
@@ -27,6 +32,8 @@ env:
   DX_VERSION: 0.7.10
   NDK_VERSION: 30.0.16248370
   CARGO_TERM_COLOR: always
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   version:
@@ -47,6 +54,21 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  prerelease:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the pre-release (or reuse it on a re-run)
+        run: |
+          v=${{ needs.version.outputs.version }}
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --prerelease --title "vw-danlon $v (building…)"
+          else
+            gh release create "$TAG" --verify-tag --prerelease \
+              --title "vw-danlon $v (building…)" \
+              --notes "Files are added here as they are built. This release is completed when the APK and the command-line tool are done."
+          fi
+
   test:
     needs: version
     runs-on: ubuntu-latest
@@ -65,7 +87,7 @@ jobs:
       - run: cargo test --workspace --locked
 
   apk:
-    needs: [version, test]
+    needs: [version, test, prerelease]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -184,14 +206,11 @@ jobs:
           fi
           "$BT/aapt2" dump badging "$out" | grep -o "versionCode='[0-9]*' versionName='[^']*'"
           ls -lh "$out"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: apk
-          path: dist/*.apk
-          if-no-files-found: error
+      - name: Upload to the release
+        run: gh release upload "$TAG" dist/*.apk --clobber
 
   cli:
-    needs: [version, test]
+    needs: [version, test, prerelease]
     strategy:
       fail-fast: false
       matrix:
@@ -224,14 +243,14 @@ jobs:
           cp "target/release/${{ matrix.exe }}" README.md config.example.toml "dist/$out/"
           cd dist
           if [ "$RUNNER_OS" = Windows ]; then 7z a "$out.zip" "$out" > /dev/null; else tar czf "$out.tar.gz" "$out"; fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cli-${{ matrix.name }}
-          path: dist/vw-danlon-cli-*.*
-          if-no-files-found: error
+      - name: Upload to the release
+        shell: bash
+        run: |
+          shopt -s nullglob
+          gh release upload "$TAG" dist/vw-danlon-cli-*.tar.gz dist/vw-danlon-cli-*.zip --clobber
 
   desktop:
-    needs: [version, test]
+    needs: [version, test, prerelease]
     # The desktop app is a bonus: a failure here does not stop the release.
     continue-on-error: true
     strategy:
@@ -279,26 +298,28 @@ jobs:
             cp "$f" "dist/out/vw-danlon-app-$v-${{ matrix.name }}.${f##*.}"
           done
           ls dist/out
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-${{ matrix.name }}
-          path: dist/out/*
-          if-no-files-found: error
+      - name: Upload to the release
+        shell: bash
+        run: gh release upload "$TAG" dist/out/* --clobber
 
-  release:
-    needs: [version, apk, cli, desktop]
-    if: always() && needs.apk.result == 'success' && needs.cli.result == 'success'
+  complete:
+    needs: [version, test, apk, cli, desktop]
+    if: always() && needs.test.result == 'success' && needs.apk.result == 'success' && needs.cli.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: files
-          merge-multiple: true
       - name: Checksums
-        run: cd files && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG }}
-          name: vw-danlon ${{ needs.version.outputs.version }}
-          generate_release_notes: true
-          files: files/*
+        run: |
+          mkdir files && cd files
+          gh release download "$TAG" --skip-existing
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+      - name: Complete the release
+        run: |
+          v=${{ needs.version.outputs.version }}
+          gh api "repos/$GH_REPO/releases/generate-notes" -f tag_name="$TAG" --jq .body > notes.md
+          if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -q '^vw-danlon-app-'; then
+            printf '\n\nThe desktop app could not be built for this release.\n' >> notes.md
+          fi
+          gh release edit "$TAG" --prerelease=false --latest --title "vw-danlon $v" --notes-file notes.md
