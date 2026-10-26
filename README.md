@@ -612,3 +612,19 @@ prints. `app/` is the desktop and phone app (`vw-danlon-app`).
 cargo run -- report 2026-10      # the CLI, from the repository root
 cargo test --workspace
 ```
+
+## Releases
+
+Releases are built by GitHub Actions and published on the repository's
+Releases page: the signed Android APK, the command-line tool for Linux and
+Windows, and the desktop app when that build succeeds. To publish, bump
+`version` in `app/Cargo.toml`, push, then push a matching tag:
+
+```bash
+git tag v0.5.0 && git push origin v0.5.0
+```
+
+The APK is signed with the release keystore stored in the repository's
+GitHub secrets `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`, so
+every computer publishes with the same key. See CLAUDE.md.
+
