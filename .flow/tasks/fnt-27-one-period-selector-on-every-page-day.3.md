@@ -24,9 +24,18 @@ Remove all JavaScript from the app (user: "I do want to avoid any Javascript in 
 
 
 ## Done summary
-TBD
+The app has no JavaScript of its own: copy uses arboard (desktop) and the Android ClipboardManager over JNI, the Danløn ⋯ menu and Hours' scroll-to-top use Dioxus's MountedData, refresh on return comes from tao's Focused(true)/Resumed events through use_wry_event_handler (counted once per second), and desktop print calls the webview's print. The Paste context-menu script is gone (per the user). Android has no file picker: the release workflow adds SEND/VIEW intent filters (xlsx, csv, json, */*), makes the activity singleTask and patches MainActivity.onNewIntent to keep the new intent; the app reads the intent over JNI at start and on each return, clears it, and imports the file on Settings (a shared backup waits for Import backup). Tests: `a_shared_file_is_named_for_the_import`, `coming_back_twice_at_once_counts_once`, `app/tests/no_javascript.rs`. CLAUDE.md and README updated.
 
+Verified live on the desktop (scratch data, offline, 390 px): copy in the Danløn ⋯ menu (wl-paste returned "Kunde (test)"), the menu scrolled into view above the tab bar, Hours scrolled to the top on opening a day, and refocusing the window bumped Resumed and recomputed the month (temporary log, removed). Android is compiled and clippy-clean only; the share flow, JNI clipboard and the workflow manifest patch (dry-run on a copy of dx's generated manifest and MainActivity.kt) are not run on a phone.
+
+Follow-ups: the shared-file flow and launchMode singleTask need a check on the phone with the next APK.
+
+Tier: not reported (model: claude-opus-5-5)
+
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 1ff503c137d90232051c51b0da5532b62e1611f9
+- Tests: cargo test --workspace, cargo clippy --workspace --all-targets, cargo clippy -p vw-danlon-app -p vw-danlon --target aarch64-linux-android --no-default-features --features vw-danlon-app/mobile
 - PRs:

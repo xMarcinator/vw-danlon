@@ -5,6 +5,8 @@
 > user: "please reuse the period selector on all pages from the hours page. Also please increase the spacing between the selector but also consider a redesign because the month and week seems misplaced."
 > user: "Also please move the day view mockups to the today selection for the hours page"
 > user: "Build it."
+> user: "Also could you redesign the phone design for hours to be more thumb/mobile friendly by moving some the controls to the bottom"
+> user: "Please use it but migrate to all the relevant pages"
 
 ## Goal & Context
 
@@ -26,6 +28,7 @@ Hours had its own Month/Week switch in the top-left corner above the title, whic
 - **R4:** Mileage and Danløn have Week · Month; week shows that week's trips/registrations; logbook export and print stay monthly.
 - **R5:** Vacation steps holiday years; Mileage → Fradrag steps calendar years; no Week/Month switch there.
 - **R6:** The chosen view per page is remembered while the app runs.
+- **R7:** On phone width the period row (‹ switch ›, or ‹ note › for years) and each page's main actions sit in a dock just above the tab bar on Hours, Mileage, Danløn and Vacation; the period title sits at the top and tapping it returns to the current period. Desktop keeps the top selector card. Mockups: the `Phone*Thumb` boards and "Component · Period row at the bottom".
 
 ## Boundaries
 
