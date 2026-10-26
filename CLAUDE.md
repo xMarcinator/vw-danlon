@@ -1,0 +1,50 @@
+# vw-danlon: notes for agents
+
+A private tool for one employee: working hours from the work calendar and
+car trips, a mileage logbook under Skat's rules, vacation, and a checklist
+of what to type into the Danløn app. It never talks to Danløn. Rust
+workspace: library + CLI at the root, the Dioxus desktop and Android app in
+`app/`. Specs and tasks live in `.flow/` (flow-next).
+
+## Building and publishing
+
+Releases are built and published only by GitHub Actions
+(`.github/workflows/release.yml`), never from a developer machine. The user
+downloads the APK and the other files from the repository's GitHub
+Releases page, on any computer.
+
+- To publish: bump `version` in `app/Cargo.toml` (versionCode is derived
+  from it, so it must grow), commit, push, then tag and push the tag:
+  `git tag v0.5.0 && git push origin v0.5.0`. The workflow checks the tag
+  matches `app/Cargo.toml`, runs the tests, builds and signs the arm64 APK,
+  builds the CLI for Linux and Windows and, if it works, the desktop app,
+  and attaches them to the release with `SHA256SUMS.txt`.
+- A failed run can be rebuilt from the Actions tab (Run workflow, with the
+  existing tag).
+- Do not build signed APKs locally for others or attach local builds to a
+  release. `scripts/build-apk.sh` stays for local testing on a phone.
+
+## The signing key
+
+The Android release keystore is stored only in the repository's GitHub
+secrets, so home and work computers publish with the same key:
+
+- `ANDROID_KEYSTORE_BASE64`: `release.jks`, base64 encoded
+- `ANDROID_KEYSTORE_PASSWORD`: its password
+
+Never commit the keystore, its password or a decoded copy, never print them
+in logs, and never set or change these secrets yourself; the user does
+that. If the key changes, phones must uninstall the app before a build
+signed with the new key installs.
+
+## Working rules
+
+- Mockups first: draw or update the UI mockups for a change before
+  implementing it.
+- The tool stays invisible to payroll: no Danløn API, integration or import
+  files.
+- Mileage follows Skat's rules (LL § 9 B); they are the law and are not
+  made switchable.
+- Never read or change the user's `config.toml`, `vw-danlon.db` or
+  `connected-cars-token` in the repo root; test on copies. Never call
+  Connected Cars from tests.
