@@ -11,15 +11,26 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 keystore=${VW_DANLON_KEYSTORE:-$HOME/.config/vw-danlon/release.jks}
 passfile=${VW_DANLON_KEYSTORE_PASS:-$HOME/.config/vw-danlon/release.jks.pass}
 
-export ANDROID_HOME=${ANDROID_HOME:-$HOME/Android/Sdk}
+# On Windows (Git Bash) the SDK tools are .bat/.cmd files and native
+# programs want Windows paths; `win` switches both.
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) win=1 ;; *) win=0 ;; esac
+native() { if [ "$win" = 1 ]; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+if [ "$win" = 1 ]; then
+  sdk_default=$(cygpath -u "$LOCALAPPDATA")/Android/Sdk bat=.bat cmd=.cmd
+else
+  sdk_default=$HOME/Android/Sdk bat= cmd=
+fi
+
+export ANDROID_HOME=${ANDROID_HOME:-$sdk_default}
 export ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$(ls -d "$ANDROID_HOME"/ndk/* | sort -V | tail -1)}
 export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-21-openjdk}
-build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+android_home=$( [ "$win" = 1 ] && cygpath -u "$ANDROID_HOME" || echo "$ANDROID_HOME")
+build_tools=$(ls -d "$android_home"/build-tools/* | sort -V | tail -1)
 
 # The NDK compiler for C dependencies (ring) on aarch64 Android, API 24.
-ndk_bin=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-export CC_aarch64_linux_android=$ndk_bin/aarch64-linux-android24-clang
-export AR_aarch64_linux_android=$ndk_bin/llvm-ar
+ndk_bin=$(ls -d "$( [ "$win" = 1 ] && cygpath -u "$ANDROID_NDK_HOME" || echo "$ANDROID_NDK_HOME")"/toolchains/llvm/prebuilt/*/bin | head -1)
+export CC_aarch64_linux_android=$(native "$ndk_bin/aarch64-linux-android24-clang$cmd")
+export AR_aarch64_linux_android=$(native "$ndk_bin/llvm-ar")
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CC_aarch64_linux_android
 
 for f in "$keystore" "$passfile"; do
@@ -43,7 +54,11 @@ sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/' "$gradle_dir/app/buil
 IFS=. read -r major minor patch <<< "$version"
 version_code=$((major * 10000 + minor * 100 + patch))
 sed -i "s/versionCode = [0-9]*/versionCode = $version_code/" "$gradle_dir/app/build.gradle.kts"
-(cd "$gradle_dir" && ./gradlew assembleRelease -q \
+# The launcher icon (app/icons/icon.svg, rendered into app/icons/android/res)
+# replaces dx's default one.
+rm -f "$gradle_dir"/app/src/main/res/mipmap-*/ic_launcher*
+cp -r "$repo/app/icons/android/res/." "$gradle_dir/app/src/main/res/"
+(cd "$gradle_dir" && "./gradlew$bat" assembleRelease -q \
   -x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease)
 apk=$gradle_dir/app/build/outputs/apk/release/app-release-unsigned.apk
 mkdir -p "$repo/dist"
@@ -52,11 +67,11 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 "$build_tools/zipalign" -f -p 4 "$apk" "$tmp/aligned.apk"
-"$build_tools/apksigner" sign \
-  --ks "$keystore" --ks-key-alias vw-danlon \
-  --ks-pass "file:$passfile" \
-  --out "$out" "$tmp/aligned.apk"
-"$build_tools/apksigner" verify --print-certs "$out" | grep -E 'Signer #1 certificate (DN|SHA-256)'
+"$build_tools/apksigner$bat" sign \
+  --ks "$(native "$keystore")" --ks-key-alias vw-danlon \
+  --ks-pass "file:$(native "$passfile")" \
+  --out "$(native "$out")" "$(native "$tmp/aligned.apk")"
+"$build_tools/apksigner$bat" verify --print-certs "$(native "$out")" | grep -E 'Signer( #1)?:? certificate (DN|SHA-256)'
 if "$build_tools/aapt2" dump badging "$out" | grep -q application-debuggable; then
   echo "$out is debuggable" >&2; exit 1
 fi

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256">
+  <!-- The sidebar brand mark (app/src/main.rs) as the app icon. -->
+  <rect width="256" height="256" rx="56" fill="#1d5e3b"/>
+  <circle cx="128" cy="128" r="70" fill="none" stroke="#ffffff" stroke-width="22"/>
+  <path d="M128 82v50l32 20" fill="none" stroke="#ffffff" stroke-width="22" stroke-linecap="round"/>
+</svg>

@@ -547,6 +547,13 @@ store.
 - JDK 21 (`JAVA_HOME`, default `/usr/lib/jvm/java-21-openjdk`) for Gradle
   and `keytool`.
 - [adb](https://developer.android.com/tools/adb) (SDK platform-tools).
+- On Windows, run the script from Git Bash; the SDK defaults to
+  `%LOCALAPPDATA%\Android\Sdk`.
+
+The launcher icon is `app/icons/icon.svg` (the sidebar mark). After changing
+it, re-render the PNGs in `app/icons/android/res/mipmap-*` with
+[resvg](https://github.com/linebender/resvg); the script copies that folder
+over dx's default icon.
 
 ### Release keystore (once)
 
