@@ -8,7 +8,9 @@
 # The release appears at once as a pre-release, each file is uploaded to it
 # as soon as its job has built it, and the release is completed (marked as
 # the latest release, with notes and SHA256SUMS.txt) when the APK and the
-# command-line builds succeeded. A failed build leaves it a pre-release.
+# command-line builds succeeded. If the tests, the APK or the command-line
+# build fail, the pre-release is marked as failed (title, notes with the
+# run's link), or deleted when no file made it (the tag stays).
 #
 # Secrets:
 #   ANDROID_KEYSTORE_BASE64    release.jks, base64 encoded
@@ -323,3 +325,25 @@ jobs:
             printf '\n\nThe desktop app could not be built for this release.\n' >> notes.md
           fi
           gh release edit "$TAG" --prerelease=false --latest --title "vw-danlon $v" --notes-file notes.md
+
+  failed:
+    needs: [version, prerelease, test, apk, cli, desktop]
+    if: always() && needs.prerelease.result == 'success' && (needs.test.result != 'success' || needs.apk.result != 'success' || needs.cli.result != 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark the release as failed, or delete it when it has no files
+        run: |
+          v=${{ needs.version.outputs.version }}
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          files=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          if [ "$files" = 0 ]; then
+            gh release delete "$TAG" --yes
+            echo "Deleted the empty release $TAG (the tag is kept)."
+          else
+            {
+              echo "**This build failed** (tests ${{ needs.test.result }}, APK ${{ needs.apk.result }}, command-line ${{ needs.cli.result }})."
+              echo
+              echo "The files here are what was built before it stopped. See $run_url and re-run it from the Actions tab (Run workflow, tag $TAG)."
+            } > notes.md
+            gh release edit "$TAG" --prerelease --title "vw-danlon $v (failed)" --notes-file notes.md
+          fi
