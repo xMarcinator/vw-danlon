@@ -148,6 +148,7 @@ mod tests {
             appointments: Vec::new(),
             home: Vec::new(),
             segments: Vec::new(),
+            clients: Vec::new(),
             first_start: None,
             last_end: None,
             note: None,

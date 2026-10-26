@@ -1349,6 +1349,76 @@ pub fn day_trips<'a>(
         .collect()
 }
 
+/// A time span on one day, in local time.
+pub type LocalSpan = (NaiveDateTime, NaiveDateTime);
+
+/// What a part of the Day timeline is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineKind {
+    Planned,
+    /// At the workplace or working from home.
+    Work,
+    /// At a client (see [`month::Day::clients`]).
+    Client,
+    Private,
+    Lunch,
+    Drive,
+}
+
+/// The Day timeline on one line: the planned day first, then the rest in
+/// time order without overlaps. Driving and private time cut what they
+/// fall in, the lunch break cuts the work around it, and the time at a
+/// client (part of `work`) shows as a client visit.
+pub fn day_timeline(
+    planned: Option<LocalSpan>,
+    work: &[LocalSpan],
+    clients: &[LocalSpan],
+    lunch: Option<LocalSpan>,
+    private: &[LocalSpan],
+    drives: &[LocalSpan],
+) -> Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> {
+    let away: Vec<LocalSpan> = private.iter().chain(drives).copied().collect();
+    let lunch = month::subtract(lunch.as_slice(), &away);
+    let away: Vec<LocalSpan> = away.into_iter().chain(lunch.iter().copied()).collect();
+    let client = month::subtract(clients, &away);
+    let at_work = month::subtract(&month::subtract(work, clients), &away);
+    let mut rest: Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> = [
+        (at_work, TimelineKind::Work),
+        (client, TimelineKind::Client),
+        (private.to_vec(), TimelineKind::Private),
+        (lunch, TimelineKind::Lunch),
+        (drives.to_vec(), TimelineKind::Drive),
+    ]
+    .into_iter()
+    .flat_map(|(spans, kind)| spans.into_iter().map(move |(s, e)| (s, e, kind)))
+    .filter(|(s, e, _)| s < e)
+    .collect();
+    rest.sort_by_key(|(s, _, _)| *s);
+    planned
+        .map(|(s, e)| (s, e, TimelineKind::Planned))
+        .into_iter()
+        .chain(rest)
+        .collect()
+}
+
+/// The time at work as the Day list shows it: the periods at work with
+/// the time at a client (part of `work`) split out as client visits, in
+/// time order. Unlike [`day_timeline`], lunch, private time and driving do
+/// not cut it.
+pub fn day_work_steps(
+    work: &[LocalSpan],
+    clients: &[LocalSpan],
+) -> Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> {
+    let mut out: Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)> = month::subtract(work, clients)
+        .into_iter()
+        .map(|(s, e)| (s, e, TimelineKind::Work))
+        .chain(clients.iter().map(|(s, e)| (*s, *e, TimelineKind::Client)))
+        .filter(|(s, e, _)| s < e)
+        .collect();
+    out.sort_by_key(|(s, _, _)| *s);
+    out
+}
+
 /// The vacation overview of the open holiday years on `today`.
 #[derive(Debug)]
 pub struct VacationView {
@@ -1601,6 +1671,119 @@ mod tests {
             start: at(start),
             end: at(end),
         })
+    }
+
+    #[test]
+    fn day_timeline_is_one_line_without_overlaps() {
+        use TimelineKind::*;
+        let span = |s: &str, e: &str| {
+            (
+                at(&format!("2026-11-19 {s}")),
+                at(&format!("2026-11-19 {e}")),
+            )
+        };
+        let hm = |t: NaiveDateTime| t.format("%H:%M").to_string();
+        let rows = |line: Vec<(NaiveDateTime, NaiveDateTime, TimelineKind)>| {
+            line.into_iter()
+                .map(|(s, e, k)| (hm(s), hm(e), k))
+                .collect::<Vec<_>>()
+        };
+        let want = |rows: &[(&str, &str, TimelineKind)]| {
+            rows.iter()
+                .map(|(s, e, k)| (s.to_string(), e.to_string(), *k))
+                .collect::<Vec<_>>()
+        };
+        // At work 08:15–15:40 less private time 13:10–13:40; lunch 12:00–12:30.
+        let work = [span("08:15", "13:10"), span("13:40", "15:40")];
+        let private = [span("13:10", "13:40")];
+        let drives = [span("07:52", "08:15"), span("15:40", "16:05")];
+        let line = |clients: &[LocalSpan]| {
+            rows(day_timeline(
+                Some(span("08:00", "16:00")),
+                &work,
+                clients,
+                Some(span("12:00", "12:30")),
+                &private,
+                &drives,
+            ))
+        };
+        assert_eq!(
+            line(&[]),
+            want(&[
+                ("08:00", "16:00", Planned),
+                ("07:52", "08:15", Drive),
+                ("08:15", "12:00", Work),
+                ("12:00", "12:30", Lunch),
+                ("12:30", "13:10", Work),
+                ("13:10", "13:40", Private),
+                ("13:40", "15:40", Work),
+                ("15:40", "16:05", Drive),
+            ])
+        );
+        // The afternoon at a client.
+        assert_eq!(
+            line(&[span("13:40", "15:40")])[6..],
+            want(&[("13:40", "15:40", Client), ("15:40", "16:05", Drive)])
+        );
+        // Driving through the lunch break cuts it; lunch never covers private time.
+        assert_eq!(
+            rows(day_timeline(
+                None,
+                &[span("08:00", "16:00")],
+                &[],
+                Some(span("12:00", "12:30")),
+                &[span("12:20", "12:40")],
+                &[span("11:50", "12:10")],
+            )),
+            want(&[
+                ("08:00", "11:50", Work),
+                ("11:50", "12:10", Drive),
+                ("12:10", "12:20", Lunch),
+                ("12:20", "12:40", Private),
+                ("12:40", "16:00", Work),
+            ])
+        );
+    }
+
+    #[test]
+    fn day_work_steps_split_the_client_visit_out() {
+        use TimelineKind::*;
+        let span = |s: &str, e: &str| {
+            (
+                at(&format!("2026-10-22 {s}")),
+                at(&format!("2026-10-22 {e}")),
+            )
+        };
+        let hm = |t: NaiveDateTime| t.format("%H:%M").to_string();
+        let rows = |work: &[LocalSpan], clients: &[LocalSpan]| {
+            day_work_steps(work, clients)
+                .into_iter()
+                .map(|(s, e, k)| (hm(s), hm(e), k))
+                .collect::<Vec<_>>()
+        };
+        let want = |rows: &[(&str, &str, TimelineKind)]| {
+            rows.iter()
+                .map(|(s, e, k)| (s.to_string(), e.to_string(), *k))
+                .collect::<Vec<_>>()
+        };
+        // At work 08:58–16:10 with a client 13:44–14:13 in the middle.
+        assert_eq!(
+            rows(&[span("08:58", "16:10")], &[span("13:44", "14:13")]),
+            want(&[
+                ("08:58", "13:44", Work),
+                ("13:44", "14:13", Client),
+                ("14:13", "16:10", Work),
+            ])
+        );
+        // Ending the day at the client; no client is one step.
+        assert_eq!(
+            rows(&[span("08:58", "14:13")], &[span("13:44", "14:13")]),
+            want(&[("08:58", "13:44", Work), ("13:44", "14:13", Client)])
+        );
+        assert_eq!(
+            rows(&[span("08:58", "16:10")], &[]),
+            want(&[("08:58", "16:10", Work)])
+        );
     }
 
     #[test]

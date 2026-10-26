@@ -1,17 +1,21 @@
-//! The Day screen: the day's numbers (today: worked and expected so far,
-//! the difference and how late), a timeline of planned time, time at work,
-//! private time, lunch and driving (today with the planned start, now and
-//! the planned end), the lunch break and where it comes from (changeable),
-//! the private time (recorded intervals editable) and the trips, where a
-//! missing trip can be added by hand.
+//! The Day screen: the day's numbers (worked, norm and the difference;
+//! today: worked and expected so far, the difference and how late), a
+//! timeline of planned time, time at work, private time, lunch and driving
+//! (today with the planned start, now and the planned end), the day as a
+//! list where private time, home working and the lunch break have Edit, and
+//! the trips with the day's km and kroner, where a missing trip can be
+//! added by hand.
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use chrono_tz::Tz;
 use dioxus::prelude::*;
 use vw_danlon::config::Config;
-use vw_danlon::mileage::Status;
-use vw_danlon::month::{Day, LunchSource};
-use vw_danlon::service::{self, LunchChoice, ManualTripForm, MonthView, PrivateItem, PrivateState};
+use vw_danlon::mileage::{Reason, Status};
+use vw_danlon::month::{Day, EntryKind, LunchSource, TimedEntry};
+use vw_danlon::service::{
+    self, LocalSpan, LunchChoice, ManualTripForm, MonthView, PrivateItem, PrivateState,
+    TimelineKind,
+};
 use vw_danlon::state::State;
 
 use super::{
@@ -38,7 +42,8 @@ pub struct DayArgs<'a> {
 }
 
 /// The time sheet: adding private time or home working to a day, or
-/// editing a recorded interval (`edit`: its id).
+/// editing a recorded interval (`edit`: its id); with `lunch` the lunch
+/// break's sheet (`start` and `minutes`).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Sheet {
     pub edit: Option<u32>,
@@ -46,6 +51,8 @@ pub struct Sheet {
     pub label: String,
     pub start: String,
     pub end: String,
+    pub lunch: bool,
+    pub minutes: String,
 }
 
 impl Sheet {
@@ -56,6 +63,16 @@ impl Sheet {
             label: label.to_string(),
             start: hm(start),
             end: hm(end),
+            ..Sheet::default()
+        }
+    }
+
+    fn lunch(start: String, minutes: i64) -> Self {
+        Sheet {
+            lunch: true,
+            start,
+            minutes: minutes.to_string(),
+            ..Sheet::default()
         }
     }
 }
@@ -116,8 +133,11 @@ fn lunch_source(s: LunchSource) -> &'static str {
     }
 }
 
-fn trip_kind(s: &Option<Status>) -> (&'static str, &'static str) {
+/// A trip's type chip: text and class. Business to or from a client is a
+/// client visit.
+fn trip_kind(s: &Option<Status>, client: bool) -> (&'static str, &'static str) {
     match s {
+        Some(Status::Business) if client => ("Client visit", "chip client"),
         Some(Status::Business) => ("Business", "chip acc strong"),
         Some(Status::Commute) => ("Commute", "chip"),
         Some(Status::Private) => ("Private", "chip"),
@@ -143,6 +163,9 @@ fn private_span(i: &PrivateItem, now: NaiveDateTime) -> Option<(NaiveDateTime, N
         PrivateState::StartedAutomatically { .. } | PrivateState::Planned => i.planned,
     }
 }
+
+/// A trip of the day, how it counts and whether it is a client visit.
+type DayTrip<'a> = (&'a vw_danlon::trips::Trip, Option<Status>, bool);
 
 /// One step of the phone timeline.
 struct Step {
@@ -172,15 +195,25 @@ pub fn render(a: DayArgs) -> Element {
         return rsx! {};
     };
     let now = now_tz.naive_local();
-    let private = service::private_time(
-        &service::timed_entries(cfg, &loaded.occurrences),
-        state,
-        &cfg.private,
-        date,
-        date,
-        now,
-    );
-    let trips = service::day_trips(&loaded.trips, view.mileage.as_ref(), date);
+    let entries = service::timed_entries(cfg, &loaded.occurrences);
+    let private = service::private_time(&entries, state, &cfg.private, date, date, now);
+    let trips: Vec<DayTrip> = service::day_trips(&loaded.trips, view.mileage.as_ref(), date)
+        .into_iter()
+        .map(|(t, status)| {
+            let client = view.mileage.as_ref().is_some_and(|m| {
+                m.driving.iter().any(|d| {
+                    d.trip == *t
+                        && matches!(
+                            d.reason,
+                            Reason::ClientVisit | Reason::DirectKm | Reason::Detour
+                        )
+                })
+            });
+            (t, status, client)
+        })
+        .collect();
+    // The day's mileage: business km and kroner from the logbook, and all
+    // km driven.
     let (km, amount) = view
         .mileage
         .as_ref()
@@ -191,6 +224,14 @@ pub fn render(a: DayArgs) -> Element {
                 .fold((0.0, 0.0), |(k, a), e| (k + e.km, a + e.amount()))
         })
         .unwrap_or_default();
+    let driven = trips
+        .iter()
+        .filter_map(|(t, ..)| t.distance_km)
+        .fold(0.0, |a, b| a + b);
+    let trips_sum = match view.mileage {
+        Some(_) => format!("{} km · {}", km1(driven), kroner(amount)),
+        None => format!("{} km", km1(driven)),
+    };
     let month_title = date.format("%B %Y").to_string();
     let title = if date == now_tz.date_naive() {
         date.format("Today · %a %-d %b").to_string()
@@ -202,7 +243,7 @@ pub fn render(a: DayArgs) -> Element {
         .map(|(s, e)| format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")));
     let place = d.work_locations.join(" | ");
     let planned_text = planned.unwrap_or_else(|| "Nothing planned".into());
-    let km_text = format!("{km:.1}").replace('.', ",");
+    let km_text = km1(km);
     let (lunch_window, lunch_minutes) = match d.lunch.window {
         Some((s, e)) => (
             format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")),
@@ -210,6 +251,17 @@ pub fn render(a: DayArgs) -> Element {
         ),
         None => ("No lunch".to_string(), 0),
     };
+    let lunch_sheet = Sheet::lunch(
+        d.lunch
+            .window
+            .map(|(s, _)| s.format("%H:%M").to_string())
+            .unwrap_or_else(|| cfg.lunch.start.format("%H:%M").to_string()),
+        if lunch_minutes > 0 {
+            lunch_minutes
+        } else {
+            cfg.lunch.minutes.into()
+        },
+    );
     let today = now.date();
     // Today so far: the planned start counts, not the arrival.
     let so_far = d.so_far;
@@ -245,12 +297,28 @@ pub fn render(a: DayArgs) -> Element {
     let planned_hm = d
         .planned
         .map(|(s, e)| (s.format("%H:%M").to_string(), e.format("%H:%M").to_string()));
+    let open_lunch = {
+        let lunch = lunch_sheet.clone();
+        move |_| {
+            sheet.set(if sheet.peek().as_ref().is_some_and(|s| s.lunch) {
+                None
+            } else {
+                Some(lunch.clone())
+            })
+        }
+    };
     let open_add = move |_| {
-        sheet.set(if sheet.peek().as_ref().is_some_and(|s| s.edit.is_none()) {
-            None
-        } else {
-            Some(Sheet::default())
-        })
+        sheet.set(
+            if sheet
+                .peek()
+                .as_ref()
+                .is_some_and(|s| s.edit.is_none() && !s.lunch)
+            {
+                None
+            } else {
+                Some(Sheet::default())
+            },
+        )
     };
 
     rsx! {
@@ -275,14 +343,14 @@ pub fn render(a: DayArgs) -> Element {
             }
             button {
                 class: "small-btn acc wide-only",
-                "aria-expanded": if sheet().is_some_and(|s| s.edit.is_none()) { "true" } else { "false" },
+                "aria-expanded": if sheet().is_some_and(|s| s.edit.is_none() && !s.lunch) { "true" } else { "false" },
                 onclick: open_add,
                 Icon { d: "M12 5v14M5 12h14", size: 15 }
                 "Add time"
             }
         }
 
-        div { class: "kpis",
+        div { class: "kpis day-kpis",
             section { class: "kpi wide-only",
                 h2 { "Calendar" }
                 span { class: "kpi-text",
@@ -299,7 +367,13 @@ pub fn render(a: DayArgs) -> Element {
             section { class: "kpi",
                 h2 { if so_far { "Worked so far" } else { "Worked" } }
                 span { class: "kpi-value", "{hours(d.worked_hours)}" }
-                span { class: "kpi-sub", "{worked_sub}" }
+                span { class: if so_far { "kpi-sub" } else { "kpi-sub wide-only" }, "{worked_sub}" }
+            }
+            if !so_far {
+                section { class: "kpi narrow-only",
+                    h2 { "Norm" }
+                    span { class: "kpi-value", "{hours(d.norm_hours)}" }
+                }
             }
             if so_far {
                 section { class: "kpi",
@@ -309,18 +383,23 @@ pub fn render(a: DayArgs) -> Element {
                 }
             }
             section { class: "kpi",
-                h2 { if so_far { "Diff" } else { "Difference" } }
-                span { class: "kpi-value {diff_class(d.difference())}", "{signed(d.difference())}" }
-                span { class: "kpi-sub",
+                h2 {
                     if so_far {
-                        "{late_text}"
+                        "Diff"
                     } else {
-                        "norm {hours(d.norm_hours)} h"
+                        span { class: "narrow-only", "Diff" }
+                        span { class: "wide-only", "Difference" }
                     }
+                }
+                span { class: "kpi-value {diff_class(d.difference())}", "{signed(d.difference())}" }
+                if so_far {
+                    span { class: "kpi-sub", "{late_text}" }
+                } else {
+                    span { class: "kpi-sub wide-only", "norm {hours(d.norm_hours)} h" }
                 }
             }
             if view.mileage.is_some() {
-                section { class: "kpi",
+                section { class: "kpi wide-only",
                     h2 { "Mileage" }
                     span { class: "kpi-value", "{kroner(amount)}" }
                     span { class: "kpi-sub", "{km_text} km business" }
@@ -350,27 +429,43 @@ pub fn render(a: DayArgs) -> Element {
             }
         }
         {status(message_for(&message, Panel::Home))}
+        {status(message_for(&message, Panel::Lunch))}
 
-        if sheet().is_some() {
+        if sheet().is_some_and(|s| s.lunch) {
+            LunchSheet { date, sheet, on_action }
+        } else if sheet().is_some() {
             TimeSheet { date, sheet, planned: planned_hm, on_action }
         }
 
-        {timeline(d, &private.items, &home, &trips, now_tz, sheet)}
+        {
+            timeline(
+                d,
+                &private.items,
+                &home,
+                &trips,
+                now_tz,
+                sheet,
+                day_steps(cfg, &entries, d, now, lunch_sheet.clone()),
+            )
+        }
 
-        LunchPanel {
-            date,
-            window: lunch_window,
-            minutes: lunch_minutes,
-            source: lunch_source(d.lunch.source),
-            title: cfg.lunch.title.clone(),
-            start: d
-                            .lunch
-                .window
-                .map(|(s, _)| s.format("%H:%M").to_string())
-                .unwrap_or_else(|| cfg.lunch.start.format("%H:%M").to_string()),
-            default_minutes: cfg.lunch.minutes,
-            message: message_for(&message, Panel::Lunch),
-            on_action,
+        section { class: "panel pad lunch wide-only", "aria-labelledby": "lunch-h",
+            h2 { id: "lunch-h", "Lunch break" }
+            span { class: "mono", "{lunch_window}" }
+            if lunch_minutes > 0 {
+                span { class: "muted", "{lunch_minutes} min" }
+            }
+            span { class: "chip", "{lunch_source(d.lunch.source)}" }
+            span {
+                class: "grow",
+                title: "A “{cfg.lunch.title}” event in the calendar sets another time",
+            }
+            button {
+                class: "small-btn",
+                "aria-expanded": if sheet().is_some_and(|s| s.lunch) { "true" } else { "false" },
+                onclick: open_lunch,
+                "Change"
+            }
         }
 
         section { class: "panel wide-only", "aria-labelledby": "priv-h",
@@ -461,38 +556,18 @@ pub fn render(a: DayArgs) -> Element {
         }
 
         section { class: "panel", "aria-labelledby": "trips-h",
-            div { class: "panel-head",
+            div { class: "panel-head trips-head",
                 h2 { id: "trips-h", "Trips" }
-                span { class: "grow" }
-                button {
-                    class: "small-btn narrow-only",
-                    "aria-expanded": if adding() { "true" } else { "false" },
-                    onclick: move |_| adding.set(!adding()),
-                    Icon { d: "M12 5v14M5 12h14", size: 15 }
-                    "Add missing trip"
-                }
+                span { class: "trips-sum num", "{trips_sum}" }
             }
             {status(message_for(&message, Panel::Trips))}
-            if adding() {
-                TripForm {
-                    date,
-                    on_action: move |a| {
-                        let done = on_action.call(a);
-                        if done {
-                            adding.set(false);
-                        }
-                        done
-                    },
-                    on_cancel: move |_| adding.set(false),
-                }
-            }
             if trips.is_empty() {
                 p { class: "empty", "No trips this day." }
             } else {
                 ul { class: "trip-list",
-                    for (t , status) in trips.iter() {
+                    for (t , status , client) in trips.iter() {
                         {
-                            let (kind, class) = trip_kind(status);
+                            let (kind, class) = trip_kind(status, *client);
                             let km = t
                                 .distance_km
                                 .map(|k| format!("{k:.1} km").replace('.', ","))
@@ -507,7 +582,10 @@ pub fn render(a: DayArgs) -> Element {
                             rsx! {
                                 li { class: "trip",
                                     span { class: "mono small nowrap",
-                                        {format!("{}–{}", t.start.format("%H:%M"), t.end.format("%H:%M"))}
+                                        {t.start.format("%H:%M").to_string()}
+                                        span { class: "wide-only",
+                                            {format!("–{}", t.end.format("%H:%M"))}
+                                        }
                                     }
                                     span { class: "trip-route",
                                         "{t.from} "
@@ -515,12 +593,12 @@ pub fn render(a: DayArgs) -> Element {
                                         " {t.to}"
                                     }
                                     span { class: "r num nowrap", "{km}" }
-                                    span {
+                                    span { class: "trip-kind",
                                         if !kind.is_empty() {
                                             span { class: "{class}", "{kind}" }
                                         }
                                     }
-                                    span { class: "muted", "{purpose}" }
+                                    span { class: "muted trip-purpose", "{purpose}" }
                                     if manual {
                                         span { class: "trip-manual",
                                             span { class: "chip info", "Added by you" }
@@ -540,75 +618,198 @@ pub fn render(a: DayArgs) -> Element {
                     }
                 }
             }
+            if adding() {
+                TripForm {
+                    date,
+                    on_action: move |a| {
+                        let done = on_action.call(a);
+                        if done {
+                            adding.set(false);
+                        }
+                        done
+                    },
+                    on_cancel: move |_| adding.set(false),
+                }
+            }
+            div { class: "narrow-only",
+                div { class: "steps-add",
+                    button {
+                        class: "add-trip",
+                        "aria-expanded": if adding() { "true" } else { "false" },
+                        onclick: move |_| adding.set(!adding()),
+                        Icon { d: "M12 5v14M5 12h14", size: 16 }
+                        "Add missing trip"
+                    }
+                }
+            }
         }
     }
 }
 
-/// Wide: bars for planned time, time at work, private time, lunch and
-/// driving. Narrow: the same as a list of steps, private time and home
-/// working with Edit, and Add time under it.
+/// The steps of the day list from the time at work (the time at a client
+/// split out as a client visit) and the lunch break, also when there is
+/// none, so it can be set again.
+fn day_steps(
+    cfg: &Config,
+    entries: &[TimedEntry],
+    d: &Day,
+    now: NaiveDateTime,
+    lunch: Sheet,
+) -> Vec<Step> {
+    let naive = |t: DateTime<Tz>| t.naive_local();
+    let local = |spans: &[(DateTime<Tz>, DateTime<Tz>)]| -> Vec<LocalSpan> {
+        spans.iter().map(|(s, e)| (naive(*s), naive(*e))).collect()
+    };
+    let mut steps = Vec::new();
+    let place = d.work_locations.first().cloned().unwrap_or_default();
+    // At work, with the time at a client split out as a client visit.
+    for (s, e, kind) in service::day_work_steps(&local(&d.segments), &local(&d.clients)) {
+        let client = kind == TimelineKind::Client;
+        let ongoing = d.so_far && e == now;
+        steps.push(Step {
+            at: s,
+            title: match (client, client_title(cfg, entries, s, e)) {
+                (true, Some(t)) => format!("Client visit · {t}"),
+                (true, None) => "Client visit".into(),
+                (false, _) if place.is_empty() => "At work".into(),
+                (false, _) => format!("At work · {place}"),
+            },
+            sub: match (ongoing, client) {
+                (true, _) => format!("since {}", hm(s)),
+                (false, true) => format!("{}–{}", hm(s), hm(e)),
+                (false, false) => format!("until {}", hm(e)),
+            },
+            kind: timeline_class(kind),
+            edit: None,
+        });
+    }
+    steps.push(match d.lunch.window {
+        Some((s, e)) => Step {
+            at: naive(s),
+            title: "Lunch break".into(),
+            sub: format!("{} min", (e - s).num_minutes()),
+            kind: "lunch",
+            edit: Some(lunch),
+        },
+        None => Step {
+            at: d.date.and_time(cfg.lunch.start),
+            title: "Lunch break".into(),
+            sub: "No lunch".into(),
+            kind: "lunch",
+            edit: Some(lunch),
+        },
+    });
+    steps
+}
+
+/// The timeline's fixed hours.
+const TL_FROM: f64 = 6.0;
+const TL_TO: f64 = 18.0;
+
+/// The calendar title of the work entry at a client during `s`–`e`, else
+/// its address.
+fn client_title(
+    cfg: &Config,
+    entries: &[TimedEntry],
+    s: NaiveDateTime,
+    e: NaiveDateTime,
+) -> Option<String> {
+    entries
+        .iter()
+        .filter(|x| {
+            x.kind == EntryKind::Work
+                && x.start.naive_local() < e
+                && s < x.end.naive_local()
+                && cfg
+                    .workplace
+                    .as_ref()
+                    .is_none_or(|w| !vw_danlon::address::matches(x.location, w))
+        })
+        .map(|x| {
+            if x.summary.trim().is_empty() {
+                x.location.trim().to_string()
+            } else {
+                x.summary.trim().to_string()
+            }
+        })
+        .find(|t| !t.is_empty())
+}
+
+/// "37,0".
+fn km1(km: f64) -> String {
+    format!("{km:.1}").replace('.', ",")
+}
+
+/// The timeline's legend: the class of each kind and its name.
+const LEGEND: [(&str, &str); 6] = [
+    ("planned", "Planned"),
+    ("work", "Work"),
+    ("client", "Client"),
+    ("private", "Private"),
+    ("lunch", "Lunch"),
+    ("drive", "Driving"),
+];
+
+fn timeline_class(kind: TimelineKind) -> &'static str {
+    match kind {
+        TimelineKind::Planned => "planned",
+        TimelineKind::Work => "work",
+        TimelineKind::Client => "client",
+        TimelineKind::Private => "private",
+        TimelineKind::Lunch => "lunch",
+        TimelineKind::Drive => "drive",
+    }
+}
+
+/// The timeline on one line: the planned day as a dashed outline, time at
+/// work, at a client, private time, the lunch break and driving inside it,
+/// and today a line at now. Narrow, under it: the day as a list of steps,
+/// private time and home working with Edit, and Add time under it.
 fn timeline(
     d: &Day,
     private: &[PrivateItem],
     home: &[HomeEntry],
-    trips: &[(&vw_danlon::trips::Trip, Option<Status>)],
+    trips: &[DayTrip],
     now_tz: DateTime<Tz>,
     mut sheet: Signal<Option<Sheet>>,
+    steps: Vec<Step>,
 ) -> Element {
     let now = now_tz.naive_local();
     let naive = |t: chrono::DateTime<chrono_tz::Tz>| t.naive_local();
-    let mut spans: Vec<(NaiveDateTime, NaiveDateTime, u32, &'static str)> = Vec::new();
-    if let Some((s, e)) = d.planned {
-        spans.push((naive(s), naive(e), 0, "bar planned"));
-    }
-    for (s, e) in &d.segments {
-        spans.push((naive(*s), naive(*e), 1, "bar work"));
-    }
-    for i in private {
-        if let Some((s, e)) = private_span(i, now) {
-            spans.push((s, e, 1, "bar private"));
-        }
-    }
-    if let Some((s, e)) = d.lunch.window {
-        spans.push((naive(s), naive(e), 1, "bar lunch"));
-    }
-    for (t, _) in trips {
-        spans.push((naive(t.start), naive(t.end), 2, "bar drive"));
-    }
+    let local = |spans: &[(DateTime<Tz>, DateTime<Tz>)]| -> Vec<LocalSpan> {
+        spans.iter().map(|(s, e)| (naive(*s), naive(*e))).collect()
+    };
+    let private_spans: Vec<LocalSpan> = private
+        .iter()
+        .filter_map(|i| private_span(i, now))
+        .collect();
+    let drives: Vec<LocalSpan> = trips
+        .iter()
+        .map(|(t, ..)| (naive(t.start), naive(t.end)))
+        .collect();
+    let spans: Vec<(NaiveDateTime, NaiveDateTime, &'static str)> = service::day_timeline(
+        d.planned.map(|(s, e)| (naive(s), naive(e))),
+        &local(&d.segments),
+        &local(&d.clients),
+        d.lunch.window.map(|(s, e)| (naive(s), naive(e))),
+        &private_spans,
+        &drives,
+    )
+    .into_iter()
+    .map(|(s, e, kind)| (s, e, timeline_class(kind)))
+    .collect();
+    // Always 06–18: what lies outside is cut at the edge.
     let day_start = d.date.and_hms_opt(0, 0, 0).unwrap();
     let hour = |t: NaiveDateTime| (t - day_start).num_minutes() as f64 / 60.0;
-    let from = spans
-        .iter()
-        .map(|s| hour(s.0).floor())
-        .fold(6.0_f64, f64::min)
-        .max(0.0);
-    let to = spans
-        .iter()
-        .map(|s| hour(s.1).ceil())
-        .fold(18.0_f64, f64::max)
-        .min(24.0);
+    let (from, to) = (TL_FROM, TL_TO);
     let pct = |t: NaiveDateTime| ((hour(t) - from) / (to - from) * 100.0).clamp(0.0, 100.0);
+    let shown: Vec<_> = spans
+        .iter()
+        .filter(|(s, e, _)| hour(*e) > from && hour(*s) < to)
+        .collect();
     let ticks: Vec<u32> = (from as u32..=to as u32).step_by(2).collect();
 
-    let mut steps: Vec<Step> = Vec::new();
-    let place = d.work_locations.first().cloned().unwrap_or_default();
-    for (s, e) in &d.segments {
-        steps.push(Step {
-            at: naive(*s),
-            title: if place.is_empty() {
-                "At work".into()
-            } else {
-                format!("At work · {place}")
-            },
-            sub: if d.so_far && *e == now_tz {
-                format!("since {}", s.format("%H:%M"))
-            } else {
-                format!("until {}", e.format("%H:%M"))
-            },
-            kind: "work",
-            edit: None,
-        });
-    }
+    let mut steps = steps;
     // Today: counting starts at the planned start; now; the planned end.
     if d.so_far
         && let Some((ps, pe)) = d.planned
@@ -687,21 +888,12 @@ fn timeline(
                 .map(|(id, end)| Sheet::edit(true, id, &e.label, e.start, end)),
         });
     }
-    if let Some((s, e)) = d.lunch.window {
-        steps.push(Step {
-            at: naive(s),
-            title: "Lunch break".into(),
-            sub: format!("{} min", (e - s).num_minutes()),
-            kind: "lunch",
-            edit: None,
-        });
-    }
-    for (t, status) in trips {
+    for (t, status, client) in trips {
         let km = t
             .distance_km
             .map(|k| format!(" · {k:.1} km").replace('.', ","))
             .unwrap_or_default();
-        let (kind, _) = trip_kind(status);
+        let (kind, _) = trip_kind(status, *client);
         steps.push(Step {
             at: naive(t.start),
             title: format!("Drive {} → {}", t.from, t.to),
@@ -711,32 +903,34 @@ fn timeline(
         });
     }
     steps.sort_by_key(|s| s.at);
-    let label = spans
+    let mut label = spans
         .iter()
-        .map(|(s, e, _, class)| {
-            format!("{} {}–{}", class.trim_start_matches("bar "), hm(*s), hm(*e))
-        })
+        .map(|(s, e, class)| format!("{class} {}–{}", hm(*s), hm(*e)))
         .collect::<Vec<_>>()
         .join("; ");
+    if d.so_far {
+        label.push_str(&format!("; now {}", hm(now)));
+    }
+    let legend = rsx! {
+        for (class , text) in LEGEND {
+            span { class: "legend",
+                span { class: "swatch {class}" }
+                "{text}"
+            }
+        }
+    };
 
     rsx! {
-        section { class: "panel pad wide-only", "aria-labelledby": "tl-h",
-            div { class: "tl-head",
-                h2 { id: "tl-h", class: "grow", "Timeline" }
-                span { class: "legend", span { class: "swatch planned" } "Planned" }
-                span { class: "legend", span { class: "swatch work" } "At work" }
-                span { class: "legend", span { class: "swatch private" } "Private" }
-                span { class: "legend", span { class: "swatch lunch" } "Lunch" }
-                span { class: "legend", span { class: "swatch drive" } "Driving" }
-                if d.so_far {
-                    span { class: "legend", span { class: "swatch now" } "Now" }
-                }
+        section { class: "panel pad tl-panel", "aria-label": "Timeline",
+            div { class: "tl-head wide-only",
+                h2 { class: "grow", "Timeline" }
+                {legend.clone()}
             }
             div { class: "tl", role: "img", "aria-label": "{label}",
-                for (s , e , row , class) in spans.iter() {
+                for (s , e , class) in shown {
                     span {
-                        class: "{class}",
-                        style: "left: {pct(*s)}%; width: {(pct(*e) - pct(*s)).max(0.4)}%; top: {4 + row * 26}px",
+                        class: "bar {class}",
+                        style: "left: {pct(*s)}%; width: {(pct(*e) - pct(*s)).max(0.4)}%",
                     }
                 }
                 if d.so_far {
@@ -747,6 +941,9 @@ fn timeline(
                 for h in ticks {
                     span { style: "left: {(h as f64 - from) / (to - from) * 100.0}%", "{h:02}" }
                 }
+            }
+            div { class: "narrow-only",
+                div { class: "tl-legend", {legend} }
             }
         }
         section { class: "panel narrow-only", "aria-labelledby": "steps-h",
@@ -953,111 +1150,83 @@ fn TimeSheet(
     }
 }
 
-/// The lunch break, where it comes from, and its editor: a time and length,
-/// no lunch, or back to the default.
+/// The lunch break's sheet: start and minutes (0: no lunch), or back to
+/// the default; a bottom sheet on a phone, a panel on a wide screen.
 #[component]
-fn LunchPanel(
+fn LunchSheet(
     date: NaiveDate,
-    window: String,
-    minutes: i64,
-    source: &'static str,
-    title: String,
-    start: String,
-    default_minutes: u32,
-    message: Option<Result<String, String>>,
+    sheet: Signal<Option<Sheet>>,
     on_action: Callback<Action, bool>,
 ) -> Element {
-    let mut editing = use_signal(|| false);
-    let mut start_in = use_signal(|| start.clone());
-    let mut minutes_in = use_signal(|| {
-        if minutes > 0 {
-            minutes
-        } else {
-            default_minutes.into()
-        }
-        .to_string()
-    });
-    // Closes the editor when the change was made.
+    let Some(form) = sheet() else {
+        return rsx! {};
+    };
+    let mut close = move || sheet.set(None);
     let mut run = move |a: Action| {
         if on_action.call(a) {
-            editing.set(false);
+            sheet.set(None);
+        }
+    };
+    let save = {
+        let form = form.clone();
+        move |_| {
+            run(Action::LunchAt {
+                date,
+                start: form.start.clone(),
+                minutes: form.minutes.clone(),
+            })
         }
     };
     rsx! {
-        section { class: "panel pad lunch", "aria-labelledby": "lunch-h",
-            h2 { id: "lunch-h", "Lunch break" }
-            span { class: "mono", "{window}" }
-            if minutes > 0 {
-                span { class: "muted", "{minutes} min" }
+        div { class: "sheet-backdrop narrow-only", onclick: move |_| close() }
+        section {
+            class: "time-sheet",
+            role: "dialog",
+            "aria-labelledby": "ls-h",
+            span { class: "sheet-grip narrow-only", "aria-hidden": "true" }
+            div { class: "ts-head",
+                h2 { id: "ls-h", class: "grow", {format!("Lunch break · {}", date.format("%-d %b"))} }
             }
-            span { class: "chip", "{source}" }
-            span { class: "grow", title: "A “{title}” event in the calendar sets another time" }
-            button {
-                class: "small-btn",
-                "aria-expanded": if editing() { "true" } else { "false" },
-                onclick: move |_| {
-                    if !editing() {
-                        start_in.set(start.clone());
+            div { class: "ts-fields lunch-fields",
+                div { class: "field",
+                    label { r#for: "lunch-start", "Start" }
+                    input {
+                        id: "lunch-start",
+                        r#type: "time",
+                        value: "{form.start}",
+                        oninput: move |e| {
+                            if let Some(s) = sheet.write().as_mut() {
+                                s.start = e.value();
+                            }
+                        },
                     }
-                    editing.set(!editing());
-                },
-                "Change"
-            }
-            if editing() {
-                div { class: "pt-edit lunch-edit",
-                    div { class: "field",
-                        label { r#for: "lunch-start", "Start" }
-                        input {
-                            id: "lunch-start",
-                            r#type: "time",
-                            value: "{start_in}",
-                            oninput: move |e| start_in.set(e.value()),
-                        }
-                    }
-                    div { class: "field",
-                        label { r#for: "lunch-min", "Minutes" }
-                        input {
-                            id: "lunch-min",
-                            r#type: "number",
-                            min: "0",
-                            step: "5",
-                            inputmode: "numeric",
-                            value: "{minutes_in}",
-                            oninput: move |e| minutes_in.set(e.value()),
-                        }
-                    }
-                    div { class: "pt-edit-actions",
-                        button {
-                            class: "small-btn",
-                            onclick: move |_| run(Action::Lunch(date, LunchChoice::None)),
-                            "No lunch"
-                        }
-                        button {
-                            class: "small-btn",
-                            onclick: move |_| run(Action::Lunch(date, LunchChoice::Default)),
-                            "Use default"
-                        }
-                        span { class: "grow" }
-                        button {
-                            class: "small-btn",
-                            onclick: move |_| editing.set(false),
-                            "Cancel"
-                        }
-                        button {
-                            class: "small-btn primary-sm",
-                            onclick: move |_| {
-                                run(Action::LunchAt {
-                                    date,
-                                    start: start_in(),
-                                    minutes: minutes_in(),
-                                })
-                            },
-                            "Save"
-                        }
+                }
+                div { class: "field",
+                    label { r#for: "lunch-min", "Minutes" }
+                    input {
+                        id: "lunch-min",
+                        r#type: "number",
+                        min: "0",
+                        step: "5",
+                        inputmode: "numeric",
+                        value: "{form.minutes}",
+                        oninput: move |e| {
+                            if let Some(s) = sheet.write().as_mut() {
+                                s.minutes = e.value();
+                            }
+                        },
                     }
                 }
             }
-            {status(message)}
+            div { class: "ts-actions",
+                button { class: "ts-btn wide-only", onclick: move |_| close(), "Cancel" }
+                button {
+                    class: "ts-btn",
+                    onclick: move |_| run(Action::Lunch(date, LunchChoice::Default)),
+                    "Use default"
+                }
+                button { class: "ts-btn primary", onclick: save, "Save" }
+            }
         }
     }
 }
