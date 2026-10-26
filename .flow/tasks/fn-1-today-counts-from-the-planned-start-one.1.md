@@ -25,5 +25,5 @@ stage: impl-review - skipped(config: REVIEW_MODE not set by the conductor)
 stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
 - Commits: 856c946212b0ad3c6071f0c023160e9ebcb84daf, 09407ae07065da94c451683b2f1871941e9888d2, b67ddf1e6bf059e873f27fda5c582510ecadf799
-- Tests: cargo test --workspace, cargo clippy --workspace --all-targets
+- Tests: cargo test --workspace
 - PRs:
