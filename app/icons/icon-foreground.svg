@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="432" height="432" viewBox="0 0 108 108">
+  <!-- Adaptive icon foreground: the clock inside the 66dp safe zone. -->
+  <g transform="translate(54 54) scale(0.3) translate(-128 -128)">
+    <circle cx="128" cy="128" r="70" fill="none" stroke="#ffffff" stroke-width="22"/>
+    <path d="M128 82v50l32 20" fill="none" stroke="#ffffff" stroke-width="22" stroke-linecap="round"/>
+  </g>
+</svg>

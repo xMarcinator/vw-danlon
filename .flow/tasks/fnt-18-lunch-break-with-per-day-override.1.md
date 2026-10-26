@@ -31,9 +31,15 @@ Add the first persistent local state: one JSON file beside the config holding pe
 - [ ] `cargo test` passes
 
 ## Done summary
-TBD
+Added src/state.rs: a local state.json beside the config (path set in Config::load) holding per-day lunch overrides, with serde-default sections, atomic temp+rename writes, and a corrupt file reported by path and never rewritten; added `lunch set <YYYY-MM-DD> <HH:MM> <minutes>` and `lunch clear <YYYY-MM-DD>` and gitignored state.json(.tmp). Tests: state::tests::overrides_round_trip_through_save_and_load, corrupt_file_is_named_and_left_untouched, invalid_date_and_time_are_named; CLI exercised in a temp dir (set, 0-minute set, clear twice, bad date, bad time, corrupt file left untouched).
 
+baseline: green (cargo test, 25 passed). Note: the spec Quick command `cargo test month:: state::` is invalid (cargo test takes one filter); plain `cargo test` was used.
+Follow-up: the state file is not a config key (always state.json beside the config); add one if a different location is ever wanted.
+
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: b8524631dfda25f12515480f00cc0e9dc3fefcff
+- Tests: cargo test (28 passed)
 - PRs:

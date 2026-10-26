@@ -35,7 +35,7 @@ Four gaps found using the app on real data: home working cannot be recorded; mon
 - Every private-time entry (recorded, started automatically, or calendar time) can be edited, relabelled or deleted at any time. [paraphrase]
 - A per-trip override (Business / Private) stored in the state file wins over the rules; the logbook marks overridden trips "Set by you".
 - The mileage logbook lists all driving with the rule that decided each trip, the reimbursable total, and the not-reimbursable km by reason; only reimbursable trips get an amount.
-- Storage: trips, state (ticks, lunch, private and home-working intervals, overrides) and the calendar cache move into a local SQLite database beside the config (user: "SQLite anyway"); screens query one month at a time (pagination by month/date range). The existing JSON files are migrated once on first start and kept as a backup. The CLI and app share it.
+- Storage: trips, state (ticks, lunch, private and home-working intervals, overrides) and the calendar cache move into a local SQLite database beside the config (user: "SQLite anyway"); screens query one month at a time (pagination by month/date range). The existing JSON files are migrated once on first start and then deleted, only after the migration is verified (user: "Don't keep the backup"). The CLI and app share it.
 - Speed: measured on the user's data, a month report takes ~710 ms, of which ~700 ms is fetching the Proton calendar over the network; reading 1042 stored trips takes a few ms. So the calendar is also cached (in the database) and pages render from the cache at once, refreshing in the background (at most every few minutes, and on demand). A database is not needed for this data size. [inferred from measurement]
 
 ## API Contracts
@@ -64,10 +64,12 @@ Four gaps found using the app on real data: home working cannot be recorded; mon
 - **R8:** Any trip can be set to Business or Private, overriding the rules (e.g. between workplaces), and reset. Errors: unknown trip refused naming it.
 - **R9:** The logbook shows all driving with the deciding rule, the reimbursable total, and not-reimbursable km by reason; it carries what Skat requires (name, address, purpose, date, destination with stops, km, rate, calculation, year-to-date km). Errors: none.
 - **R10:** Pages open from the calendar cache without waiting for the network; the cache refreshes in the background and on demand. Errors: a failed refresh keeps the cache and shows its age.
-- **R11:** Trips, state and the calendar cache are stored in SQLite and read per month; existing JSON files are migrated once and kept as backup; CLI and app give the same results as before. Errors: a damaged database stops with its path, nothing overwritten.
+- **R11:** Trips, state and the calendar cache are stored in SQLite and read per month; existing JSON files are migrated once, verified, then deleted (a failed migration leaves them untouched); CLI and app give the same results as before. Errors: a damaged database stops with its path, nothing overwritten.
 - **R12:** A private calendar appointment whose start has passed without a recording is shown as started automatically; the user can set the real start or stop it; untouched until the grace period (default 60 min) after the planned end, the planned window is recorded and marked "calendar time". Errors: none.
 - **R13:** Every private-time entry can be edited, relabelled or deleted at any time, including calendar-time and automatically started ones. Errors: as FNT-23 R3.
 - **R14:** The befordringsfradrag estimate (LL § 9 C) is shown separately for information (0 kr below 24 km a day); nothing is sent to Skat. Errors: none.
+
+- **R15:** Trips of 0 km (engine only switched on) are skipped on import, sync and migration, and counted as "skipped (0 km)" in the summary (user: "please filter out trips that are 0 km. No need to import trips where engine was just turned on."). Errors: a manual 0 km trip is refused naming the reason.
 
 ## Boundaries
 

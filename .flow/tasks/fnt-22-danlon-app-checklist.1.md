@@ -28,13 +28,18 @@ Pure function from a month report (day records with periods, private time, lunch
 - [ ] `cargo test` passes
 
 ## Done summary
-TBD
+Added the pure checklist model (src/checklist.rs): per day a status (to enter / nothing to enter / fix first), Komme/gå entries (private time and non-lunch gaps split the day, a lunch-window gap is the break) and one Kørsel registration (purpose, named stops, return trip, km, chain gaps). Stop names come from the new [checklist] home_name/workplace_name (default Hjem/Kontoret) via address/coordinate matching, else the day's calendar title, else the address. No Description field exists on either registration (R10).
 
+Tests in src/checklist.rs: private_time_splits_the_day (19 Nov), lunch_errand_is_the_break (4 Nov), unworked_gap_outside_lunch_splits_the_day, entries_add_up_to_worked_hours, statuses (weekend, Ferie, arrival without departure), return_trip_to_the_start (18 Nov incl. a rate-split trip, Kontoret → Kunde C, non-returning day), trips_that_do_not_chain_flag_the_gap (R9 error), stops_are_named_as_in_the_app (R6 incl. address fallback).
+
+Notes for .2: the module is marked expect(dead_code) in non-test builds (main.rs mod line, Config.checklist field) until the CLI uses it; remove those attributes then. Fix-first flags are the report remark parts not ending in " · private"; on weekends/days off without work, flags are ignored. Entries sum to worked hours exactly only with periods.round_to_minutes = 0 (rounding is applied to the report total, not to Danløn entries).
+
+baseline: green (cargo test 42 passed; clippy 1 pre-existing dead_code warning on Day.appointments, now resolved)
+stage: impl-review - skipped(config: REVIEW_MODE not set by conductor)
+Tier: not provided (model: claude-opus-5-5)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 8bce218563b92ece3978abe7598701cc9d0abffa
+- Tests: cargo test (50 passed), cargo clippy --all-targets (0 warnings)
 - PRs:
-
-
-
-

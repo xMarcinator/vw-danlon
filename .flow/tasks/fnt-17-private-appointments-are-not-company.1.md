@@ -35,9 +35,12 @@ All config structs use `deny_unknown_fields`; add new keys with defaults. Test h
 - [ ] `cargo test` passes
 
 ## Done summary
-TBD
+Timed calendar entries are now classified by title (new `calendar.private_keywords`, whole-word and case-insensitive, defaulting to Læge/Tandlæge/Fysioterapeut). A private appointment is kept out of work addresses, the planned norm and the missing-address warning. Its window is split at midnight, subtracted from the work periods before the break and rounding, stored on `Day.appointments`, and added to the day's note as `Læge 10:00–11:15 · private`. The test `month::tests::private_appointments_are_not_company_time` covers R1, R2, R4 and R5 (6.78 h example, Lægemiddelfirma non-match, no address warning, overlap deducted once, midnight split, empty list disables). Follow-up for .2: `Day.appointments` holds only spans, so trip classification by appointment address will need the location added. The field gives a dead-code warning until .2 reads it.
 
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: cda0e6a09901ef6925b2362f80dc0f4b9d1cb2cc
+- Tests: cargo test (24 passed), cargo run -- -c config.example.toml report 2026-10 -t examples/trips.csv (rc=0)
 - PRs:

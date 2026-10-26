@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::Weekday;
-use serde::Deserialize;
+use chrono::{NaiveDate, NaiveTime, Weekday};
+use serde::{Deserialize, Deserializer};
 
-#[derive(Debug, Deserialize)]
+use crate::address::Places;
+use crate::trips::Position;
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Your employee number in Danløn (must match exactly).
@@ -20,10 +23,31 @@ pub struct Config {
     /// work (e.g. when a colleague drives you on to the day's address), and
     /// home ↔ workplace trips are commuting, never mileage allowance.
     pub workplace: Option<String>,
+    /// Coordinates of home and the workplace (see [`PlacesConfig`]).
+    pub places: Option<PlacesConfig>,
     #[serde(default)]
     pub periods: PeriodConfig,
+    #[serde(default)]
+    pub lunch: LunchConfig,
     pub mileage: Option<MileageConfig>,
+    #[serde(default)]
+    pub checklist: ChecklistConfig,
+    #[serde(default)]
+    pub vacation: VacationConfig,
+    #[serde(default)]
+    pub home_working: HomeWorkingConfig,
+    #[serde(default)]
+    pub private: PrivateConfig,
+    /// The Min Volkswagen account (Connected Cars) for `trips sync`.
+    pub connected_cars: Option<ConnectedCarsConfig>,
     pub danlon: DanlonConfig,
+    /// The database beside the config file: trips, local state and the
+    /// calendar cache (see [`crate::db`]).
+    #[serde(skip)]
+    pub database: PathBuf,
+    /// `[places]` resolved against the configured addresses.
+    #[serde(skip)]
+    pub known_places: Places,
 }
 
 fn default_timezone() -> chrono_tz::Tz {
@@ -31,7 +55,7 @@ fn default_timezone() -> chrono_tz::Tz {
 }
 
 /// Norm hours per weekday, used when the calendar does not set the norm.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkWeek {
     pub mon: f64,
@@ -74,7 +98,7 @@ impl WorkWeek {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HolidayConfig {
     #[serde(default = "yes")]
@@ -91,6 +115,12 @@ fn yes() -> bool {
     true
 }
 
+fn default_private_keywords() -> Vec<String> {
+    ["Læge", "Tandlæge", "Fysioterapeut"]
+        .map(String::from)
+        .to_vec()
+}
+
 impl Default for HolidayConfig {
     fn default() -> Self {
         HolidayConfig {
@@ -102,7 +132,7 @@ impl Default for HolidayConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CalendarConfig {
     /// Proton Calendar share link (https://… or webcal://…) or a local .ics file.
@@ -112,9 +142,15 @@ pub struct CalendarConfig {
     #[serde(default = "yes")]
     pub norm_from_calendar: bool,
     /// If non-empty, only all-day events whose title contains one of these
-    /// words (case-insensitive) count as days off.
+    /// words (case-insensitive) count as days off. Vacation and feriefridag
+    /// events (`[vacation]`) always do.
     #[serde(default)]
     pub days_off_keywords: Vec<String>,
+    /// Timed events whose title contains one of these words (whole word,
+    /// case-insensitive) are private appointments: not company time, no work
+    /// address and no planned hours. An empty list disables this.
+    #[serde(default = "default_private_keywords")]
+    pub private_keywords: Vec<String>,
     /// Expected calendar name (X-WR-CALNAME). Guards against pointing the
     /// share link at the wrong calendar.
     pub name: Option<String>,
@@ -122,12 +158,72 @@ pub struct CalendarConfig {
     pub default_location: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// Working from home: a timed work event in the calendar that is home
+/// working counts its planned window as worked, without trips.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HomeWorkingConfig {
+    /// A work event whose title contains one of these words (whole word,
+    /// case-insensitive) is home working.
+    #[serde(default = "default_home_working_keywords")]
+    pub keywords: Vec<String>,
+    /// A work event whose location is the home address (`mileage.home`) is
+    /// home working.
+    #[serde(default = "yes")]
+    pub at_home_address: bool,
+}
+
+fn default_home_working_keywords() -> Vec<String> {
+    ["Hjemmearbejde", "Hjemme"].map(String::from).to_vec()
+}
+
+impl Default for HomeWorkingConfig {
+    fn default() -> Self {
+        HomeWorkingConfig {
+            keywords: default_home_working_keywords(),
+            at_home_address: true,
+        }
+    }
+}
+
+/// `[private]`: private calendar appointments start automatically.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateConfig {
+    /// A private appointment whose start has passed without a recording
+    /// shows as started automatically, and is recorded as "calendar time"
+    /// (its planned window) once `grace_minutes` after its end have passed
+    /// untouched.
+    #[serde(default = "yes")]
+    pub auto_start: bool,
+    #[serde(default = "default_grace_minutes")]
+    pub grace_minutes: u32,
+}
+
+fn default_grace_minutes() -> u32 {
+    60
+}
+
+impl Default for PrivateConfig {
+    fn default() -> Self {
+        PrivateConfig {
+            auto_start: true,
+            grace_minutes: default_grace_minutes(),
+        }
+    }
+}
+
+impl PrivateConfig {
+    /// How long after its planned end an untouched appointment waits before
+    /// its planned window is recorded.
+    pub fn grace(&self) -> chrono::Duration {
+        chrono::Duration::minutes(i64::from(self.grace_minutes))
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeriodConfig {
-    /// Unpaid break deducted from each worked day, in minutes.
-    #[serde(default)]
-    pub unpaid_break_minutes: u32,
     /// Round each day's worked time to the nearest N minutes (0 = no rounding).
     #[serde(default)]
     pub round_to_minutes: u32,
@@ -136,8 +232,199 @@ pub struct PeriodConfig {
     pub count_travel_time: bool,
 }
 
+/// The daily lunch break. It is deducted only where it overlaps time at work.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LunchConfig {
+    /// Default start of lunch.
+    #[serde(default = "default_lunch_start")]
+    pub start: NaiveTime,
+    /// Default length in minutes (0 = no lunch break).
+    #[serde(default = "default_lunch_minutes")]
+    pub minutes: u32,
+    /// Timed calendar events with this title (whole word, case-insensitive)
+    /// set the day's lunch window.
+    #[serde(default = "default_lunch_title")]
+    pub title: String,
+}
+
+fn default_lunch_start() -> NaiveTime {
+    NaiveTime::from_hms_opt(12, 0, 0).unwrap()
+}
+
+fn default_lunch_minutes() -> u32 {
+    30
+}
+
+fn default_lunch_title() -> String {
+    "Frokost".into()
+}
+
+impl Default for LunchConfig {
+    fn default() -> Self {
+        LunchConfig {
+            start: default_lunch_start(),
+            minutes: default_lunch_minutes(),
+            title: default_lunch_title(),
+        }
+    }
+}
+
+/// Coordinates ("56.1694, 9.5432", as copied from a map) of home and the
+/// workplace. A trip ending within `radius_m` of one counts as arriving
+/// there, whatever address the trip export shows.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacesConfig {
+    pub home: Option<String>,
+    pub workplace: Option<String>,
+    #[serde(default = "default_radius")]
+    pub radius_m: f64,
+}
+
+fn default_radius() -> f64 {
+    150.0
+}
+
+/// A "lat, lon" coordinate pair.
+fn parse_position(key: &str, s: &str) -> Result<Position> {
+    let parsed = s.split_once(',').and_then(|(lat, lon)| {
+        Some(Position {
+            lat: lat.trim().parse().ok()?,
+            lon: lon.trim().parse().ok()?,
+        })
+    });
+    match parsed {
+        Some(p) if (-90.0..=90.0).contains(&p.lat) && (-180.0..=180.0).contains(&p.lon) => Ok(p),
+        _ => bail!(
+            "{key} = {s:?} is not a coordinate; expected \"lat, lon\", e.g. \"56.1694, 9.5432\""
+        ),
+    }
+}
+
+/// The Danløn app checklist.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChecklistConfig {
+    /// Name of home as used in the Danløn app's routes.
+    #[serde(default = "default_home_name")]
+    pub home_name: String,
+    /// Name of the fixed workplace as used in the Danløn app's routes.
+    #[serde(default = "default_workplace_name")]
+    pub workplace_name: String,
+}
+
+fn default_home_name() -> String {
+    "Hjem".into()
+}
+
+fn default_workplace_name() -> String {
+    "Kontoret".into()
+}
+
+impl Default for ChecklistConfig {
+    fn default() -> Self {
+        ChecklistConfig {
+            home_name: default_home_name(),
+            workplace_name: default_workplace_name(),
+        }
+    }
+}
+
+/// Vacation (samtidighedsferie) from all-day calendar events.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VacationConfig {
+    /// All-day events whose title contains one of these words
+    /// (case-insensitive) are vacation, e.g. "Ferie" also matches "Juleferie".
+    #[serde(default = "default_vacation_keywords")]
+    pub keywords: Vec<String>,
+    /// All-day events whose title contains one of these words are
+    /// feriefridage; they win over `keywords`.
+    #[serde(default = "default_feriefridag_keywords")]
+    pub feriefridag_keywords: Vec<String>,
+    /// First day of employment (YYYY-MM-DD); vacation is earned from here.
+    #[serde(default, deserialize_with = "optional_date")]
+    pub employment_start: Option<NaiveDate>,
+    /// Feriefridage per holiday year (from the contract).
+    #[serde(default = "default_feriefridage")]
+    pub feriefridage: u32,
+    /// Vacation days earned per full month of employment.
+    #[serde(default = "default_days_per_month")]
+    pub days_per_month: f64,
+}
+
+fn default_vacation_keywords() -> Vec<String> {
+    vec!["Ferie".into()]
+}
+
+fn default_feriefridag_keywords() -> Vec<String> {
+    vec!["Feriefridag".into()]
+}
+
+fn default_feriefridage() -> u32 {
+    5
+}
+
+fn default_days_per_month() -> f64 {
+    2.08
+}
+
+impl Default for VacationConfig {
+    fn default() -> Self {
+        VacationConfig {
+            keywords: default_vacation_keywords(),
+            feriefridag_keywords: default_feriefridag_keywords(),
+            employment_start: None,
+            feriefridage: default_feriefridage(),
+            days_per_month: default_days_per_month(),
+        }
+    }
+}
+
+impl VacationConfig {
+    /// `days_per_month` in hundredths of a day (2,08 → 208).
+    pub fn hundredths_per_month(&self) -> i64 {
+        (self.days_per_month * 100.0).round() as i64
+    }
+}
+
+/// A date written as a TOML date (`2026-05-01`) or a string ("2026-05-01").
+fn optional_date<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NaiveDate>, D::Error> {
+    use serde::de::Error;
+    let text = match toml::Value::deserialize(d)? {
+        toml::Value::Datetime(dt) => dt.to_string(),
+        toml::Value::String(s) => s,
+        other => return Err(D::Error::custom(format!("expected a date, got {other}"))),
+    };
+    NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| D::Error::custom(format!("expected a date as YYYY-MM-DD, got {text:?}")))
+}
+
+/// The Min Volkswagen account, read through the Connected Cars backend. The
+/// password is never stored; `account connect` keeps a device token in the
+/// operating system's keychain, or in `token_file` when there is none.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectedCarsConfig {
+    /// Account email, offered as the default by `account connect`.
+    pub email: Option<String>,
+    /// Licence plate or vehicle id; needed when the account has several cars.
+    pub vehicle: Option<String>,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    /// Keep the device token in this file (relative to the config file,
+    /// readable only by you) instead of the keychain.
+    pub token_file: Option<String>,
+}
+
+fn default_namespace() -> String {
+    "semler:minvolkswagen".into()
+}
+
 /// Tax-free mileage allowance (skattefri kørselsgodtgørelse).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MileageConfig {
     pub driver_name: String,
@@ -146,9 +433,42 @@ pub struct MileageConfig {
     /// Your home address, as it appears in the trips' `from`/`to`. With
     /// `workplace` set, home ↔ workplace trips are always commuting.
     pub home: Option<String>,
+    /// Your address and CPR number for the logbook header (Skat requires
+    /// them on the logbook; an empty CPR prints a blank line to fill in).
+    /// The address defaults to `home`.
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub cpr: Option<String>,
     /// Rates per year, as published by Skatterådet.
     pub rates: Vec<MileageRate>,
+    /// You live in a yderkommune: km above 120 a day get the higher
+    /// befordringsfradrag rate (see [`FradragRate`]).
+    #[serde(default)]
+    pub yderkommune: bool,
+    /// Befordringsfradrag rates per year (LL § 9 C); 2026 is built in.
+    #[serde(default)]
+    pub fradrag_rates: Vec<FradragRate>,
 }
+
+/// Befordringsfradrag rates for one year: kr/km of the daily round trip
+/// from 25 to 120 km, above 120 km, and above 120 km in a yderkommune.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FradragRate {
+    pub year: i32,
+    pub low: f64,
+    pub high: f64,
+    pub yderkommune_high: f64,
+}
+
+/// The 2026 befordringsfradrag rates (skat.dk).
+pub const FRADRAG_2026: FradragRate = FradragRate {
+    year: 2026,
+    low: 3.17,
+    high: 1.59,
+    yderkommune_high: 3.51,
+};
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +496,21 @@ impl MileageConfig {
                 format!("no [[mileage.rates]] entry for {year} — add the rates from skat.dk")
             })
     }
+
+    /// The befordringsfradrag rates of `year`: the config's, else the
+    /// built-in ones for 2026.
+    pub fn fradrag_rate(&self, year: i32) -> Result<FradragRate> {
+        self.fradrag_rates
+            .iter()
+            .find(|r| r.year == year)
+            .copied()
+            .or((year == FRADRAG_2026.year).then_some(FRADRAG_2026))
+            .with_context(|| {
+                format!(
+                    "no [[mileage.fradrag_rates]] entry for {year} — add the rates from skat.dk"
+                )
+            })
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +524,7 @@ pub enum HoursReporting {
     Actual,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DanlonConfig {
     #[serde(default)]
@@ -208,39 +543,6 @@ pub struct DanlonConfig {
     /// amount, text, period_start, period_end, empty.
     #[serde(default = "default_columns")]
     pub columns: Vec<Column>,
-    #[serde(default)]
-    pub api: ApiConfig,
-}
-
-/// Danløn GraphQL API, used by `export --send` and `danlon …`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApiConfig {
-    #[serde(default = "default_api_url")]
-    pub url: String,
-    /// File holding the refresh token, used when DANLON_REFRESH_TOKEN is not
-    /// set. Relative to the config file.
-    pub refresh_token_file: Option<PathBuf>,
-    /// Danløn's company id. Default: the company the token belongs to.
-    pub company_id: Option<String>,
-    /// Danløn's employee id. Default: the employee whose number is
-    /// `employee_number`.
-    pub employee_id: Option<String>,
-}
-
-impl Default for ApiConfig {
-    fn default() -> Self {
-        ApiConfig {
-            url: default_api_url(),
-            refresh_token_file: None,
-            company_id: None,
-            employee_id: None,
-        }
-    }
-}
-
-fn default_api_url() -> String {
-    "https://api.danlon.dk/graphql".into()
 }
 
 fn default_delimiter() -> char {
@@ -274,8 +576,14 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        let mut cfg: Config =
-            toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+        Config::from_text(&text, path)
+    }
+
+    /// The config in `text`, read as if from the file at `path`: relative
+    /// paths and the database are resolved beside it.
+    pub fn from_text(text: &str, path: &Path) -> Result<Self> {
+        let mut cfg =
+            Config::parse(text).with_context(|| format!("parsing config {}", path.display()))?;
         // Resolve a local calendar path relative to the config file.
         if let Some(cal) = &mut cfg.calendar
             && !cal.source.contains("://")
@@ -284,12 +592,66 @@ impl Config {
             let base = path.parent().unwrap_or(Path::new("."));
             cal.source = base.join(&cal.source).to_string_lossy().into_owned();
         }
-        crate::danlon_api::resolve_token_file(
-            &mut cfg.danlon.api.refresh_token_file,
-            path.parent().unwrap_or(Path::new(".")),
-        );
+        let config_dir = path.parent().unwrap_or(Path::new("."));
+        if let Some(file) = cfg
+            .connected_cars
+            .as_mut()
+            .and_then(|c| c.token_file.as_mut())
+            && Path::new(file.as_str()).is_relative()
+        {
+            *file = config_dir.join(&*file).to_string_lossy().into_owned();
+        }
+        cfg.database = config_dir.join(crate::db::FILE_NAME);
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        let raw: toml::Table = toml::from_str(text)?;
+        if raw
+            .get("periods")
+            .and_then(|p| p.get("unpaid_break_minutes"))
+            .is_some()
+        {
+            bail!(
+                "periods.unpaid_break_minutes is no longer supported; set the lunch break in [lunch] (start, minutes, title)"
+            );
+        }
+        let mut cfg: Config = toml::from_str(text)?;
+        cfg.known_places = cfg.resolve_places()?;
+        Ok(cfg)
+    }
+
+    /// The `[places]` coordinates paired with the addresses they belong to.
+    fn resolve_places(&self) -> Result<Places> {
+        let Some(p) = &self.places else {
+            return Ok(Places::default());
+        };
+        if p.radius_m.is_nan() || p.radius_m <= 0.0 {
+            bail!("places.radius_m must be a positive number of metres");
+        }
+        let home = self.mileage.as_ref().and_then(|m| m.home.as_ref());
+        let mut known = Vec::new();
+        for (key, coord, address, needs) in [
+            ("places.home", &p.home, home, "mileage.home"),
+            (
+                "places.workplace",
+                &p.workplace,
+                self.workplace.as_ref(),
+                "workplace",
+            ),
+        ] {
+            let Some(coord) = coord else { continue };
+            let pos = parse_position(key, coord)?;
+            let Some(address) = address else {
+                bail!("{key} requires {needs} to be set");
+            };
+            known.push((address.clone(), pos));
+        }
+        Ok(Places {
+            known,
+            radius_m: p.radius_m,
+        })
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -299,6 +661,97 @@ impl Config {
         if self.mileage.is_some() && self.danlon.mileage_lonart.is_none() {
             bail!("[mileage] requires danlon.mileage_lonart");
         }
+        if self.vacation.days_per_month.is_nan() || self.vacation.days_per_month <= 0.0 {
+            bail!("vacation.days_per_month must be a positive number of days");
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lunch_defaults_and_old_break_key_names_lunch() {
+        let base = "employee_number = \"1\"\n[danlon]\n";
+        let cfg = Config::parse(base).unwrap();
+        assert_eq!(cfg.lunch.start, NaiveTime::from_hms_opt(12, 0, 0).unwrap());
+        assert_eq!(
+            (cfg.lunch.minutes, cfg.lunch.title.as_str()),
+            (30, "Frokost")
+        );
+
+        let cfg =
+            Config::parse(&format!("{base}[lunch]\nstart = \"11:30\"\nminutes = 45\n")).unwrap();
+        assert_eq!(cfg.lunch.start, NaiveTime::from_hms_opt(11, 30, 0).unwrap());
+        assert_eq!(cfg.lunch.minutes, 45);
+
+        let err =
+            Config::parse(&format!("{base}[periods]\nunpaid_break_minutes = 30\n")).unwrap_err();
+        assert!(err.to_string().contains("[lunch]"), "{err}");
+    }
+
+    #[test]
+    fn vacation_defaults_and_employment_start() {
+        let base = "employee_number = \"1\"\n[danlon]\n";
+        let v = Config::parse(base).unwrap().vacation;
+        assert_eq!(
+            (v.keywords.clone(), v.feriefridag_keywords.clone()),
+            (vec!["Ferie".to_string()], vec!["Feriefridag".to_string()])
+        );
+        assert_eq!(
+            (v.employment_start, v.feriefridage, v.hundredths_per_month()),
+            (None, 5, 208)
+        );
+
+        let may = NaiveDate::from_ymd_opt(2026, 5, 1);
+        for start in ["2026-05-01", "\"2026-05-01\""] {
+            let cfg =
+                Config::parse(&format!("{base}[vacation]\nemployment_start = {start}\n")).unwrap();
+            assert_eq!(cfg.vacation.employment_start, may);
+        }
+        let err = Config::parse(&format!("{base}[vacation]\nemployment_start = \"1 May\"\n"))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("YYYY-MM-DD"), "{err:#}");
+    }
+
+    #[test]
+    fn old_api_section_is_refused() {
+        let err = Config::parse("employee_number = \"1\"\n[danlon]\n[danlon.api]\nurl = \"x\"\n")
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("[danlon.api]") && msg.contains("unknown field `api`"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn places_coordinates() {
+        let base =
+            "employee_number = \"1\"\nworkplace = \"Kontorvej 1, 8000 Aarhus C\"\n[danlon]\n";
+        let cfg = Config::parse(&format!(
+            "{base}[places]\nworkplace = \"56.1694, 9.5432\"\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.known_places.radius_m, 150.0);
+        assert_eq!(
+            cfg.known_places.known,
+            [(
+                "Kontorvej 1, 8000 Aarhus C".to_string(),
+                Position {
+                    lat: 56.1694,
+                    lon: 9.5432
+                }
+            )]
+        );
+
+        for bad in ["\"56.1694\"", "\"95, 9.5\"", "\"nord, øst\""] {
+            let err = Config::parse(&format!("{base}[places]\nworkplace = {bad}\n")).unwrap_err();
+            assert!(err.to_string().contains("places.workplace"), "{err}");
+        }
+        let err = Config::parse(&format!("{base}[places]\nhome = \"56.1, 9.5\"\n")).unwrap_err();
+        assert!(err.to_string().contains("mileage.home"), "{err}");
     }
 }

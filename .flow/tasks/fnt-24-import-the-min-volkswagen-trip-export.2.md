@@ -22,9 +22,14 @@ Match trip addresses without a house number, and optionally by coordinates.
 
 
 ## Done summary
-TBD
+Trip addresses without a house number now match the same street with a number when postal codes agree; when neither side has a postal code, the towns must share a word. Optional `[places]` coordinates for home and workplace (radius_m, default 150 m) match a trip end by distance, and an invalid coordinate is refused naming its key. Tests: address::tests::street_without_house_number, address::tests::trip_end_near_place_coordinates, config::tests::places_coordinates. Manual check on the real export (2026-09): days with arrival at the workplace went from 0 to 17.
 
+Known limitation: a numberless address with a postal code on only one side matches on the street name alone, so "Lysbrohøjen, Lysbro" matches "Lysbrohøjen 3, 8600 Silkeborg" as the AC requires. The same rule also accepts a same-named street in another town when that side has no postal code.
+
+stage: impl-review - skipped(config: REVIEW_MODE=none)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: f62590263badcb56ecf3f88fe4270322f687aaba
+- Tests: cargo test, cargo clippy --all-targets
 - PRs:

@@ -32,7 +32,7 @@ FNT-24 imports the Excel export the user makes by hand in the Min Volkswagen app
 
 ## Acceptance Criteria
 
-- **R1:** `account connect` logs in once with email and password, registers a device and keeps only the device token in the keychain. Errors: wrong credentials → "login refused" with the service's message, nothing stored; no keychain available → refused naming the reason, nothing written to disk.
+- **R1:** `account connect` logs in once with email and password, registers a device and keeps only the device token in the keychain. Errors: wrong credentials → "login refused" with the service's message, nothing stored; no keychain available → refused naming the reason and the `token_file` option, nothing written to disk. With `connected_cars.token_file` set (user: "for testing here i dont have a secret service so please allow it to use a file"), the token is kept in that file instead, readable only by the user (0600) and git-ignored; the file holds the account email so another account's token is never used.
 - **R2:** `trips sync` fetches trips in a date range and merges them into the trip store; a trip already imported from an export is not added again. Errors: no token → message naming `account connect` and `trips import`; expired or deleted device token → "reconnect with account connect".
 - **R3:** A 429 is retried once after Retry-After; any other failure stops the sync with the HTTP status and leaves the store unchanged for that month. No partial month is written.
 - **R4:** `account disconnect` removes the token; `account status` shows connection and last sync time. No error surface beyond a missing keychain.

@@ -6,6 +6,14 @@ timezone = "Europe/Copenhagen"
 # where the calendar says you are elsewhere (e.g. a colleague drives you on).
 workplace = "Kontorvej 1, 8000 Aarhus C"
 
+# Optional coordinates ("lat, lon", e.g. copied from a map) of home and the
+# workplace. A trip ending within radius_m metres of one counts as arriving
+# there, whatever address the trip export shows. `home` needs mileage.home.
+# [places]
+# workplace = "56.1572, 10.2107"
+# home = "56.1890, 10.1820"
+# radius_m = 150
+
 # Fallback norm hours per weekday, used when the calendar does not set the
 # norm (calendar.norm_from_calendar = false or no [calendar]).
 [work_week]
@@ -34,18 +42,28 @@ source = "examples/arbejdstid.ics"   # or "https://calendar.proton.me/api/calend
 name = "Arbejdstid"                   # refuse to run if the link points at another calendar
 norm_from_calendar = true
 days_off_keywords = []                # e.g. ["ferie", "fri"] to filter all-day events
+private_keywords = ["Læge", "Tandlæge", "Fysioterapeut"]  # timed entries that are private, not work time
 # default_location = "Kontorvej 1, 8000 Aarhus C"   # for days without a located entry
 
 [periods]
-unpaid_break_minutes = 0
 round_to_minutes = 0
 count_travel_time = false   # true: include the drive to/from the work address
+
+# Lunch break, deducted only where it overlaps time at work. A timed calendar
+# event with this title sets the day's lunch instead; `lunch set` overrides both.
+[lunch]
+start = "12:00"
+minutes = 30
+title = "Frokost"
 
 # Tax-free mileage allowance (skattefri kørselsgodtgørelse).
 [mileage]
 driver_name = "Dit Navn"
 registration_number = "AB12345"
 home = "Hjemvej 3, 8200 Aarhus N"   # with workplace: home ↔ workplace is commuting, never reimbursed
+# address = "Hjemvej 3, 8200 Aarhus N"   # on the logbook (default: home)
+# cpr = ""                                # on the logbook; blank line when empty
+# yderkommune = false                     # befordringsfradrag: higher rate above 120 km a day
 
 # Rates from Skatterådet. VERIFY on skat.dk before use.
 [[mileage.rates]]
@@ -54,6 +72,44 @@ low = 3.94             # kr/km up to 20,000 km per year
 high = 2.28            # kr/km above
 threshold_km = 20000
 
+# Befordringsfradrag rates (LL § 9 C); 2026 is built in.
+# [[mileage.fradrag_rates]]
+# year = 2027
+# low = 3.17               # kr/km of the daily round trip from 25 to 120 km
+# high = 1.59              # kr/km above 120 km
+# yderkommune_high = 3.51  # above 120 km when yderkommune = true
+
+# Names of home and the workplace as used in the Danløn app's Kørsel routes.
+# Other stops are named by their calendar entry's title, else their address.
+# [checklist]
+# home_name = "Hjem"
+# workplace_name = "Kontoret"
+
+# Vacation (samtidighedsferie) from all-day calendar events; see `vacation`.
+# An all-day event whose title contains a word (any case, also inside a longer
+# word: "Juleferie") is vacation; only its working days count.
+# [vacation]
+# keywords = ["Ferie"]
+# feriefridag_keywords = ["Feriefridag"]   # wins over keywords
+# employment_start = 2026-05-01            # earning starts here; unset: from 1 Sep
+# feriefridage = 5                         # per holiday year, from the contract
+# days_per_month = 2.08                    # days earned per full month
+
+# Working from home: a timed work event whose title has one of these words
+# (whole word, any case), or whose location is mileage.home, counts its
+# planned window as worked without trips; see also `home start|stop`.
+# [home_working]
+# keywords = ["Hjemmearbejde", "Hjemme"]
+# at_home_address = true
+
+# Private calendar appointments (see calendar.private_keywords) start
+# automatically when their planned start has passed; one you have not
+# started, stopped or changed by grace_minutes after its planned end is
+# recorded with its planned window, marked "calendar time".
+# [private]
+# auto_start = true
+# grace_minutes = 60
+
 [danlon]
 # "none": Danløn reports its own Normtimer (160,33 for 37 h/week), which is
 #         what Skat expects for full-time monthly salaried employees.
@@ -61,7 +117,7 @@ threshold_km = 20000
 hours = "none"
 # hours_lonart = "XXXX"
 # Lønart for skattefri kørselsgodtgørelse. 39 = Kilometerpenge: Danløn takes
-# only the km and applies its own rate. Check with `danlon info`.
+# only the km and applies its own rate. Check the code in Danløn.
 mileage_lonart = "39"
 # File layout — check against Danløn's file description before first import.
 delimiter = ";"
@@ -69,9 +125,11 @@ decimal_comma = true
 header = false
 columns = ["employee", "lonart", "quantity"]   # code 39 allows no rate
 
-# Sending directly with `export --send` (Danløn GraphQL API). The refresh
-# token comes from DANLON_REFRESH_TOKEN, or from this file:
-[danlon.api]
-# refresh_token_file = "danlon-token"   # relative to this config file
-# company_id = ""    # default: the company the token belongs to
-# employee_id = ""   # default: the employee whose number is employee_number
+
+# Optional: sync trips from your Min Volkswagen account (`account connect`,
+# unofficial access). Only a device token is kept, in the system keychain, or
+# in `token_file` (readable only by you) on machines without one.
+# [connected_cars]
+# email = "you@example.com"
+# vehicle = "AB12345"                    # only if the account has several cars
+# token_file = "connected-cars-token"    # relative to this file; never committed

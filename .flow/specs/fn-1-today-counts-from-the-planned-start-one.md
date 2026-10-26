@@ -23,7 +23,7 @@ Using the app on the phone showed three problems: home ↔ work drives were paid
 ## API Contracts
 
 - `service::work_today(cfg, state, calendar, trips, now)` → state, since, worked so far, expected so far, next private appointment, actions available.
-- App Month: one work card — "Start work" (starts the home-working timer) when not working; while working a split button "Private time ▾" (menu: private time for the next/current appointment, private time without an event, stop work); while private time runs "Stop private"; under it "Next private …" with the collapsible private list.
+- App Month: one work card — "Start work" (starts the home-working timer) when not working; while working a split button "Private time ▾" (menu: start private time now, private time started earlier…, stop work — no appointments); while private time runs "Stop private"; under it "Next private …" with the collapsible private list.
 - CLI `report` today row: "so far" values; no flag today.
 
 ## Acceptance Criteria
@@ -31,7 +31,7 @@ Using the app on the phone showed three problems: home ↔ work drives were paid
 - **R1:** Today's expected time counts from the planned start up to now (minus lunch passed); the difference counts lateness in the month totals and the Day view. Errors: none.
 - **R2:** Today is not flagged for a missing departure or no driving before the day is over. Errors: none.
 - **R3:** With no `workplace` set, the workplace is detected from the calendar and used, so home ↔ that workplace is commute (never reimbursed); Settings and Mileage say it was detected and offer to save it. Errors: no clear candidate → Mileage warns that no fixed workplace is set.
-- **R4:** Month has one work card: Start work when not working; split button Private time ▾ while working (by trip or home timer); Stop private while private time runs; Next private row with the collapsible list. Errors: as FNT-23/FNT-26.
+- **R4:** Month has one work card: Start work when not working; split button Private time ▾ while working (by trip or home timer) — its menu holds no appointments, only "Start private time now", "Private time started earlier…" and "Stop work"; Stop private while private time runs; the Next private row has its own Start button for that appointment (user: "the split button should not include the apointments. The first entry there should get a start button.") and the chevron opens the collapsible list, which shows only today's private entries (planned, running, recorded) (user: "the planned events list should only show the current day ones"). Errors: as FNT-23/FNT-26.
 - **R5:** Day view for today shows worked so far, expected so far, difference and lateness, and the "no drive home yet is fine" note. Errors: none.
 - **R6:** A new signed APK (0.3.0) installs over 0.2.0. Errors: none.
 
