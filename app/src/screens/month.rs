@@ -11,7 +11,7 @@ use vw_danlon::mileage::MileageMonth;
 use vw_danlon::month::{Day, Month, OffReason};
 use vw_danlon::service::{PrivateItem, PrivateState, WorkAction, WorkState, WorkToday};
 
-use super::period::{HOURS_VIEWS, Period, PeriodPicker, View};
+use super::period::{Bar, HOURS_VIEWS, Period, View, dock};
 use super::week::{self, in_week, week_mileage, week_months};
 use super::{
     Action, Computed, Loaded, Message, Panel, PrivateList, apply, diff_class, hm, hours, kroner,
@@ -258,18 +258,30 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let monday = p.monday();
     let m2 = month2();
     let today_now = super::now(&cfg).date_naive();
-    let head = move || {
-        rsx! {
-            div { class: "period-head",
-                PeriodPicker { period: p, today: today_now, views: HOURS_VIEWS.to_vec(), on_change: change }
-                button {
-                    class: "primary-sm wide-only",
-                    onclick: move |_| { let mut sc = screen; sc.set(Screen::Danlon) },
-                    Icon { d: Screen::Danlon.icon(), size: 15 }
-                    "Danløn app checklist"
-                }
+    let bar = Bar::picker(p, today_now, &HOURS_VIEWS, change);
+    let head = || {
+        bar.top(rsx! {
+            button {
+                class: "primary-sm wide-only",
+                onclick: move |_| { let mut sc = screen; sc.set(Screen::Danlon) },
+                Icon { d: Screen::Danlon.icon(), size: 15 }
+                "Danløn app checklist"
             }
-        }
+        })
+    };
+    // The phone's dock: the work buttons over the period row while today's
+    // work is shown.
+    let docked = |work: Option<(WorkToday, NaiveDateTime)>,
+                  message: Option<Result<String, String>>| {
+        dock(
+            &bar,
+            rsx! {
+                if let Some((work, now)) = work {
+                    {status(message)}
+                    CardActions { work, now, on_action }
+                }
+            },
+        )
     };
     let title = p.title(today_now).0;
     let failed = |e: &str| {
@@ -279,12 +291,14 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                 div { b { "The month can't be shown: " } "{e}" }
             }
+            {docked(None, None)}
         }
     };
     let loading = || {
         rsx! {
             {head()}
             p { class: "placeholder", role: "status", "Loading {title}…" }
+            {docked(None, None)}
         }
     };
     let loaded = loaded.read();
@@ -323,6 +337,12 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let now = computed.now;
     let today = now.date_naive();
 
+    // Today's work, when the period shown holds today.
+    let today_work = pairs
+        .iter()
+        .find_map(|(_, c)| c.view.work.clone())
+        .filter(|_| p.is_current(today));
+
     if p.view == View::Day
         && let Some((l, c)) = pairs.iter().find(|(l, _)| l.month.contains(p.anchor))
     {
@@ -340,6 +360,10 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 adding,
                 sheet,
             })}
+            {docked(
+                today_work.map(|w| (w, now.naive_local())),
+                message_for(&message(), Panel::Private),
+            )}
         };
     }
 
@@ -560,6 +584,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         }
 
         {day_rows(&listed, &business_km, today, not_at_work_yet, days_note, go)}
+        {docked(today_work.map(|w| (w, now.naive_local())), None)}
     }
 }
 
@@ -889,7 +914,6 @@ fn WorkCard(
                     b { class: "{head.tone}", "{head.title}" }
                 }
             }
-            CardActions { work: work.clone(), now: live, on_action }
             if let Some(since) = auto_since {
                 AutoStart { since, on_action }
             }
@@ -967,10 +991,9 @@ fn WorkCard(
     }
 }
 
-/// The work card's one row of buttons on a narrow screen: Start work ▾ when
-/// not working; Private time ▾ and Stop work at work or at home; Stop
-/// private time while it runs. ▾ opens "Started at" in place, for a start
-/// earlier today.
+/// The work buttons in the phone's dock: Start work ▾ when not working;
+/// Private time ▾ and Stop work at work or at home; Stop private time while
+/// it runs. ▾ opens "Started at" above them, for a start earlier today.
 #[component]
 fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, bool>) -> Element {
     let mut earlier = use_signal(|| false);
@@ -1005,43 +1028,8 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
     let private = matches!(work.state, WorkState::Private { .. });
     let open = earlier() && caret_label.is_some();
     rsx! {
-        div { class: "card-actions narrow-only",
-            span { class: "split card-split", role: "group", "aria-label": "{main}",
-                button {
-                    class: if private { "pt-btn private" } else if caret_label.is_some() { "pt-btn split-main" } else { "pt-btn" },
-                    onclick: move |_| {
-                        earlier.set(false);
-                        on_action.call(main_action.clone());
-                    },
-                    "{main}"
-                }
-                if let Some(label) = caret_label {
-                    button {
-                        class: "pt-btn split-caret",
-                        "aria-expanded": if open { "true" } else { "false" },
-                        "aria-controls": "pt-earlier-row",
-                        "aria-label": "{label}",
-                        onclick: move |_| {
-                            at.set(hm(now));
-                            earlier.set(!open);
-                        },
-                        Icon { d: "m6 9 6 6 6-6", size: 16 }
-                    }
-                }
-            }
-            if let Some(action) = stop {
-                button {
-                    class: "pt-btn stop-work",
-                    onclick: move |_| {
-                        earlier.set(false);
-                        on_action.call(action.clone());
-                    },
-                    "Stop work"
-                }
-            }
-        }
         if open {
-            div { id: "pt-earlier-row", class: "card-earlier narrow-only",
+            div { id: "pt-earlier-row", class: "card-earlier dock-earlier",
                 label { r#for: "pt-earlier-card", "Started at" }
                 input {
                     id: "pt-earlier-card",
@@ -1062,6 +1050,41 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                         }
                     },
                     "Start"
+                }
+            }
+        }
+        div { class: "dock-work",
+            span { class: "split dock-split", role: "group", "aria-label": "{main}",
+                button {
+                    class: if private { "pt-btn private" } else if working { "pt-btn split-main working" } else { "pt-btn split-main" },
+                    onclick: move |_| {
+                        earlier.set(false);
+                        on_action.call(main_action.clone());
+                    },
+                    "{main}"
+                }
+                if let Some(label) = caret_label {
+                    button {
+                        class: if working { "pt-btn split-caret working" } else { "pt-btn split-caret" },
+                        "aria-expanded": if open { "true" } else { "false" },
+                        "aria-controls": "pt-earlier-row",
+                        "aria-label": "{label}",
+                        onclick: move |_| {
+                            at.set(hm(now));
+                            earlier.set(!open);
+                        },
+                        Icon { d: "m6 9 6 6 6-6", size: 16 }
+                    }
+                }
+            }
+            if let Some(action) = stop {
+                button {
+                    class: "pt-btn stop-work",
+                    onclick: move |_| {
+                        earlier.set(false);
+                        on_action.call(action.clone());
+                    },
+                    "Stop work"
                 }
             }
         }

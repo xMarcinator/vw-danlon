@@ -691,9 +691,224 @@ body {
   cursor: default;
 }
 
+/* The phone's page header and dock; wide, the card above is used. */
+.page-head,
+.thumb-dock {
+  display: none;
+}
+
 @media (max-width: 719px) {
+  /* The title heads the page; tapping it goes back to the current period. */
   .period-bar {
+    display: none;
+  }
+
+  .page-head {
     flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 4px 0;
+  }
+
+  .page-head h1 {
+    flex-grow: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 24px;
+    font-weight: 600;
+  }
+
+  .page-title {
+    font: inherit;
+    max-width: 100%;
+    min-height: 44px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .page-title svg {
+    flex-shrink: 0;
+    color: var(--acc-text);
+  }
+
+  .page-title:disabled {
+    color: var(--text);
+    cursor: default;
+  }
+
+  .page-sub {
+    flex-shrink: 0;
+    font-size: 13px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The dock: the page's main actions and the period row, kept right
+     above the tab bar. It is the page's last child, so the last row of
+     the page scrolls up above it and is never hidden behind it. */
+  .content:has(> .thumb-dock) {
+    padding-bottom: 0;
+    scroll-padding-bottom: 200px;
+  }
+
+  .thumb-dock {
+    position: sticky;
+    bottom: 0;
+    z-index: 3;
+    flex-shrink: 0;
+    margin: auto -12px 0;
+    padding: 12px 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: var(--surf);
+    border-top: 1px solid var(--line);
+    box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.1);
+  }
+
+  .dock-period {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr) 48px;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .dock-period .period-arrow {
+    width: 48px;
+    height: 48px;
+  }
+
+  .segmented.dock-seg {
+    padding: 3px;
+    border-radius: 12px;
+  }
+
+  .segmented.dock-seg button {
+    min-height: 44px;
+    border-radius: 9px;
+    font-size: 15px;
+  }
+
+  .dock-period .period-note {
+    text-align: center;
+    font-size: 14px;
+  }
+
+  /* Hours: Start work, or Private time and Stop work side by side. */
+  .dock-work {
+    display: flex;
+    gap: 10px;
+  }
+
+  .dock-work .dock-split,
+  .dock-work .stop-work {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .dock-work .dock-split {
+    display: flex;
+  }
+
+  .dock-work .pt-btn {
+    min-height: 56px;
+    padding: 0 10px;
+    border-radius: 14px;
+    font-size: 17px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .dock-work .pt-btn.split-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    border-radius: 14px 0 0 14px;
+  }
+
+  .dock-work .pt-btn.split-caret {
+    flex: 0 0 44px;
+    width: 44px;
+    padding: 0;
+    border-radius: 0 14px 14px 0;
+  }
+
+  .dock-work .pt-btn.private {
+    flex: 1 1 auto;
+  }
+
+  .dock-work .pt-btn.working {
+    border: 1px solid var(--info);
+    background: none;
+    color: var(--info);
+  }
+
+  .dock-work .pt-btn.split-main.working {
+    border-right: none;
+  }
+
+  .dock-work .pt-btn.stop-work {
+    border: 1px solid var(--ctl);
+    background: none;
+    color: var(--text);
+  }
+
+  .dock-earlier {
+    display: flex;
+    padding: 0;
+  }
+
+  /* Danløn: Open Danløn app and Mark the next day entered. */
+  .dock-pair {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .dock-pair > :only-child {
+    grid-column: 1 / -1;
+  }
+
+  .dock-btn {
+    font-size: 16px;
+    min-height: 56px;
+    padding: 0 10px;
+    border: 1px solid var(--ctl);
+    border-radius: 14px;
+    background: none;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .dock-btn.primary {
+    border: none;
+    background: var(--acc);
+    color: var(--on-acc);
+    font-weight: 600;
+  }
+
+  /* Mileage: Reimbursable, All driving and Fradrag. */
+  .thumb-dock .mileage-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 3px;
+    border-radius: 10px;
+  }
+
+  .thumb-dock .mileage-tabs button {
+    height: auto;
+    min-height: 44px;
+    padding: 0 6px;
+    border-radius: 9px;
+    font-size: 14px;
   }
 }
 
@@ -1153,8 +1368,8 @@ table.days tr.flagged {
   color: var(--sub);
 }
 
-/* The narrow work card: status over the full width (it wraps), then the
-   buttons in their own row, Stop work as a link at the bottom. */
+/* The narrow work card: status over the full width (it wraps); its
+   buttons are in the dock. */
 .work-card > .pt-head {
   align-items: flex-start;
   padding: 12px 14px 0;
@@ -1175,17 +1390,6 @@ table.days tr.flagged {
 
 .work-card > .pt-head + .pt-status {
   margin-top: 10px;
-}
-
-.card-actions {
-  gap: 8px;
-  padding: 12px 14px 14px;
-}
-
-.card-actions .pt-btn {
-  flex: 1 1 0;
-  min-width: 0;
-  padding: 0 12px;
 }
 
 .pt-btn.secondary {
@@ -1323,7 +1527,6 @@ table.days tr.flagged {
 
 @media (max-width: 719px) {
   .pt-head.narrow-only,
-  .card-actions.narrow-only,
   .card-earlier.narrow-only {
     display: flex !important;
   }
@@ -2467,6 +2670,7 @@ table.logbook tr.total td {
   .no-print,
   .content > h1,
   .content > .period-head,
+  .content > .thumb-dock,
   .content > .screen-head {
     display: none !important;
   }
@@ -2668,19 +2872,6 @@ table.rates td:first-child {
 }
 
 @media (max-width: 719px) {
-  .mileage-tabs.narrow-only {
-    display: grid !important;
-    grid-template-columns: 1fr 1fr 1fr;
-    padding: 3px;
-    border-radius: 10px;
-  }
-
-  .mileage-tabs button {
-    font-size: 14px;
-    min-height: 40px;
-    border-radius: 8px;
-  }
-
   .trip-entry .biz-check input {
     width: 18px;
     height: 18px;
@@ -2710,31 +2901,6 @@ table.rates td:first-child {
 .pill-btn.private {
   background: var(--info);
   color: var(--on-acc);
-}
-
-.card-actions .card-split {
-  flex: 1 1 0;
-  min-width: 0;
-  display: inline-flex;
-}
-
-.card-actions .card-split .pt-btn {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.card-actions .card-split .pt-btn.split-caret {
-  flex: 0 0 44px;
-  width: 44px;
-  padding: 0;
-}
-
-.card-actions .pt-btn.stop-work {
-  flex: 0 0 auto;
-  padding: 0 16px;
-  border: 1px solid var(--ctl);
-  background: var(--surf);
-  color: var(--bad);
 }
 
 .card-earlier .grow {
@@ -2984,6 +3150,7 @@ table.rates td:first-child {
 .src-chip:active,
 .period-arrow:active,
 .period-today:not(:disabled):active,
+.dock-btn:not(.primary):active,
 .segmented button:active,
 .seg-tabs button:active,
 .mileage-tabs button:active {
@@ -2991,6 +3158,7 @@ table.rates td:first-child {
 }
 
 .pt-btn:active,
+.dock-btn.primary:active,
 .pill-btn:active,
 .primary:active,
 .primary-sm:active,

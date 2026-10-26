@@ -16,9 +16,7 @@ use vw_danlon::trips::Trip;
 
 use super::kroner;
 use super::month::month_title;
-use super::period::{
-    PagePeriods, Period, PeriodPicker, View, WEEK_MONTH, YearBar, calendar_year_title,
-};
+use super::period::{Bar, PagePeriods, Period, View, WEEK_MONTH, calendar_year_title, dock};
 use crate::setup::{self, MileageForm, Setup};
 use crate::{Icon, Screen};
 
@@ -412,44 +410,59 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let (m, m2) = months();
     let shown = tab();
     let today = super::now(&cfg).date_naive();
-    let head = if shown == Tab::Fradrag {
+    let bar = if shown == Tab::Fradrag {
         let year = fradrag_year();
-        let (title, sub) = calendar_year_title(year, today);
-        rsx! {
-            div { class: "period-head",
-                YearBar {
-                    title,
-                    sub,
-                    unit: "year",
-                    note: "Whole calendar years",
-                    current: year == today.year(),
-                    on_step: move |by: i32| {
-                        copied.set(None);
-                        fradrag_year += by;
-                    },
-                    on_today: move |_| {
-                        copied.set(None);
-                        fradrag_year.set(today.year());
-                    },
-                }
-            }
-        }
+        Bar::years(
+            calendar_year_title(year, today),
+            "year",
+            "Whole calendar years",
+            year == today.year(),
+            Callback::new(move |by: i32| {
+                copied.set(None);
+                fradrag_year += by;
+            }),
+            Callback::new(move |_| {
+                copied.set(None);
+                fradrag_year.set(today.year());
+            }),
+        )
     } else {
+        Bar::picker(
+            p,
+            today,
+            &WEEK_MONTH,
+            Callback::new(move |next: Period| {
+                message.set(None);
+                printing.set(false);
+                period.set(next);
+            }),
+        )
+    };
+    let head = bar.top(rsx! {});
+    let tabs = move |class: &'static str| {
         rsx! {
-            div { class: "period-head",
-                PeriodPicker {
-                    period: p,
-                    today,
-                    views: WEEK_MONTH.to_vec(),
-                    on_change: move |next: Period| {
-                        message.set(None);
-                        printing.set(false);
-                        period.set(next);
-                    },
+            div { class: "{class}", role: "tablist", "aria-label": "Show",
+                for (label , t) in [
+                    ("Reimbursable", Tab::Reimbursable),
+                    ("All driving", Tab::All),
+                    ("Fradrag", Tab::Fradrag),
+                ]
+                {
+                    button {
+                        role: "tab",
+                        "aria-selected": if shown == t { "true" } else { "false" },
+                        onclick: move |_| {
+                            copied.set(None);
+                            tab.set(t);
+                        },
+                        "{label}"
+                    }
                 }
             }
         }
     };
+    // The phone's dock: what to show over the period row.
+    let dock = dock(&bar, tabs("mileage-tabs"));
     if setup.read().trips.as_ref().is_none_or(|t| t.count == 0) {
         return rsx! {
             {head}
@@ -460,6 +473,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
                 }
             }
+            {dock}
         };
     }
     let mut reload = loaded;
@@ -475,12 +489,14 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
                 }
             }
+            {dock.clone()}
         }
     };
     let loading = || {
         rsx! {
             {head.clone()}
             p { class: "placeholder", role: "status", "Loading {p.name()}…" }
+            {dock.clone()}
         }
     };
     let loaded = loaded.read();
@@ -509,6 +525,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             return rsx! {
                 {head}
                 div { class: "alert", role: "alert", "{e}" }
+                {dock}
             };
         }
     };
@@ -518,6 +535,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             return rsx! {
                 {head}
                 div { class: "alert", role: "alert", "{e}" }
+                {dock}
             };
         }
     };
@@ -533,6 +551,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 page: mileage::logbook_html(mcfg, &mil),
                 on_close: move |_| printing.set(false),
             }
+            {dock}
         };
     }
     let mut parts = vec![&mil];
@@ -555,28 +574,6 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let skipped_km: f64 = skipped.iter().map(|(_, _, k)| k).fold(0.0, |a, b| a + b);
     let name = p.name();
     let month_name = month_title(m);
-    let tabs = move |class: &'static str| {
-        rsx! {
-            div { class: "{class}", role: "tablist", "aria-label": "Show",
-                for (label , t) in [
-                    ("Reimbursable", Tab::Reimbursable),
-                    ("All driving", Tab::All),
-                    ("Fradrag", Tab::Fradrag),
-                ]
-                {
-                    button {
-                        role: "tab",
-                        "aria-selected": if shown == t { "true" } else { "false" },
-                        onclick: move |_| {
-                            copied.set(None);
-                            tab.set(t);
-                        },
-                        "{label}"
-                    }
-                }
-            }
-        }
-    };
     let mut set_business = move |start: chrono::DateTime<chrono_tz::Tz>, business: Option<bool>| {
         let Some(cfg) = setup.peek().config.clone() else {
             return;
@@ -630,7 +627,6 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             },
             _ => rsx! {},
         }
-        {tabs("mileage-tabs narrow-only")}
         if shown == Tab::Fradrag {
             match &*fradrag.read() {
                 None => rsx! { p { class: "placeholder", role: "status", "Loading {fradrag_year}…" } },
@@ -836,6 +832,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 "Print {month_name} for signature"
             }
         }
+        {dock}
     }
 }
 

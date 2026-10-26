@@ -9,7 +9,7 @@ use vw_danlon::config::Config;
 use vw_danlon::service::{self, VacationView};
 use vw_danlon::vacation::{Days, HolidayYear, Period, PeriodStatus, Rules, YearBalance};
 
-use super::period::{PagePeriods, YearBar, holiday_year_title};
+use super::period::{Bar, PagePeriods, dock, holiday_year_title};
 use crate::setup::Setup;
 
 fn date(d: NaiveDate) -> String {
@@ -176,20 +176,16 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
     let shown = year();
     let today = super::now(&cfg).date_naive();
     let this_year = HolidayYear::containing(today);
-    let (title, sub) = holiday_year_title(shown, today);
-    let head = rsx! {
-        div { class: "period-head",
-            YearBar {
-                title,
-                sub,
-                unit: "holiday year",
-                note: "Whole holiday years",
-                current: shown == this_year,
-                on_step: move |by: i32| year.set(HolidayYear(shown.0 + by)),
-                on_today: move |_| year.set(this_year),
-            }
-        }
-    };
+    let bar = Bar::years(
+        holiday_year_title(shown, today),
+        "holiday year",
+        "Whole holiday years",
+        shown == this_year,
+        Callback::new(move |by: i32| year.set(HolidayYear(shown.0 + by))),
+        Callback::new(move |_| year.set(this_year)),
+    );
+    let head = bar.top(rsx! {});
+    let dock = dock(&bar, rsx! {});
     let loaded = loaded.read();
     let v = match &*loaded {
         Some(Ok((on, v))) if *on == day() => v,
@@ -200,12 +196,14 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
                     span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                     div { b { "Vacation can't be shown: " } "{e}" }
                 }
+                {dock}
             };
         }
         _ => {
             return rsx! {
                 {head}
                 p { class: "placeholder", role: "status", "Loading the calendar…" }
+                {dock}
             };
         }
     };
@@ -300,6 +298,7 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
                 }
             }
         }
+        {dock}
     }
 }
 

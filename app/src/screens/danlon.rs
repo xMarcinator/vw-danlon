@@ -15,7 +15,7 @@ use vw_danlon::service;
 
 use vw_danlon::trips::Trip;
 
-use super::period::{PagePeriods, Period, PeriodPicker, WEEK_MONTH};
+use super::period::{Bar, PagePeriods, Period, WEEK_MONTH, dock};
 use crate::setup::Setup;
 use crate::{Icon, Screen};
 
@@ -127,31 +127,44 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let selected = period();
     let (m, m2) = months();
     let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
+    let bar = Bar::picker(
+        selected,
+        today,
+        &WEEK_MONTH,
+        Callback::new(move |next: Period| {
+            message.set(None);
+            menu.set(None);
+            period.set(next);
+        }),
+    );
+    let open_danlon = move |_| {
+        let result = crate::platform::open_danlon().map_err(|e| format!("{e:#}"));
+        message.set(Some(result));
+    };
     let head = rsx! {
-        div { class: "period-head",
-            PeriodPicker {
-                period: selected,
-                today,
-                views: WEEK_MONTH.to_vec(),
-                on_change: move |next: Period| {
-                    message.set(None);
-                    menu.set(None);
-                    period.set(next);
-                },
-            }
-        }
+        {bar.top(rsx! {})}
         div { class: "screen-head",
             span { class: "note grow", "Nothing is sent from here" }
             button {
-                class: "small-btn primary-sm",
-                onclick: move |_| {
-                    let result = crate::platform::open_danlon().map_err(|e| format!("{e:#}"));
-                    message.set(Some(result));
-                },
+                class: "small-btn primary-sm wide-only",
+                onclick: open_danlon,
                 Icon { d: OPEN_ICON, size: 15 }
                 "Open Danløn app"
             }
         }
+    };
+    // The phone's dock: Open Danløn app and, when there is a day to enter,
+    // Mark it entered, over the period row.
+    let docked = |mark: Option<Element>| {
+        dock(
+            &bar,
+            rsx! {
+                div { class: "dock-pair",
+                    button { class: "dock-btn", onclick: open_danlon, "Open Danløn app" }
+                    {mark}
+                }
+            },
+        )
     };
     let name = selected.name();
     let failed = |e: &str| {
@@ -165,12 +178,14 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
                 }
             }
+            {docked(None)}
         }
     };
     let loading = || {
         rsx! {
             {head.clone()}
             p { class: "placeholder", role: "status", "Loading {name}…" }
+            {docked(None)}
         }
     };
     let loaded = loaded.read();
@@ -201,6 +216,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 return rsx! {
                     {head}
                     div { class: "alert", role: "alert", "{e:#}" }
+                    {docked(None)}
                 };
             }
         }
@@ -231,6 +247,25 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         .map(|d| (d.clone(), entered.contains(&d.date)))
         .collect();
     let days = all_days.clone();
+    // The next day to enter, ticked off from the dock.
+    let mark = next.map(|date| {
+        let days = all_days.clone();
+        let label = format!("Mark {} entered", date.format("%-d %b"));
+        rsx! {
+            button {
+                class: "dock-btn primary",
+                onclick: move |_| {
+                    let Some(cfg) = setup.peek().config.clone() else { return };
+                    let result = service::set_entered(&cfg, &days, date, true)
+                        .map(|_| format!("{date}: entered"))
+                        .map_err(|e| format!("{e:#}"));
+                    message.set(Some(result));
+                    ticks += 1;
+                },
+                "{label}"
+            }
+        }
+    });
 
     rsx! {
         {head}
@@ -443,6 +478,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         if let Some((_, t)) = toast() {
             div { class: "toast", role: "status", "{t}" }
         }
+        {docked(mark)}
     }
 }
 

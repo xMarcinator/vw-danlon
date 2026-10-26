@@ -2,8 +2,10 @@
 //! ›, then the views to choose from (Day · Week · Month on Hours, Week ·
 //! Month on Mileage and Danløn) and Today, which is enabled only when
 //! another period is shown. A page that steps whole years (Vacation, Mileage
-//! → Fradrag) shows a note instead of the views. And each page's period: the
-//! view and the date it is anchored on, kept while the app runs.
+//! → Fradrag) shows a note instead of the views. On a phone the title heads
+//! the page and the arrows and views sit in a dock above the tab bar. And
+//! each page's period: the view and the date it is anchored on, kept while
+//! the app runs.
 
 use chrono::{Datelike, Duration, NaiveDate};
 use dioxus::prelude::*;
@@ -203,128 +205,208 @@ impl Period {
 /// The calendar icon of the Today button, with the day marked.
 const TODAY_ICON: &str = "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4M12 14v3";
 
-/// The period selector. `views` are the choices of the switch; with none,
-/// `note` is shown in its place (a page that steps whole years). `unit` is
-/// what the arrows step, for their labels.
-#[component]
-pub fn PeriodBar(
-    title: String,
-    sub: String,
-    unit: &'static str,
-    views: Vec<View>,
-    shown: Option<View>,
-    note: Option<String>,
-    current: bool,
-    on_step: Callback<i32>,
-    on_pick: Callback<View>,
-    on_today: Callback<()>,
-) -> Element {
-    rsx! {
-        nav { class: "period-bar", "aria-label": "Period",
-            div { class: "period-row",
-                button {
-                    r#type: "button",
-                    class: "period-arrow",
-                    "aria-label": "Previous {unit}",
-                    onclick: move |_| on_step.call(-1),
-                    Icon { d: "m15 6-6 6 6 6", size: 20 }
-                }
-                div { class: "period-title",
-                    h1 { "{title}" }
-                    span { class: "period-sub", "{sub}" }
-                }
-                button {
-                    r#type: "button",
-                    class: "period-arrow",
-                    "aria-label": "Next {unit}",
-                    onclick: move |_| on_step.call(1),
-                    Icon { d: "m9 6 6 6-6 6", size: 20 }
-                }
-            }
-            div { class: "period-row2",
-                if views.is_empty() {
-                    span { class: "period-note", {note.unwrap_or_default()} }
-                } else {
-                    div {
-                        class: "segmented period-seg",
-                        style: "grid-template-columns: repeat({views.len()}, minmax(0, 1fr))",
-                        role: "radiogroup",
-                        "aria-label": "Show by",
-                        for v in views.iter().copied() {
-                            button {
-                                r#type: "button",
-                                role: "radio",
-                                "aria-checked": if Some(v) == shown { "true" } else { "false" },
-                                onclick: move |_| on_pick.call(v),
-                                "{v.label()}"
-                            }
-                        }
-                    }
-                }
-                button {
-                    r#type: "button",
-                    class: "period-today",
-                    "aria-label": "Back to this {unit}",
-                    disabled: current,
-                    onclick: move |_| on_today.call(()),
-                    Icon { d: TODAY_ICON, size: 16 }
-                    "Today"
-                }
-            }
-        }
-    }
+/// A page's period selector. `views` are the choices of the switch; with
+/// none, `note` is shown in its place (a page that steps whole years).
+/// `unit` is what the arrows step, for their labels.
+///
+/// Wide, [`Bar::top`] is the card at the top of the page. On a phone the
+/// top is the page header (the title; tapping it goes back to the current
+/// period) and the arrows and the switch are [`Bar::row`], in the page's
+/// [`dock`] above the tab bar. Both are rendered; the width picks one.
+#[derive(Clone, PartialEq)]
+pub struct Bar {
+    pub title: String,
+    pub sub: String,
+    pub unit: &'static str,
+    pub views: Vec<View>,
+    pub shown: Option<View>,
+    pub note: Option<&'static str>,
+    pub current: bool,
+    pub on_step: Callback<i32>,
+    pub on_pick: Callback<View>,
+    pub on_today: Callback<()>,
 }
 
-/// The selector over `period` with the choice of `views`; `on_change` gets
-/// each new period.
-#[component]
-pub fn PeriodPicker(
-    period: Period,
-    today: NaiveDate,
-    views: Vec<View>,
-    on_change: Callback<Period>,
-) -> Element {
-    let (title, sub) = period.title(today);
-    rsx! {
-        PeriodBar {
+impl Bar {
+    /// The selector over `period` with the choice of `views`; `on_change`
+    /// gets each new period.
+    pub fn picker(
+        period: Period,
+        today: NaiveDate,
+        views: &[View],
+        on_change: Callback<Period>,
+    ) -> Self {
+        let (title, sub) = period.title(today);
+        Bar {
             title,
             sub,
             unit: period.view.unit(),
-            views,
+            views: views.to_vec(),
             shown: Some(period.view),
             note: None,
             current: period.is_current(today),
-            on_step: move |by: i32| on_change.call(period.step(by)),
-            on_pick: move |to: View| on_change.call(period.pick(to, today)),
-            on_today: move |_| on_change.call(period.today(today)),
+            on_step: Callback::new(move |by: i32| on_change.call(period.step(by))),
+            on_pick: Callback::new(move |to: View| on_change.call(period.pick(to, today))),
+            on_today: Callback::new(move |_| on_change.call(period.today(today))),
         }
     }
-}
 
-/// The selector of a page that steps whole years, `year` of them: the note
-/// takes the place of the views.
-#[component]
-pub fn YearBar(
-    title: String,
-    sub: String,
-    unit: &'static str,
-    note: &'static str,
-    current: bool,
-    on_step: Callback<i32>,
-    on_today: Callback<()>,
-) -> Element {
-    rsx! {
-        PeriodBar {
+    /// The selector of a page that steps whole years: `note` takes the
+    /// place of the views.
+    pub fn years(
+        (title, sub): (String, String),
+        unit: &'static str,
+        note: &'static str,
+        current: bool,
+        on_step: Callback<i32>,
+        on_today: Callback<()>,
+    ) -> Self {
+        Bar {
             title,
             sub,
             unit,
             views: Vec::new(),
             shown: None,
-            note: Some(note.to_string()),
+            note: Some(note),
             current,
             on_step,
-            on_pick: move |_| {},
+            on_pick: Callback::new(|_| {}),
             on_today,
+        }
+    }
+
+    /// The top of the page: the selector card when wide, the page header
+    /// when narrow. `extra` sits beside the card (wide only).
+    pub fn top(&self, extra: Element) -> Element {
+        let Bar {
+            title,
+            sub,
+            unit,
+            current,
+            on_step,
+            on_today,
+            ..
+        } = self.clone();
+        rsx! {
+            div { class: "period-head",
+                nav { class: "period-bar", "aria-label": "Period",
+                    div { class: "period-row",
+                        button {
+                            r#type: "button",
+                            class: "period-arrow",
+                            "aria-label": "Previous {unit}",
+                            onclick: move |_| on_step.call(-1),
+                            Icon { d: "m15 6-6 6 6 6", size: 20 }
+                        }
+                        div { class: "period-title",
+                            h1 { "{title}" }
+                            span { class: "period-sub", "{sub}" }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "period-arrow",
+                            "aria-label": "Next {unit}",
+                            onclick: move |_| on_step.call(1),
+                            Icon { d: "m9 6 6 6-6 6", size: 20 }
+                        }
+                    }
+                    div { class: "period-row2",
+                        {self.switch("period-seg")}
+                        button {
+                            r#type: "button",
+                            class: "period-today",
+                            "aria-label": "Back to this {unit}",
+                            disabled: current,
+                            onclick: move |_| on_today.call(()),
+                            Icon { d: TODAY_ICON, size: 16 }
+                            "Today"
+                        }
+                    }
+                }
+                {extra}
+                // The phone's header: the title goes back to the current
+                // period, and does nothing when it is shown.
+                div { class: "page-head",
+                    h1 {
+                        button {
+                            r#type: "button",
+                            class: "page-title",
+                            disabled: current,
+                            title: if !current { "Back to this {unit}" },
+                            onclick: move |_| on_today.call(()),
+                            "{title}"
+                            if !current {
+                                Icon { d: TODAY_ICON, size: 18 }
+                            }
+                        }
+                    }
+                    span { class: "page-sub", "{sub}" }
+                }
+            }
+        }
+    }
+
+    /// The views to choose from, or the note of a page that steps years.
+    fn switch(&self, class: &'static str) -> Element {
+        let on_pick = self.on_pick;
+        let shown = self.shown;
+        rsx! {
+            if self.views.is_empty() {
+                span { class: "period-note", {self.note.unwrap_or_default()} }
+            } else {
+                div {
+                    class: "segmented {class}",
+                    style: "grid-template-columns: repeat({self.views.len()}, minmax(0, 1fr))",
+                    role: "radiogroup",
+                    "aria-label": "Show by",
+                    for v in self.views.iter().copied() {
+                        button {
+                            r#type: "button",
+                            role: "radio",
+                            "aria-checked": if Some(v) == shown { "true" } else { "false" },
+                            onclick: move |_| on_pick.call(v),
+                            "{v.label()}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The phone's period row: ‹ the views (or the note) ›.
+    pub fn row(&self) -> Element {
+        let unit = self.unit;
+        let on_step = self.on_step;
+        rsx! {
+            nav { class: "dock-period", "aria-label": "Period",
+                button {
+                    r#type: "button",
+                    class: "period-arrow",
+                    "aria-label": "Previous {unit}",
+                    onclick: move |_| on_step.call(-1),
+                    Icon { d: "m15 6-6 6 6 6", size: 22 }
+                }
+                {self.switch("dock-seg")}
+                button {
+                    r#type: "button",
+                    class: "period-arrow",
+                    "aria-label": "Next {unit}",
+                    onclick: move |_| on_step.call(1),
+                    Icon { d: "m9 6 6 6-6 6", size: 22 }
+                }
+            }
+        }
+    }
+}
+
+/// A page's dock on a phone, fixed above the tab bar: the page's main
+/// `actions`, then the period row. It is the last thing on the page, so
+/// the page's last row scrolls up above it. Hidden when wide.
+pub fn dock(bar: &Bar, actions: Element) -> Element {
+    rsx! {
+        div { class: "thumb-dock",
+            {actions}
+            {bar.row()}
         }
     }
 }
