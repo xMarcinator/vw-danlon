@@ -116,7 +116,11 @@ pub fn render(a: DayArgs) -> Element {
         })
         .unwrap_or_default();
     let month_title = date.format("%B %Y").to_string();
-    let title = date.format("%A %-d %B").to_string();
+    let title = if date == now_tz.date_naive() {
+        date.format("Today · %a %-d %b").to_string()
+    } else {
+        date.format("%A %-d %B").to_string()
+    };
     let planned = d
         .planned
         .map(|(s, e)| format!("{}–{}", s.format("%H:%M"), e.format("%H:%M")));
