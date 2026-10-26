@@ -73,6 +73,52 @@ async fn load(cfg: Config, month: Month) -> Result<Loaded, String> {
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Which list the Mileage screen shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tab {
+    Reimbursable,
+    All,
+    Fradrag,
+}
+
+/// The year's commuting days by month, newest first: (month, days, notes
+/// on the days not counted).
+fn fradrag_months(f: &mileage::Fradrag) -> Vec<(Month, usize, String)> {
+    use chrono::Datelike;
+    let month_of = |d: &chrono::NaiveDate| Month {
+        year: d.year(),
+        month: d.month(),
+    };
+    let mut months: Vec<Month> = f
+        .days
+        .iter()
+        .chain(f.excluded.iter().map(|(d, _)| d))
+        .map(month_of)
+        .collect();
+    months.sort_by_key(|m| std::cmp::Reverse((m.year, m.month)));
+    months.dedup();
+    months
+        .into_iter()
+        .map(|m| {
+            let days = f.days.iter().filter(|d| month_of(d) == m).count();
+            let mut why: Vec<(&str, usize)> = Vec::new();
+            for (_, w) in f.excluded.iter().filter(|(d, _)| month_of(d) == m) {
+                match why.iter_mut().find(|(x, _)| x == w) {
+                    Some((_, n)) => *n += 1,
+                    None => why.push((w, 1)),
+                }
+            }
+            let note = if why.is_empty() {
+                String::new()
+            } else {
+                let parts: Vec<String> = why.iter().map(|(w, n)| format!("{n} {w}")).collect();
+                format!("not counted: {}", parts.join(", "))
+            };
+            (m, days, note)
+        })
+        .collect()
+}
+
 /// "1 trip", "7 trips".
 fn trips_text(n: usize) -> String {
     if n == 1 {
@@ -85,15 +131,14 @@ fn trips_text(n: usize) -> String {
 /// The "why it counts" chip of a trip: text and class.
 fn rule_chip(d: &Driven) -> (String, &'static str) {
     match &d.reason {
-        Reason::ClientVisit => ("Client visit · LL § 9 B".into(), "chip acc"),
+        Reason::ClientVisit => ("Client visit".into(), "chip acc"),
         Reason::DirectKm => ("Client visit · direct km".into(), "chip acc"),
-        Reason::SetByYou if d.km > 0.0 => ("Set by you · business".into(), "chip warn"),
-        Reason::SetByYou => ("Set by you · private".into(), "chip warn"),
-        Reason::Commute => ("Not reimbursable · commute".into(), "chip"),
+        Reason::SetByYou => ("Set by you".into(), "chip warn"),
+        Reason::Commute => ("Commute".into(), "chip"),
         Reason::SixtyDays { day } => (format!("60-day rule · day {day}"), "chip"),
-        Reason::Detour => ("Detour · private".into(), "chip"),
-        Reason::Errand => ("Errand · private".into(), "chip"),
-        Reason::Private => ("Private driving".into(), "chip"),
+        Reason::Detour => ("Detour".into(), "chip"),
+        Reason::Errand => ("Errand".into(), "chip"),
+        Reason::Private => ("Private".into(), "chip"),
         Reason::Appointment => ("Private appointment".into(), "chip"),
         Reason::MarkedPrivate => ("Marked private".into(), "chip"),
         Reason::Incomplete(why) => (format!("Needs fixing · {why}"), "chip warn strong"),
@@ -103,34 +148,16 @@ fn rule_chip(d: &Driven) -> (String, &'static str) {
 /// What a not-reimbursable rule means, for the list of km not paid.
 fn reason_text(r: &Reason) -> (&'static str, &'static str) {
     match r {
-        Reason::Commute => (
-            "Commute",
-            "Home ↔ fixed workplace (LL § 9 B): driving, never reimbursed; counts toward the befordringsfradrag only above 24 km a day",
-        ),
-        Reason::SixtyDays { .. } => (
-            "60-day rule",
-            "Home ↔ the same client from the 61st working day within 12 months is commuting",
-        ),
-        Reason::Detour => (
-            "Detour",
-            "After a client visit only the direct km home are paid; the stops are private",
-        ),
-        Reason::Errand => (
-            "Errand",
-            "Errands on the way home or during the day without a business purpose are private under Skat’s rules",
-        ),
-        Reason::Private => (
-            "Private",
-            "Evenings, weekends and other driving · tick Business only for real business driving",
-        ),
+        Reason::Commute => ("Commute", "Home ↔ workplace"),
+        Reason::SixtyDays { .. } => ("60-day rule", "Same client from day 61"),
+        Reason::Detour => ("Detour", "Stops after a client visit"),
+        Reason::Errand => ("Errand", "Errands without a business purpose"),
+        Reason::Private => ("Private", "Evenings, weekends, other driving"),
         Reason::Appointment => ("Private appointment", "To, from or during private time"),
-        Reason::MarkedPrivate => ("Marked private", "Marked private in the trips file"),
-        Reason::SetByYou => ("Set by you", "You set these trips to private"),
+        Reason::MarkedPrivate => ("Marked private", "In the trips file"),
+        Reason::SetByYou => ("Set by you", "Set to private"),
         Reason::ClientVisit | Reason::DirectKm => ("Client visit", "Reimbursed"),
-        Reason::Incomplete(_) => (
-            "Needs fixing",
-            "Business trips missing purpose, route or km",
-        ),
+        Reason::Incomplete(_) => ("Needs fixing", "Missing purpose, route or km"),
     }
 }
 
@@ -271,7 +298,8 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut message = use_signal(|| None::<Result<String, String>>);
     let mut printing = use_signal(|| false);
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
-    let mut all = use_signal(|| false);
+    let mut tab = use_signal(|| Tab::Reimbursable);
+    let mut copied = use_signal(|| None::<String>);
     let loaded = use_resource(move || {
         let _ = cal_sync.read().version;
         let m = month();
@@ -385,35 +413,36 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     } else {
         100.0
     };
-    let show_all = all();
+    let shown = tab();
+    let show_all = shown == Tab::All;
     let rows = rows(&mil, show_all);
     let skipped = not_reimbursed(&mil);
     let fix = to_fix(&mil);
     let skipped_trips: usize = skipped.iter().map(|(_, n, _)| n).sum();
     let skipped_km: f64 = skipped.iter().map(|(_, _, k)| k).sum();
-    let fradrag_note = fradrag.as_ref().map(|f| {
-        let kr = |v: f64| kroner(v);
-        if f.one_way_km.is_none() {
-            format!(
-                "Kørselsfradrag (LL § 9 C) is separate: no commuting trips in {} yet.",
-                f.year
-            )
-        } else if f.round_trip_km() <= 24.0 {
-            format!(
-                "Kørselsfradrag (LL § 9 C) is separate: your {} km a day is under the 24 km limit, so 0 kr.",
-                km(f.round_trip_km())
-            )
-        } else {
-            format!(
-                "Kørselsfradrag (LL § 9 C) is separate: {} km a day, {} commuting days in {} so far, about {} ({} a day). Enter it yourself in TastSelv (forskudsopgørelse felt 417, årsopgørelse rubrik 51).",
-                km(f.round_trip_km()),
-                f.days.len(),
-                f.year,
-                kr(f.total()),
-                kr(f.per_day())
-            )
+    let today = super::now(&cfg).date_naive();
+    let tabs = move |class: &'static str| {
+        rsx! {
+            div { class: "{class}", role: "tablist", "aria-label": "Show",
+                for (label , t) in [
+                    ("Reimbursable", Tab::Reimbursable),
+                    ("All driving", Tab::All),
+                    ("Fradrag", Tab::Fradrag),
+                ]
+                {
+                    button {
+                        role: "tab",
+                        "aria-selected": if shown == t { "true" } else { "false" },
+                        onclick: move |_| {
+                            copied.set(None);
+                            tab.set(t);
+                        },
+                        "{label}"
+                    }
+                }
+            }
         }
-    });
+    };
     let mut set_business = move |start: chrono::DateTime<chrono_tz::Tz>, business: Option<bool>| {
         let Some(cfg) = setup.peek().config.clone() else {
             return;
@@ -436,7 +465,6 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         message.set(Some(result));
         reload.restart();
     };
-    let tab = |on: bool| if on { "true" } else { "false" };
 
     let workplace = service::effective_workplace(&cfg, cal, m);
     rsx! {
@@ -445,9 +473,8 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             Some((found, service::WorkplaceSource::Detected)) => rsx! {
                 div { class: "detected", role: "status",
                     span { class: "grow",
-                        "Detected from your calendar: "
+                        "Workplace from the calendar: "
                         b { "{found}" }
-                        " is your fixed workplace, so home ↔ there is commuting. Save it to keep it."
                     }
                     button {
                         class: "small-btn primary-sm",
@@ -470,33 +497,23 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 div { class: "alert", role: "status",
                     span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                     div {
-                        "No fixed workplace is set and none was found in the calendar: every work event with an address counts as a client visit. "
+                        "No fixed workplace: every work address counts as a client visit. "
                         button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Set it in Settings" }
                     }
                 }
             },
             _ => rsx! {},
         }
-        div { class: "mileage-tabs narrow-only", role: "tablist", "aria-label": "Show",
-            button {
-                role: "tab",
-                "aria-selected": tab(!show_all),
-                onclick: move |_| all.set(false),
-                "Reimbursable"
-            }
-            button {
-                role: "tab",
-                "aria-selected": tab(show_all),
-                onclick: move |_| all.set(true),
-                "All driving"
-            }
-        }
+        {tabs("mileage-tabs narrow-only")}
+        if shown == Tab::Fradrag {
+            {fradrag_view(fradrag.as_ref(), m.year, today, copied, tabs("seg-tabs wide-only"))}
+        } else {
         div { class: "kpis mileage-kpis",
             section { class: "kpi",
                 h2 { "This month" }
                 span { class: "kpi-value", "{kroner(mil.total_amount())}" }
                 span { class: "kpi-sub",
-                    "{km(mil.total_km())} km reimbursable · {trips_text(mil.entries.len())} · all driving {km(mil.driven_km())} km"
+                    "{km(mil.total_km())} km · {trips_text(mil.entries.len())}"
                 }
             }
             section { class: "kpi span2",
@@ -517,7 +534,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     div { class: "bar-fill", style: "width: {pct:.1}%" }
                 }
                 span { class: "kpi-sub",
-                    "{rate(mil.rate.low)} kr/km up to {whole_km(threshold)} km, then {rate(mil.rate.high)} kr/km ({mil.rate.year} rates from config.toml). Enter each business trip as Kørsel in the Danløn app; this logbook is your own record."
+                    "{rate(mil.rate.low)} kr/km to {whole_km(threshold)} km, then {rate(mil.rate.high)}"
                 }
             }
         }
@@ -527,20 +544,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 h2 { id: "biz-h",
                     if show_all { "All driving" } else { "Reimbursable trips" }
                 }
-                div { class: "seg-tabs wide-only", role: "tablist", "aria-label": "Show",
-                    button {
-                        role: "tab",
-                        "aria-selected": tab(!show_all),
-                        onclick: move |_| all.set(false),
-                        "Reimbursable"
-                    }
-                    button {
-                        role: "tab",
-                        "aria-selected": tab(show_all),
-                        onclick: move |_| all.set(true),
-                        "All driving"
-                    }
-                }
+                {tabs("seg-tabs wide-only")}
             }
             if rows.is_empty() {
                 p { class: "empty",
@@ -568,7 +572,10 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         }
                         tbody {
                             for r in rows.iter().cloned() {
-                                tr { class: if r.business { "" } else { "quiet" },
+                                // Keyed by the trip (and rate: a trip crossing
+                                // 20.000 km is two rows), so a removed row
+                                // never leaves its Business box on the next.
+                                tr { key: "{r.start}{r.rate}", class: if r.business { "" } else { "quiet" },
                                     td { class: "nowrap", "{r.date}" }
                                     td { class: "mono small", "{r.depart}" }
                                     td { "{r.route}" }
@@ -601,7 +608,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                 }
                             }
                             tr { class: "total",
-                                td { colspan: "6", "Total reimbursable" }
+                                td { colspan: "6", "Total" }
                                 td { class: "r", "{km(mil.total_km())}" }
                                 td {}
                                 td { class: "r", "{kroner(mil.total_amount()).trim_end_matches(\" kr\")}" }
@@ -611,7 +618,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 }
                 ul { class: "plain-list narrow-only",
                     for r in rows.iter().cloned() {
-                        li { class: "trip-entry",
+                        li { key: "{r.start}{r.rate}", class: "trip-entry",
                             b { "{r.purpose}" }
                             b { class: "r", "{r.amount}" }
                             span { class: "sub", "{r.short_date} {r.depart} · {r.route}" }
@@ -643,10 +650,8 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
 
         section { class: "panel", "aria-labelledby": "skip-h",
             div { class: "panel-head",
-                h2 { id: "skip-h", "Driven, not reimbursable under Danish rules" }
-                span { class: "note",
-                    "{trips_text(skipped_trips)} · {km(skipped_km)} km · listed in the logbook, not paid "
-                }
+                h2 { id: "skip-h", "Not reimbursable" }
+                span { class: "note", "{trips_text(skipped_trips)} · {km(skipped_km)} km " }
                 button { class: "link-btn small", onclick: move |_| screen.set(Screen::Settings), "Mileage rules" }
             }
             ul { class: "plain-list",
@@ -657,7 +662,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                             li { class: "skip-row",
                                 span { class: "chip", "{name}" }
                                 b { "{n}" }
-                                span { class: "sub", "{km(*k)} km · {why}" }
+                                span { class: "sub", "{why} · {km(*k)} km" }
                             }
                         }
                     }
@@ -665,7 +670,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 li { class: "skip-row",
                     span { class: "chip warn strong", "Needs fixing" }
                     b { "{fix.len()}" }
-                    span { class: "sub", "Business trips missing purpose, route or km are listed here" }
+                    span { class: "sub", "Missing purpose, route or km" }
                 }
                 for (trip , why) in fix.iter() {
                     li { class: "skip-row",
@@ -676,12 +681,6 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 }
             }
         }
-        p { class: "note pad-x",
-            "Commute (home ↔ workplace) is driving, but not reimbursable under LL § 9 B. Errands on the way home are private too. Rules follow Skat. "
-            if let Some(n) = &fradrag_note {
-                "{n} "
-            }
-            "Nothing is sent to Skat; godtgørelse reaches Skat through Danløn."
         }
         div { class: "actions",
             match message() {
@@ -706,6 +705,103 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 },
                 Icon { d: PRINT_ICON, size: 15 }
                 "Print for signature"
+            }
+        }
+    }
+}
+
+/// The Fradrag tab: the year's kørselsfradrag estimate, the two numbers
+/// TastSelv asks for with Copy, and the commuting days by month.
+fn fradrag_view(
+    f: Option<&mileage::Fradrag>,
+    year: i32,
+    today: chrono::NaiveDate,
+    mut copied: Signal<Option<String>>,
+    tabs: Element,
+) -> Element {
+    let head = rsx! {
+        div { class: "panel-head fradrag-head wide-only",
+            h2 { class: "grow", "Kørselsfradrag {year}" }
+            {tabs}
+        }
+    };
+    let Some(f) = f.filter(|f| f.one_way_km.is_some()) else {
+        return rsx! {
+            section { class: "panel",
+                {head}
+                p { class: "empty",
+                    if f.is_none() {
+                        "Needs home and the workplace in Settings."
+                    } else {
+                        "No commuting trips in {year} yet."
+                    }
+                }
+            }
+        };
+    };
+    let round_trip = format!("{:.0}", f.round_trip_km());
+    let days = f.days.len().to_string();
+    let estimate = format!("{} kr", whole_km(f.total()));
+    let so_far = chrono::Datelike::year(&today) == f.year;
+    let months = fradrag_months(f);
+    let current = super::week::month_of(today);
+    let copy = move |label: &'static str, text: String| {
+        spawn(async move {
+            let ok = super::danlon::copy(text.clone()).await;
+            copied.set(Some(if ok {
+                format!("Copied {text}")
+            } else {
+                format!("{label} can't be copied")
+            }));
+        });
+    };
+    rsx! {
+        section { class: "panel fradrag", "aria-label": "Kørselsfradrag",
+            {head}
+            div { class: "fradrag-sum",
+                b { class: "num", "{estimate}" }
+                span { class: "muted", if so_far { "estimate, {f.year} so far" } else { "estimate" } }
+            }
+            for (label , value) in [("Km per day, round trip", round_trip), ("Commuting days", days)] {
+                div { class: "fradrag-row",
+                    span { class: "grow fradrag-num",
+                        span { class: "pt-kicker", "{label}" }
+                        b { class: "num", "{value}" }
+                    }
+                    button {
+                        class: "small-btn",
+                        "aria-label": "Copy {label}",
+                        onclick: move |_| copy(label, value.clone()),
+                        "Copy"
+                    }
+                }
+            }
+            if f.round_trip_km() <= 24.0 {
+                span { class: "fradrag-foot", "Under 24 km a day: no deduction" }
+            }
+            span { class: "fradrag-foot muted", "TastSelv · rubrik 51" }
+            if let Some(text) = copied() {
+                div { class: "pt-status info", role: "status", "{text}" }
+            }
+        }
+        section { class: "panel", "aria-label": "Commuting days by month",
+            ul { class: "plain-list fradrag-months",
+                for (m , n , note) in months {
+                    li { class: "fradrag-month",
+                        b { {m.first_day().format("%B").to_string()} }
+                        b { class: "r num", if n == 1 { "1 day" } else { "{n} days" } }
+                        span { class: "sub",
+                            if m == current && !note.is_empty() {
+                                "so far · {note}"
+                            } else if m == current {
+                                "so far"
+                            } else {
+                                "{note}"
+                            }
+                        }
+                        span { class: "sub r num", "{km(n as f64 * f.round_trip_km())} km" }
+                    }
+                }
             }
         }
     }
@@ -776,9 +872,7 @@ fn MileageSetup(setup: Signal<Setup>) -> Element {
     rsx! {
         section { class: "card", "aria-labelledby": "m-setup",
             h2 { id: "m-setup", "Set up the mileage logbook" }
-            span { class: "sub",
-                "The logbook (kørselsregnskab) lists every business trip with date, route, purpose and km for the tax-free mileage allowance. It needs your name and the car’s registration number; home makes home ↔ workplace trips commuting."
-            }
+            span { class: "sub", "Your name, the car’s registration number and home." }
             div { class: "grid2",
                 div { class: "field",
                     label { r#for: "m-driver", "Your name" }
@@ -806,12 +900,10 @@ fn MileageSetup(setup: Signal<Setup>) -> Element {
                         value: "{home}",
                         oninput: move |e| home.set(e.value()),
                     }
-                    span { class: "note", "As it appears in the trips’ addresses" }
+                    span { class: "note", "As in the trips’ addresses" }
                 }
             }
-            span { class: "note",
-                "The 2026 rates (3,94 kr/km up to 20.000 km, then 2,28 kr/km) are written to [mileage] in config.toml with lønart 39 Kilometerpenge. Check them on skat.dk; add each new year’s rates there."
-            }
+            span { class: "note", "2026 rates: 3,94 kr/km to 20.000 km, then 2,28" }
             div { class: "actions",
                 if let Some(e) = error() {
                     span { class: "status-bad", role: "status", "{e}" }

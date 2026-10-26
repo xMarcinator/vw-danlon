@@ -25,16 +25,16 @@ async fn load(cfg: Config) -> Result<VacationView, String> {
     .map_err(|e| format!("{e:#}"))
 }
 
-/// "Samtidighedsferie · employed since 1 May 2026 · 2,08 days a month".
+/// "Concurrent holiday · employed since 1 May 2026 · 2,08 days a month".
 fn rules_line(rules: &Rules) -> String {
     let per_month = Days(rules.per_month);
     match rules.employment_start {
         Some(start) => format!(
-            "Samtidighedsferie · employed since {} · {per_month} days a month",
+            "Concurrent holiday · employed since {} · {per_month} days a month",
             date(start)
         ),
         None => format!(
-            "Samtidighedsferie · {per_month} days a month · employment start not set, so earning counts from 1 Sep"
+            "Concurrent holiday · {per_month} days a month · earning from 1 Sep (no employment start)"
         ),
     }
 }
@@ -198,7 +198,7 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
                 span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                 span {
                     b { "{e.days} days from {e.year} expire on {date(e.date)}." }
-                    " Plan them before then, or agree a transfer with your employer."
+                    " Plan or transfer them."
                 }
             }
         }
@@ -246,10 +246,10 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
             section { class: "card", "aria-labelledby": "v-how",
                 h2 { id: "v-how", "How vacation is counted" }
                 span { class: "sub",
-                    "Add an all-day event titled {keywords} (or {fridag} for a feriefridag) in your work calendar. Only working days inside it count; weekends and public holidays are not."
+                    "An all-day {keywords} event in the calendar ({fridag} for a feriefridag)."
                 }
                 span { class: "note",
-                    "Holiday earned 1 Sep – 31 Aug can be taken from the month after it is earned until 31 Dec the following year. Vacation days get norm 0. This is your own overview; book vacation with your employer as usual. The words, your employment start and the feriefridage are set in [vacation] in config.toml."
+                    "Earned 1 Sep – 31 Aug, usable until 31 Dec the year after."
                 }
             }
         }
@@ -316,7 +316,7 @@ mod tests {
         );
         assert_eq!(
             rules_line(&rules),
-            "Samtidighedsferie · employed since 1 May 2026 · 2,08 days a month"
+            "Concurrent holiday · employed since 1 May 2026 · 2,08 days a month"
         );
     }
 }

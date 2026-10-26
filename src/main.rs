@@ -226,7 +226,7 @@ enum PrivateAction {
     /// started automatically, else the current or next one today, and
     /// takes its title as the label.
     Start {
-        /// Label (default: the linked appointment's title, else "Privat").
+        /// Label (default: the linked appointment's title, else "Private").
         label: Option<String>,
         /// Start at this time today (HH:MM, not later than now), e.g. the
         /// real start of an appointment that started automatically.
@@ -280,7 +280,7 @@ enum PrivateAction {
 enum HomeAction {
     /// Start the timer.
     Start {
-        /// Label (default: "Hjemmearbejde").
+        /// Label (default: "Home").
         label: Option<String>,
     },
     /// Stop the timer and record the interval.

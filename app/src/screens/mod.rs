@@ -7,6 +7,7 @@ pub mod day;
 pub mod mileage;
 pub mod month;
 pub mod vacation;
+pub mod week;
 
 use std::collections::BTreeSet;
 
@@ -59,6 +60,11 @@ pub fn kroner(amount: f64) -> String {
         grouped.push(c);
     }
     format!("{grouped},{dec} kr")
+}
+
+/// The short English weekday: "Mon".
+pub fn weekday(d: NaiveDate) -> String {
+    d.format("%a").to_string()
 }
 
 pub fn hm(t: NaiveDateTime) -> String {
@@ -131,6 +137,86 @@ pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Sign
         }
         Ok(_) => s.error = None,
         Err(e) => s.error = Some(e),
+    }
+}
+
+/// Bumped each time the app comes back to the foreground, so the screens
+/// compute today again at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Resumed(pub u32);
+
+/// Tells Rust each time the page becomes visible again.
+const RESUME_JS: &str = r#"
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') dioxus.send(true);
+});
+await new Promise(() => {});
+"#;
+
+/// Bumps `resumed` each time the app comes back to the foreground.
+pub async fn watch_resume(mut resumed: Signal<Resumed>) {
+    let mut eval = document::eval(RESUME_JS);
+    while let Ok(true) = eval.recv::<bool>().await {
+        resumed.write().0 += 1;
+    }
+}
+
+/// The account trip sync the app runs by itself, shared with Settings so
+/// Sync now and the automatic sync never run at once.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TripSync {
+    pub syncing: bool,
+}
+
+/// How often the app syncs trips from the account while it runs.
+pub const TRIP_SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long an automatic trip sync may take before it is given up.
+const TRIP_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Syncs trips from a connected account when the app starts and every
+/// [`TRIP_SYNC_EVERY`] while it runs. As with the calendar, a tick missed
+/// while the app was in the background is not caught up: coming back gives
+/// one sync at once.
+pub async fn sync_trips_now_and_then(setup: Signal<crate::setup::Setup>, sync: Signal<TripSync>) {
+    let mut every = tokio::time::interval(TRIP_SYNC_EVERY);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        every.tick().await;
+        sync_trips(setup, sync).await;
+    }
+}
+
+/// One automatic sync, off the UI thread. Only a connected account is
+/// synced; the screens reload only when trips were added. A failure is
+/// left for Sync now in Settings to show: the account line there says when
+/// the last sync was.
+pub async fn sync_trips(mut setup: Signal<crate::setup::Setup>, mut sync: Signal<TripSync>) {
+    let (cfg, store, dir) = {
+        let s = setup.peek();
+        if !matches!(s.account, crate::setup::AccountStatus::Connected { .. }) {
+            return;
+        }
+        let Some(cfg) = s.config.clone() else {
+            return;
+        };
+        (cfg, s.secret_store(), s.dir.clone())
+    };
+    if sync.peek().syncing {
+        return;
+    }
+    sync.write().syncing = true;
+    let job = tokio::task::spawn_blocking(move || {
+        let today = now(&cfg).date_naive();
+        crate::setup::sync_account(&cfg, store.as_ref(), today)
+    });
+    let added = match tokio::time::timeout(TRIP_SYNC_TIMEOUT, job).await {
+        Ok(Ok(Ok(outcome))) => outcome.synced.merged.added,
+        _ => 0,
+    };
+    sync.write().syncing = false;
+    if added > 0 {
+        setup.set(crate::setup::Setup::load(Ok(dir)));
     }
 }
 
@@ -233,13 +319,29 @@ pub enum Action {
     /// Start or stop the working-from-home timer.
     HomeStart,
     HomeStop,
+    /// Start the working-from-home timer earlier today, as typed.
+    HomeStartAt(String),
+    /// Record private time (`home` false) or home working on a day, as
+    /// typed.
+    AddTime {
+        date: NaiveDate,
+        home: bool,
+        label: String,
+        start: String,
+        end: String,
+    },
+    /// Relabel and retime a recorded private (or home-working) interval.
     Change {
+        home: bool,
         id: u32,
         label: String,
         start: String,
         end: String,
     },
-    Delete(u32),
+    Delete {
+        home: bool,
+        id: u32,
+    },
     /// No lunch that day, or back to the default.
     Lunch(NaiveDate, LunchChoice),
     /// Lunch from `start` for `minutes`, as typed.
@@ -267,9 +369,11 @@ impl Action {
         match self {
             Action::Lunch(..) | Action::LunchAt { .. } => Panel::Lunch,
             Action::AddTrip(..) | Action::DeleteTrip(_) => Panel::Trips,
-            Action::HomeStart | Action::HomeStop | Action::LeaveWork | Action::UndoLeaveWork(_) => {
-                Panel::Home
-            }
+            Action::HomeStart
+            | Action::HomeStop
+            | Action::HomeStartAt(_)
+            | Action::LeaveWork
+            | Action::UndoLeaveWork(_) => Panel::Home,
             _ => Panel::Private,
         }
     }
@@ -352,29 +456,57 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
             )
         }
         Action::HomeStart => {
-            let r = state::State::update(&cfg.database, |s| {
-                s.home.start(now.naive_local(), None, None).cloned()
-            })??;
+            let r = service::start_home(cfg, now, None)?;
+            format!("Working from home since {}", hm(r.start))
+        }
+        Action::HomeStartAt(at) => {
+            let at = state::parse_time(at.trim())?;
+            let r = service::start_home(cfg, now, Some(at))?;
             format!("Working from home since {}", hm(r.start))
         }
         Action::HomeStop => {
-            let i =
-                state::State::update(&cfg.database, |s| s.home.stop(now.naive_local()).cloned())??;
+            let i = service::stop_home(cfg, now.naive_local())?;
             format!("Recorded {} {}–{}", i.label, hm(i.start), hm(i.end))
         }
+        Action::AddTime {
+            date,
+            home,
+            label,
+            start,
+            end,
+        } => {
+            let start = state::parse_time(start.trim())?;
+            let end = state::parse_time(end.trim())?;
+            let now = now.naive_local();
+            let i = if *home {
+                service::add_home(cfg, *date, start, end, label, now)?
+            } else {
+                service::add_private(cfg, *date, start, end, label, now)?
+            };
+            format!("Added {} {}–{}", i.label, hm(i.start), hm(i.end))
+        }
         Action::Change {
+            home,
             id,
             label,
             start,
             end,
         } => {
-            let start = state::parse_time(start)?;
-            let end = state::parse_time(end)?;
-            service::change_private(cfg, *id, label, start, end)?;
-            format!("Changed {label}")
+            let start = state::parse_time(start.trim())?;
+            let end = state::parse_time(end.trim())?;
+            if *home {
+                service::change_home(cfg, *id, label, start, end)?;
+            } else {
+                service::change_private(cfg, *id, label, start, end)?;
+            }
+            format!("Changed {}", label.trim())
         }
-        Action::Delete(id) => {
-            let i = service::delete_private(cfg, *id)?;
+        Action::Delete { home, id } => {
+            let i = if *home {
+                service::delete_home(cfg, *id)?
+            } else {
+                service::delete_private(cfg, *id)?
+            };
             format!("Deleted {} {}–{}", i.label, hm(i.start), hm(i.end))
         }
         Action::Lunch(date, choice) => service::set_lunch(cfg, *date, *choice)?,
@@ -427,57 +559,30 @@ fn describe(
     current: bool,
     auto_start: bool,
 ) -> (String, &'static str, &'static str) {
-    let replaces = |planned: Option<(NaiveDateTime, NaiveDateTime)>| {
-        planned
-            .map(|(s, e)| format!(" · replaces {}–{}", hm(s), hm(e)))
-            .unwrap_or_default()
-    };
     match &item.state {
-        PrivateState::Planned if current && auto_start => (
-            format!("Next · starts automatically at {}", hm(item.start())),
-            "Next",
-            "chip acc",
-        ),
-        PrivateState::Planned if current => ("Next · from the calendar".into(), "Next", "chip acc"),
-        PrivateState::Planned => ("From the calendar".into(), "Planned", "chip"),
-        PrivateState::Running { since } => (
-            format!(
-                "Timer running since {}{}",
-                hm(*since),
-                replaces(item.planned)
-            ),
-            "Running",
-            "chip warn",
-        ),
+        PrivateState::Planned if current && auto_start => {
+            ("Starts by itself".into(), "Next", "chip acc")
+        }
+        PrivateState::Planned if current => (String::new(), "Next", "chip acc"),
+        PrivateState::Planned => (String::new(), "Planned", "chip"),
+        PrivateState::Running { since } => {
+            (format!("Since {}", hm(*since)), "Running", "chip info")
+        }
         PrivateState::StartedAutomatically { since } => (
-            format!("Started automatically at {}", hm(*since)),
-            "Auto",
-            "chip warn",
+            format!("Started by itself at {}", hm(*since)),
+            "Running",
+            "chip info",
         ),
         PrivateState::Recorded {
             kind: IntervalKind::CalendarTime,
             ..
-        } => (
-            "Not tracked · calendar time used · Edit to change".into(),
-            "Calendar time",
-            "chip warn",
-        ),
-        PrivateState::Recorded { start, end, .. } => (
-            format!(
-                "Recorded {}–{}{}",
-                hm(*start),
-                hm(*end),
-                replaces(item.planned)
-            ),
-            "Recorded",
-            "chip info",
-        ),
+        } => ("Not timed".into(), "Calendar time", "chip warn"),
+        PrivateState::Recorded { .. } => (String::new(), "Recorded", "chip"),
     }
 }
 
-/// Private-time items: a recorded one (also calendar time) with an editor
-/// for its label and times and a Delete button; an appointment not
-/// recorded (planned or started automatically) with Skip.
+/// Private-time items: when, what they are, and Skip for an appointment
+/// not recorded (planned or started automatically): you did not go.
 #[component]
 pub fn PrivateList(
     items: Vec<PrivateItem>,
@@ -486,7 +591,6 @@ pub fn PrivateList(
     auto_start: bool,
     on_action: Callback<Action, bool>,
 ) -> Element {
-    let mut editing = use_signal(|| None::<u32>);
     rsx! {
         for (i , item) in items.into_iter().enumerate() {
             {
@@ -499,18 +603,12 @@ pub fn PrivateList(
                     }
                     PrivateState::Planned => (item.start(), item.planned.map(|p| p.1)),
                 };
-                let id = match item.state {
-                    PrivateState::Recorded { id, .. } => Some(id),
-                    _ => None,
-                };
-                // An appointment not recorded can be skipped: you did not go.
                 let skip = matches!(
                     item.state,
                     PrivateState::Planned | PrivateState::StartedAutomatically { .. }
                 )
                 .then(|| item.planned.map(|(s, _)| (s.date(), item.label.clone())))
                 .flatten();
-                let label = item.label.clone();
                 rsx! {
                     li { class: "pt-item",
                         div { class: "pt-row",
@@ -520,20 +618,11 @@ pub fn PrivateList(
                                     " · "
                                     span { class: "num", "{when(start, end, today)}" }
                                 }
-                                span { class: "pt-note", "{note}" }
-                            }
-                            span { class: "{chip_class}", "{chip}" }
-                            if let Some(id) = id {
-                                button {
-                                    class: "small-btn",
-                                    "aria-expanded": if editing() == Some(id) { "true" } else { "false" },
-                                    onclick: move |_| {
-                                        let open = editing() == Some(id);
-                                        editing.set(if open { None } else { Some(id) });
-                                    },
-                                    "Edit"
+                                if !note.is_empty() {
+                                    span { class: "pt-note", "{note}" }
                                 }
                             }
+                            span { class: "{chip_class}", "{chip}" }
                             if let Some((date, title)) = skip {
                                 button {
                                     class: "small-btn",
@@ -545,93 +634,7 @@ pub fn PrivateList(
                                 }
                             }
                         }
-                        if let (Some(id), Some(end)) = (id, end) {
-                            if editing() == Some(id) {
-                                IntervalEditor {
-                                    id,
-                                    label,
-                                    start: hm(start),
-                                    end: hm(end),
-                                    // A refused change keeps the editor open
-                                    // with what was typed.
-                                    on_action: move |a| {
-                                        if on_action.call(a) {
-                                            editing.set(None);
-                                        }
-                                    },
-                                    on_cancel: move |_| editing.set(None),
-                                }
-                            }
-                        }
                     }
-                }
-            }
-        }
-    }
-}
-
-/// Relabel, retime or delete one recorded interval.
-#[component]
-fn IntervalEditor(
-    id: u32,
-    label: String,
-    start: String,
-    end: String,
-    on_action: EventHandler<Action>,
-    on_cancel: EventHandler<()>,
-) -> Element {
-    let mut label = use_signal(|| label);
-    let mut start = use_signal(|| start);
-    let mut end = use_signal(|| end);
-    rsx! {
-        div { class: "pt-edit",
-            div { class: "field",
-                label { r#for: "pt-label-{id}", "Label" }
-                input {
-                    id: "pt-label-{id}",
-                    r#type: "text",
-                    value: "{label}",
-                    oninput: move |e| label.set(e.value()),
-                }
-            }
-            div { class: "field",
-                label { r#for: "pt-start-{id}", "Start" }
-                input {
-                    id: "pt-start-{id}",
-                    r#type: "time",
-                    value: "{start}",
-                    oninput: move |e| start.set(e.value()),
-                }
-            }
-            div { class: "field",
-                label { r#for: "pt-end-{id}", "End" }
-                input {
-                    id: "pt-end-{id}",
-                    r#type: "time",
-                    value: "{end}",
-                    oninput: move |e| end.set(e.value()),
-                }
-            }
-            div { class: "pt-edit-actions",
-                button {
-                    class: "small-btn danger",
-                    onclick: move |_| on_action.call(Action::Delete(id)),
-                    "Delete"
-                }
-                span { class: "grow" }
-                button { class: "small-btn", onclick: move |_| on_cancel.call(()), "Cancel" }
-                button {
-                    class: "small-btn primary-sm",
-                    onclick: move |_| {
-                        on_action
-                            .call(Action::Change {
-                                id,
-                                label: label(),
-                                start: start(),
-                                end: end(),
-                            })
-                    },
-                    "Save"
                 }
             }
         }

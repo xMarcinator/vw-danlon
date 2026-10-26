@@ -950,16 +950,7 @@ pub fn start_private(
     at: Option<NaiveTime>,
     label: Option<String>,
 ) -> Result<RunningTimer> {
-    let start = match at {
-        Some(t) => {
-            let start = now.date_naive().and_time(t);
-            if start > now.naive_local() {
-                bail!("{} is in the future", t.format("%H:%M"));
-            }
-            start
-        }
-        None => now.naive_local(),
-    };
+    let start = start_time(now, at)?;
     let entries = timed_entries(cfg, cal);
     State::update(&cfg.database, |s| {
         let auto = match choice {
@@ -1096,6 +1087,132 @@ pub fn change_private(
     s.private.edit(id, start, end)?;
     s.private.relabel(id, label)?;
     s.save(&cfg.database)
+}
+
+/// A timer's start: `at` today, not later than `now`; else `now`.
+fn start_time(now: DateTime<Tz>, at: Option<NaiveTime>) -> Result<NaiveDateTime> {
+    match at {
+        Some(t) => {
+            let start = now.date_naive().and_time(t);
+            if start > now.naive_local() {
+                bail!("{} is in the future", t.format("%H:%M"));
+            }
+            Ok(start)
+        }
+        None => Ok(now.naive_local()),
+    }
+}
+
+/// Starts the home-working timer at `now`, or at `at` earlier today (you
+/// started working from home and forgot to start it).
+pub fn start_home(cfg: &Config, now: DateTime<Tz>, at: Option<NaiveTime>) -> Result<RunningTimer> {
+    let start = start_time(now, at)?;
+    State::update(&cfg.database, |s| s.home.start(start, None, None).cloned())?
+}
+
+/// Stops the home-working timer at `now` and records the interval.
+pub fn stop_home(cfg: &Config, now: NaiveDateTime) -> Result<PrivateInterval> {
+    State::update(&cfg.database, |s| s.home.stop(now).cloned())?
+}
+
+/// `start`–`end` on `date` as an interval to record: the end after the
+/// start, at most 24 hours, and not after `now`.
+fn interval_on(
+    date: NaiveDate,
+    start: NaiveTime,
+    end: NaiveTime,
+    now: NaiveDateTime,
+) -> Result<(NaiveDateTime, NaiveDateTime)> {
+    let (s, e) = (
+        state::minute(date.and_time(start)),
+        state::minute(date.and_time(end)),
+    );
+    if e <= s {
+        bail!(
+            "end {} is not after start {}",
+            end.format("%H:%M"),
+            start.format("%H:%M")
+        );
+    }
+    if e - s > Duration::hours(24) {
+        bail!(
+            "{date} {}–{} is over 24 hours",
+            start.format("%H:%M"),
+            end.format("%H:%M")
+        );
+    }
+    if e > state::minute(now) {
+        bail!("{date} {} is in the future", end.format("%H:%M"));
+    }
+    Ok((s, e))
+}
+
+/// The label typed, or the kind's default when it is empty.
+fn label_or(label: &str, default: &str) -> String {
+    match label.trim() {
+        "" => default.to_string(),
+        l => l.to_string(),
+    }
+}
+
+/// Records private time you forgot to time: `start`–`end` on `date` (today
+/// or earlier, not after `now`), with `label` (default
+/// [`state::DEFAULT_LABEL`]). It replaces no calendar appointment.
+pub fn add_private(
+    cfg: &Config,
+    date: NaiveDate,
+    start: NaiveTime,
+    end: NaiveTime,
+    label: &str,
+    now: NaiveDateTime,
+) -> Result<PrivateInterval> {
+    let (s, e) = interval_on(date, start, end, now)?;
+    let label = label_or(label, state::DEFAULT_LABEL);
+    State::update(&cfg.database, |st| {
+        st.private
+            .record(s, e, label, None, IntervalKind::Recorded)
+            .clone()
+    })
+}
+
+/// Records time worked from home that was not timed: `start`–`end` on
+/// `date` (today or earlier, not after `now`), with `label` (default
+/// [`state::HOME_LABEL`]).
+pub fn add_home(
+    cfg: &Config,
+    date: NaiveDate,
+    start: NaiveTime,
+    end: NaiveTime,
+    label: &str,
+    now: NaiveDateTime,
+) -> Result<PrivateInterval> {
+    let (s, e) = interval_on(date, start, end, now)?;
+    let label = label_or(label, state::HOME_LABEL);
+    State::update(&cfg.database, |st| {
+        st.home
+            .record(s, e, label, None, IntervalKind::Recorded)
+            .clone()
+    })
+}
+
+/// Sets a home-working interval's label and start and end times; nothing
+/// is saved when either change is refused.
+pub fn change_home(
+    cfg: &Config,
+    id: u32,
+    label: &str,
+    start: NaiveTime,
+    end: NaiveTime,
+) -> Result<()> {
+    let mut s = State::load(&cfg.database)?;
+    s.home.edit(id, start, end)?;
+    s.home.relabel(id, label)?;
+    s.save(&cfg.database)
+}
+
+/// Deletes a home-working interval.
+pub fn delete_home(cfg: &Config, id: u32) -> Result<PrivateInterval> {
+    State::update(&cfg.database, |s| s.home.remove(id))?
 }
 
 /// A day's lunch break as the Day screen sets it.
@@ -1515,7 +1632,7 @@ mod tests {
         // Nothing running: the next appointment comes first.
         let t = view(&st, "2026-11-24 12:00");
         let labels: Vec<&str> = t.items.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels, ["Privat", "Læge", "Tandlæge"]);
+        assert_eq!(labels, ["Private", "Læge", "Tandlæge"]);
         assert_eq!(t.current, Some(1));
         assert!(matches!(
             t.items[0].state,
@@ -2283,6 +2400,91 @@ mod tests {
             db::cached_calendar(&cfg.database, link).unwrap(),
             Some((ics, kept_at))
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn forgotten_private_and_home_time_is_added_changed_and_deleted() {
+        let (dir, cfg, _) = private_setup("svc-add-time", "");
+        let date = state::parse_date("2026-11-03").unwrap();
+        let t = |s: &str| state::parse_time(s).unwrap();
+        let now = at("2026-11-03 15:00");
+        let p = add_private(&cfg, date, t("10:00"), t("11:15"), " Doctor ", now).unwrap();
+        assert_eq!(
+            (p.start, p.end, p.label.as_str(), p.kind),
+            (
+                at("2026-11-03 10:00"),
+                at("2026-11-03 11:15"),
+                "Doctor",
+                IntervalKind::Recorded
+            )
+        );
+        assert!(p.replaces.is_none());
+        let h = add_home(&cfg, date, t("13:00"), t("14:30"), "", now).unwrap();
+        assert_eq!(h.label, state::HOME_LABEL);
+        assert_eq!(
+            add_private(&cfg, date, t("10:00"), t("10:00"), "", now)
+                .unwrap_err()
+                .to_string(),
+            "end 10:00 is not after start 10:00"
+        );
+        assert!(
+            add_home(&cfg, date, t("14:00"), t("15:30"), "", now)
+                .unwrap_err()
+                .to_string()
+                .contains("in the future")
+        );
+        let tomorrow = date + Duration::days(1);
+        assert!(add_private(&cfg, tomorrow, t("08:00"), t("09:00"), "", now).is_err());
+        let s = State::load(&cfg.database).unwrap();
+        assert_eq!((s.private.intervals.len(), s.home.intervals.len()), (1, 1));
+
+        // Changed: both or nothing.
+        change_home(&cfg, h.id, "Home office", t("12:30"), t("14:00")).unwrap();
+        assert!(change_home(&cfg, h.id, " ", t("08:00"), t("09:00")).is_err());
+        assert!(change_home(&cfg, h.id, "x", t("09:00"), t("08:00")).is_err());
+        assert!(change_home(&cfg, 99, "x", t("08:00"), t("09:00")).is_err());
+        let i = State::load(&cfg.database).unwrap().home.intervals[0].clone();
+        assert_eq!(
+            (i.start, i.end, i.label.as_str()),
+            (
+                at("2026-11-03 12:30"),
+                at("2026-11-03 14:00"),
+                "Home office"
+            )
+        );
+
+        assert_eq!(delete_home(&cfg, h.id).unwrap().label, "Home office");
+        assert!(delete_home(&cfg, h.id).is_err());
+        let s = State::load(&cfg.database).unwrap();
+        assert!(s.home.intervals.is_empty());
+        assert_eq!(s.private.intervals.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_home_timer_starts_at_an_earlier_time_today() {
+        let (dir, cfg, _) = private_setup("svc-home-earlier", "");
+        let now = cfg
+            .timezone
+            .from_local_datetime(&at("2026-11-03 09:10"))
+            .unwrap();
+        let t = |s: &str| state::parse_time(s).unwrap();
+        assert!(
+            start_home(&cfg, now, Some(t("09:30")))
+                .unwrap_err()
+                .to_string()
+                .contains("in the future")
+        );
+        let r = start_home(&cfg, now, Some(t("07:45"))).unwrap();
+        assert_eq!(r.start, at("2026-11-03 07:45"));
+        assert!(start_home(&cfg, now, None).is_err());
+        let i = stop_home(&cfg, at("2026-11-03 12:00")).unwrap();
+        assert_eq!(
+            (i.start, i.end),
+            (at("2026-11-03 07:45"), at("2026-11-03 12:00"))
+        );
+        assert!(stop_home(&cfg, at("2026-11-03 12:05")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

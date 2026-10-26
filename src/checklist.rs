@@ -248,7 +248,7 @@ fn status(day: &Day, driving: bool) -> Status {
         let reason = match &day.off_reason {
             Some(reason) => reason.to_string(),
             None if weekend => "weekend".into(),
-            None => "ingen arbejdstid".into(),
+            None => "no working time".into(),
         };
         Status::NothingToEnter(reason)
     };
@@ -685,9 +685,9 @@ END:VEVENT
         assert_eq!(day(&days, 21).status, nothing("weekend"));
         assert_eq!(day(&days, 26).status, nothing("Ferie"));
         // A workday without trips.
-        assert_eq!(day(&days, 3).status, nothing("ingen arbejdstid"));
+        assert_eq!(day(&days, 3).status, nothing("no working time"));
         match &day(&days, 25).status {
-            Status::FixFirst(reason) => assert!(reason.contains("uden registreret afgang")),
+            Status::FixFirst(reason) => assert!(reason.contains(", no departure")),
             other => panic!("{other:?}"),
         }
     }
@@ -752,7 +752,7 @@ END:VEVENT
         );
         let fix = day(&days, 25).tick_refusal().unwrap();
         assert!(
-            fix.starts_with("fix first: ") && fix.contains("uden registreret afgang"),
+            fix.starts_with("fix first: ") && fix.contains(", no departure"),
             "{fix}"
         );
     }

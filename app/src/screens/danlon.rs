@@ -12,7 +12,7 @@ use vw_danlon::checklist::{self, ChecklistDay, Korsel, Status};
 use vw_danlon::config::Config;
 use vw_danlon::month::Month;
 use vw_danlon::service;
-use vw_danlon::timesheet::weekday_da;
+
 use vw_danlon::trips::Trip;
 
 use super::month::{month_title, step, this_month};
@@ -103,7 +103,7 @@ const OPEN_ICON: &str = "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6";
 /// can open under the tab bar).
 const SHOW_MENU_JS: &str = "setTimeout(() => document.querySelector('.dl-menu')?.scrollIntoView({ block: 'nearest' }), 50);";
 
-async fn copy(text: String) -> bool {
+pub(super) async fn copy(text: String) -> bool {
     let mut eval = document::eval(COPY_JS);
     if eval.send(text).is_err() {
         return false;
@@ -263,7 +263,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 div { class: "bar-fill", style: "width: {pct:.1}%" }
             }
             span { class: "note",
-                "Type each Komme/gå entry (time and break) into the Danløn app; private time splits the day into entries, and the break is only lunch. Tick the day off when done. Ticks are only stored on this device."
+                "Ticks stay on this device."
             }
         }
         div { class: "dl-tabs", role: "tablist", "aria-label": "Show",
@@ -327,7 +327,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                 class: if Some(date) == next { "next" },
                                 span { class: "dl-date",
                                     b { "{date.day()} {date.format(\"%b\")}" }
-                                    span { class: "small muted", "{weekday_da(date.weekday())}" }
+                                    span { class: "small muted", "{super::weekday(date)}" }
                                     if Some(date) == next {
                                         span { class: "chip acc", "next to enter" }
                                     }

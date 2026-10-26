@@ -39,6 +39,13 @@ done
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/app/Cargo.toml" | head -1)
 
+gradle_dir=$repo/target/dx/vw-danlon-app/release/android/app
+# dx writes its own .webp launcher icons into the generated project but
+# keeps the icon files an earlier run of this script copied in, and Gradle
+# refuses the duplicates: clear them first.
+rm -f "$gradle_dir"/app/src/main/res/mipmap-*/ic_launcher* \
+  "$gradle_dir"/app/src/main/res/values/ic_launcher_background.xml
+
 cd "$repo/app"
 dx bundle --platform android --release --target aarch64-linux-android --package-types apk
 
@@ -46,14 +53,28 @@ dx bundle --platform android --release --target aarch64-linux-android --package-
 # Rebuild the generated project's release variant instead: strip the native
 # library, turn off R8 (the generated project has no keep rules for the
 # classes Rust calls over JNI), skip lint (needs network), sign below.
-gradle_dir=$repo/target/dx/vw-danlon-app/release/android/app
 "$ndk_bin/llvm-strip" --strip-all "$gradle_dir/app/src/main/jniLibs/arm64-v8a/libmain.so"
+# Only arm64: a library an earlier build for another ABI (an emulator's
+# x86_64) left in the generated project would otherwise ship too.
+find "$gradle_dir/app/src/main/jniLibs" -mindepth 1 -maxdepth 1 ! -name arm64-v8a -exec rm -rf {} +
 sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/' "$gradle_dir/app/build.gradle.kts"
 # dx writes versionCode = 1 for every version; Android only installs an
 # update over the old app when versionCode grows: 0.2.0 -> 200.
 IFS=. read -r major minor patch <<< "$version"
 version_code=$((major * 10000 + minor * 100 + patch))
 sed -i "s/versionCode = [0-9]*/versionCode = $version_code/" "$gradle_dir/app/build.gradle.kts"
+# dx's activity handles only rotation and size changes itself; any other
+# change (dark mode switching at sunset, font size, display size) makes
+# Android destroy and recreate it, which the Dioxus app does not survive:
+# coming back, it shows the old screen but no longer reacts. Handle the
+# common ones in place instead.
+sed -i 's/android:configChanges="[^"]*"/android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|fontScale|fontWeightAdjustment|density|locale|layoutDirection|colorMode"/' \
+  "$gradle_dir/app/src/main/AndroidManifest.xml"
+# The WebView answers prefers-color-scheme from the activity theme, and
+# dx's is light-only, so the System theme never went dark. DayNight
+# follows the phone, also when it switches while the app is open.
+sed -i 's/Theme.AppCompat.Light.NoActionBar/Theme.AppCompat.DayNight.NoActionBar/' \
+  "$gradle_dir/app/src/main/res/values/styles.xml"
 # The launcher icon (app/icons/icon.svg, rendered into app/icons/android/res)
 # replaces dx's default one.
 rm -f "$gradle_dir"/app/src/main/res/mipmap-*/ic_launcher*

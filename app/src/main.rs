@@ -68,7 +68,7 @@ pub enum Screen {
 impl Screen {
     fn label(self) -> &'static str {
         match self {
-            Screen::Month => "Month",
+            Screen::Month => "Hours",
             Screen::Vacation => "Vacation",
             Screen::Mileage => "Mileage",
             Screen::Danlon => "Danløn",
@@ -93,13 +93,13 @@ impl Screen {
                 "M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"
             }
             Screen::Settings => {
-                "M12 15a3 3 0 1 0 0-6a3 3 0 1 0 0 6zM12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"
+                "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM15 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z"
             }
         }
     }
 }
 
-/// Sidebar order; the phone tabs leave Settings to the top bar, as in the
+/// Sidebar order; the phone tabs, with Settings as the last tab, as in the
 /// mockup.
 const SIDEBAR: [Screen; 5] = [
     Screen::Month,
@@ -108,11 +108,12 @@ const SIDEBAR: [Screen; 5] = [
     Screen::Danlon,
     Screen::Settings,
 ];
-const TABS: [Screen; 4] = [
+const TABS: [Screen; 5] = [
     Screen::Month,
     Screen::Mileage,
     Screen::Danlon,
     Screen::Vacation,
+    Screen::Settings,
 ];
 
 fn theme_icon(t: Theme) -> &'static str {
@@ -157,6 +158,11 @@ fn App() -> Element {
     let cal_sync = use_context_provider(|| Signal::new(screens::CalendarSync::default()));
     // The screens show the kept calendar; it is refreshed now and then.
     use_future(move || screens::refresh_calendar_now_and_then(setup, cal_sync));
+    // Trips from a connected account, so an arrival shows without Sync now.
+    let trip_sync = use_context_provider(|| Signal::new(screens::TripSync::default()));
+    use_future(move || screens::sync_trips_now_and_then(setup, trip_sync));
+    let resumed = use_context_provider(|| Signal::new(screens::Resumed::default()));
+    use_future(move || screens::watch_resume(resumed));
     let theme = setup.read().settings.theme;
     let current = screen();
 
@@ -167,23 +173,7 @@ fn App() -> Element {
             Sidebar { screen, setup }
             div { class: "main-col",
                 header { class: if current == Screen::Month { "topbar hidden" } else { "topbar" },
-                    if current == Screen::Settings {
-                        button {
-                            class: "icon-btn",
-                            "aria-label": "Back to Month",
-                            onclick: move |_| { let mut s = screen; s.set(Screen::Month) },
-                            Icon { d: "m15 6-6 6 6 6", size: 22 }
-                        }
-                    }
                     h1 { "{current.title()}" }
-                    if current != Screen::Settings {
-                        button {
-                            class: "icon-btn",
-                            "aria-label": "Settings",
-                            onclick: move |_| { let mut s = screen; s.set(Screen::Settings) },
-                            Icon { d: Screen::Settings.icon(), size: 22 }
-                        }
-                    }
                 }
                 main { class: if current == Screen::Month { "content full" } else { "content" },
                     if current != Screen::Month {
@@ -220,7 +210,7 @@ fn App() -> Element {
 }
 
 #[component]
-fn Sidebar(screen: Signal<Screen>, setup: Signal<Setup>) -> Element {
+fn Sidebar(screen: Signal<Screen>, mut setup: Signal<Setup>) -> Element {
     let current = screen();
     let s = setup.read();
     let calendar_ok = s.config.as_ref().is_some_and(|c| c.calendar.is_some());
@@ -230,33 +220,65 @@ fn Sidebar(screen: Signal<Screen>, setup: Signal<Setup>) -> Element {
         .any(|p| matches!(p, Problem::NoTrips | Problem::BadTrips(_)))
         && s.trips.is_some();
     let theme = s.settings.theme;
+    let collapsed = s.settings.sidebar_collapsed;
+    let toggle_label = if collapsed {
+        "Expand sidebar"
+    } else {
+        "Collapse sidebar"
+    };
+    let toggle_icon = if collapsed {
+        "m13 17 5-5-5-5M6 17l5-5-5-5"
+    } else {
+        "m11 17-5-5 5-5M18 17l-5-5 5-5"
+    };
     rsx! {
-        nav { class: "sidebar", "aria-label": "Main",
+        nav { class: if collapsed { "sidebar collapsed" } else { "sidebar" }, "aria-label": "Main",
             div { class: "brand",
-                svg { "aria-hidden": "true", width: "26", height: "26", view_box: "0 0 256 256",
-                    rect { width: "256", height: "256", rx: "56", fill: "var(--acc)" }
-                    circle { cx: "128", cy: "128", r: "70", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22" }
-                    path { d: "M128 82v50l32 20", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22", stroke_linecap: "round" }
+                span { class: "brand-name", "aria-label": "vw-danlon",
+                    svg { "aria-hidden": "true", width: "26", height: "26", view_box: "0 0 256 256",
+                        rect { width: "256", height: "256", rx: "56", fill: "var(--acc)" }
+                        circle { cx: "128", cy: "128", r: "70", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22" }
+                        path { d: "M128 82v50l32 20", fill: "none", stroke: "var(--logo-ink)", stroke_width: "22", stroke_linecap: "round" }
+                    }
+                    if !collapsed {
+                        "vw-danlon"
+                    }
                 }
-                "vw-danlon"
+                button {
+                    class: "rail-toggle",
+                    "aria-label": "{toggle_label}",
+                    title: "{toggle_label}",
+                    "aria-expanded": if collapsed { "false" } else { "true" },
+                    onclick: move |_| {
+                        // Applies even when it can't be remembered.
+                        let _ = setup.write().set_sidebar_collapsed(!collapsed);
+                    },
+                    Icon { d: toggle_icon, size: 18 }
+                }
             }
             for item in SIDEBAR {
                 button {
                     class: "nav-item",
                     "aria-current": if item == current { "page" } else { "false" },
+                    "aria-label": collapsed.then(|| item.label()),
+                    title: collapsed.then(|| item.label()),
                     onclick: move |_| screen.set(item),
                     Icon { d: item.icon(), size: 16 }
-                    "{item.label()}"
+                    if !collapsed {
+                        "{item.label()}"
+                    }
                 }
             }
-            div { class: "nav-head", "Sources" }
-            div { class: "source",
-                span { class: if calendar_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
-                "Calendar"
-            }
-            div { class: "source",
-                span { class: if trips_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
-                "Trips file"
+            if !collapsed {
+                div { class: "nav-head", "Sources" }
+                div { class: "source",
+                    span { class: if calendar_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
+                    "Calendar"
+                }
+                div { class: "source",
+                    span { class: if trips_ok { "dot" } else { "dot warn" }, "aria-hidden": "true" }
+                    "Trips file"
+                }
             }
             div { class: "grow" }
             div { class: "theme-switch", role: "group", "aria-label": "Color theme",
