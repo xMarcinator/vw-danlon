@@ -14,9 +14,16 @@ Day numbers: Worked · Norm · Diff only (today: Worked so far · Expected so fa
 
 
 ## Done summary
-TBD
+Phone Day shows Worked · Norm · Diff in one card (today: Worked so far · Expected so far · Diff with their small lines); Trips section with start time, From → To, km, type chip (Commute grey, Client visit violet, including the detour legs of a client drive), heading with the day's km driven and reimbursed kr ("Trips · 23,0 km · 55,16 kr"), and "+ Add missing trip" at its end. The lunch line in the day list has Edit opening a lunch sheet (Start, Minutes, Use default, Save) via service::set_lunch; a day with no lunch keeps a "No lunch" line so it can be set again. The phone has no Lunch break or Mileage card; on desktop both stay (as in the desktop mockup) and Change opens the same sheet. Fixes from review: driving #5a87ab light, private its own blue in dark (#4fb0f0), timeline fixed 06–18 (outside clipped), client visits split out of At work in the day list (service::day_work_steps, test service::tests::day_work_steps_split_the_client_visit_out). app/Cargo.toml 0.5.0; no local release APK (the release workflow builds and signs it from the tag).
 
+baseline: green (cargo test --workspace)
+Live: desktop app on the scratch VW_DANLON_DIR, wide + 390px light/dark, lunch sheet open; 45 min saved then Use default cleared, 22 Oct numbers matched `vw-danlon report 2026-10` (4,48/8,00/−3,52 with 45 min; 4,73/8,25/−3,52 default). Screenshots: session scratchpad shots/fn2b-*.png.
+Checks: cargo test --workspace, cargo clippy --workspace --all-targets, Android clippy (aarch64-linux-android, mobile), dx build --platform android (unsigned debug) all clean.
+
+stage: impl-review - skipped(config: review backend not configured (ASK), none requested)
+
+stage: plan-sync - skipped(config: planSync.enabled != true)
 ## Evidence
-- Commits:
-- Tests:
+- Commits: 16a262d3c67099a1c24170f4a844b6cdfd466ff4
+- Tests: cargo test --workspace, cargo clippy --workspace --all-targets, cargo clippy -p vw-danlon-app -p vw-danlon --target aarch64-linux-android --no-default-features --features vw-danlon-app/mobile, dx build --platform android --target aarch64-linux-android
 - PRs:
