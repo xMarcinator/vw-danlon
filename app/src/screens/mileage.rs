@@ -15,7 +15,6 @@ use vw_danlon::service;
 use vw_danlon::trips::Trip;
 
 use super::kroner;
-use super::month::month_title;
 use super::period::{Bar, PagePeriods, Period, View, WEEK_MONTH, calendar_year_title, dock};
 use crate::setup::{self, MileageForm, Setup};
 use crate::{Icon, Screen};
@@ -469,7 +468,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             div { class: "alert", role: "status",
                 span { "aria-hidden": "true", style: "font-weight: 700", "!" }
                 div {
-                    "No trips yet. Import the Min Volkswagen export or sync your account in Settings. "
+                    "No trips yet: import or sync them in Settings. "
                     button { class: "link-btn", onclick: move |_| screen.set(Screen::Settings), "Open Settings" }
                 }
             }
@@ -573,7 +572,6 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let skipped_trips: usize = skipped.iter().map(|(_, n, _)| n).sum();
     let skipped_km: f64 = skipped.iter().map(|(_, _, k)| k).fold(0.0, |a, b| a + b);
     let name = p.name();
-    let month_name = month_title(m);
     let mut set_business = move |start: chrono::DateTime<chrono_tz::Tz>, business: Option<bool>| {
         let Some(cfg) = setup.peek().config.clone() else {
             return;
@@ -807,7 +805,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
         }
-        div { class: "actions",
+        div { class: "actions logbook-actions",
             match message() {
                 None => rsx! {},
                 Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
@@ -820,7 +818,8 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     message.set(Some(result));
                 },
                 Icon { d: CSV_ICON, size: 15 }
-                "Logbook CSV · {month_name}"
+                span { class: "wide-only", "Logbook CSV" }
+                span { class: "narrow-only", "CSV" }
             }
             button {
                 class: "small-btn primary-sm",
@@ -829,7 +828,7 @@ pub fn MileageScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     printing.set(true);
                 },
                 Icon { d: PRINT_ICON, size: 15 }
-                "Print {month_name} for signature"
+                "Print for signature"
             }
         }
         {dock}

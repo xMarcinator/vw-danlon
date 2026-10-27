@@ -48,6 +48,15 @@ fn synced_text(s: &SyncOutcome) -> String {
     text
 }
 
+/// A car's plate, else its id.
+fn car_name(car: &vw_danlon::connected_cars::Vehicle) -> String {
+    if car.plate.trim().is_empty() {
+        format!("Car {}", car.id)
+    } else {
+        car.plate.clone()
+    }
+}
+
 /// A calendar row in Settings: its name, use, how it was read, and the
 /// extra calendar's place in the config (removable).
 #[derive(Debug, Clone, PartialEq)]
@@ -78,9 +87,7 @@ impl CalendarRow {
             }
             CalendarRead::File => format!("File · {events}"),
             CalendarRead::NotSynced => "Not synced yet".to_string(),
-            CalendarRead::NoLink => {
-                "No link on this device: remove it and add it again".to_string()
-            }
+            CalendarRead::NoLink => "No link here: remove it and add it again".to_string(),
             CalendarRead::Failed(e) => format!("Can't be read: {e}"),
         };
         CalendarRow {
@@ -123,17 +130,17 @@ type DataJob = Box<dyn FnOnce(&Setup) -> anyhow::Result<String> + Send>;
 const IMPORT_OLD: &str = "Import old data…";
 
 #[cfg(not(target_os = "android"))]
-const DATA_NOTE: &str =
-    "Backups leave out the calendar links and account token. Importing replaces this app's data.";
+const DATA_NOTE: &str = "No links or tokens. Importing replaces this app's data.";
 #[cfg(target_os = "android")]
-const DATA_NOTE: &str = "Without calendar links and token. To import a backup, share its file to vw-danlon; importing replaces this phone's data.";
+const DATA_NOTE: &str =
+    "No links or tokens. To import, share a backup to vw-danlon; it replaces this phone's data.";
 
 /// Where the trips file comes from.
 #[cfg(not(target_os = "android"))]
-const TRIPS_NOTE: &str = "Min Volkswagen: Trips → History → share. Overlapping exports are merged.";
+const TRIPS_NOTE: &str = "Min Volkswagen: Trips → History → share. Overlaps are merged.";
 #[cfg(target_os = "android")]
 const TRIPS_NOTE: &str =
-    "Min Volkswagen: Trips → History → share → vw-danlon. Overlapping exports are merged.";
+    "Min Volkswagen: Trips → History → share → vw-danlon. Overlaps are merged.";
 
 /// Keeps the backup where the user can take it: a file in Downloads on the
 /// desktop; the share sheet on Android.
@@ -145,16 +152,13 @@ fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
         .context("no Downloads folder")?;
     let path = dir.join(name);
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
-    Ok(format!(
-        "Saved {}. The calendar links and account token are not in it.",
-        path.display()
-    ))
+    Ok(format!("Saved {}. No links or tokens.", path.display()))
 }
 
 #[cfg(target_os = "android")]
 fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
     crate::platform::share(name, "application/json", json, None)?;
-    Ok("Shared the backup. The calendar links and account token are not in it.".into())
+    Ok("Shared the backup. No links or tokens.".into())
 }
 
 /// Reads the data directory again after a change.
@@ -181,11 +185,81 @@ async fn in_background<T: Send + 'static>(
         .map_err(|e| format!("{e:#}"))
 }
 
+/// A word list edited as pills: each word has an × to remove it; a word
+/// typed in the box is added on Enter, a comma or leaving the box.
+/// Duplicates (any case) and empty words are left out.
+#[component]
+fn WordPills(
+    id: &'static str,
+    words: Vec<String>,
+    disabled: bool,
+    on_change: EventHandler<Vec<String>>,
+) -> Element {
+    let mut typed = use_signal(String::new);
+    let current = words.clone();
+    let mut add = move |text: String| {
+        typed.set(String::new());
+        let next = setup::add_words(&current, &text);
+        if next != current {
+            on_change.call(next);
+        }
+    };
+    let mut add_typed = add.clone();
+    let mut add_left = add.clone();
+    rsx! {
+        div { class: if disabled { "word-pills disabled" } else { "word-pills" },
+            for (i , word) in words.iter().enumerate() {
+                span { key: "{i}-{word}", class: "word-pill",
+                    "{word}"
+                    button {
+                        r#type: "button",
+                        class: "word-pill-x",
+                        "aria-label": "Remove {word}",
+                        disabled,
+                        onclick: {
+                            let words = words.clone();
+                            move |_| on_change.call(setup::remove_word(&words, i))
+                        },
+                        crate::Icon { d: "M18 6 6 18M6 6l12 12", size: 12 }
+                    }
+                }
+            }
+            input {
+                id,
+                r#type: "text",
+                placeholder: "Add word",
+                enterkeyhint: "done",
+                autocomplete: "off",
+                disabled,
+                value: "{typed}",
+                oninput: move |e| {
+                    let text = e.value();
+                    if text.contains(',') {
+                        add_typed(text);
+                    } else {
+                        typed.set(text);
+                    }
+                },
+                onkeydown: move |e| {
+                    if e.key() == Key::Enter {
+                        add(typed());
+                    }
+                },
+                onblur: move |_| {
+                    if !typed.peek().trim().is_empty() {
+                        add_left(typed());
+                    }
+                },
+            }
+        }
+    }
+}
+
 #[component]
 pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let initial = SettingsForm::from_config(setup.peek().config.as_ref());
-    // The private words as typed; none shows the config's.
-    let mut private_words = use_signal(|| None::<String>);
+    // The private words as edited; none shows the config's.
+    let mut private_words = use_signal(|| None::<Vec<String>>);
     // Add calendar: open, the link or file, its use, and how adding went.
     let mut adding = use_signal(|| false);
     let mut new_source = use_signal(String::new);
@@ -206,7 +280,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut workplace = use_signal(|| initial.workplace.clone());
     let mut home = use_signal(|| initial.home.clone());
     let initial_hw = initial.home_working.clone().unwrap_or(HomeWorkingForm {
-        keywords: String::new(),
+        keywords: Vec::new(),
         at_home_address: true,
     });
     let mut hw_keywords = use_signal(|| initial_hw.keywords.clone());
@@ -241,6 +315,14 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         }
     });
     let mut workplace_status = use_signal(|| None::<Result<String, String>>);
+    // The account's cars, fetched when Settings opens and after connecting;
+    // never kept (only the picked plate is, in config.toml).
+    let mut cars_version = use_signal(|| 0u32);
+    let cars = use_resource(move || {
+        let _ = cars_version();
+        async move { in_background(setup, setup::account_vehicles).await }
+    });
+    let mut car_status = use_signal(|| None::<Result<String, String>>);
 
     let s = setup.read();
     let store = s.secret_store().describe();
@@ -290,6 +372,11 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         _ => "No trips imported yet.".to_string(),
     };
     let connected = matches!(s.account, AccountStatus::Connected { .. });
+    let wanted_car = s
+        .config
+        .as_ref()
+        .and_then(|c| c.connected_cars.as_ref())
+        .and_then(|c| c.vehicle.clone());
     let has_config = s.config.is_some();
     let account = match &s.account {
         AccountStatus::NotSetUp => "Not set up".to_string(),
@@ -432,6 +519,9 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             .await;
             password.set(String::new());
             reload(setup);
+            if result.is_ok() {
+                cars_version += 1;
+            }
             account_status.set(Some(result.map(|()| "Connected".into())));
             busy.set(false);
         });
@@ -441,9 +531,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         spawn(async move {
             let result = in_background(setup, setup::disconnect_account).await;
             reload(setup);
-            account_status.set(Some(
-                result.map(|()| "Disconnected; the device token is deleted".into()),
-            ));
+            account_status.set(Some(result.map(|()| "Disconnected; token deleted".into())));
             busy.set(false);
         });
     };
@@ -607,7 +695,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         oninput: move |e| new_source.set(e.value()),
                     }
                     span { class: "note",
-                        "In Proton Calendar on the web: the calendar's Settings → Share with anyone → Create link."
+                        "Proton web: calendar Settings → Share with anyone → Create link."
                         if cfg!(target_os = "android") {
                             " Or share the link to vw-danlon."
                         }
@@ -626,12 +714,12 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     span { class: "sub",
                         if new_kind() == NewCalendar::WorkingHours {
                             if has_calendar {
-                                "Replaces the work calendar: planned hours, days off and vacation."
+                                "Replaces the work calendar: hours, days off, vacation."
                             } else {
-                                "Planned hours, days off and vacation."
+                                "Hours, days off, vacation."
                             }
                         } else {
-                            "Private: every timed event in it is private time. Words only: only titles with the private words below."
+                            "Private: all events. Words only: titles with the words below."
                         }
                     }
                     div { class: "cal-add-actions",
@@ -665,7 +753,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
             }
             span { class: "note",
-                "The links are kept in {store}. One calendar is for working hours."
+                "Links kept in {store}."
             }
         }
 
@@ -674,16 +762,15 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             span { class: "sub", "Not company time." }
             div { class: "field",
                 label { r#for: "priv-kw", "Event titles containing" }
-                input {
+                WordPills {
                     id: "priv-kw",
-                    r#type: "text",
+                    words: words_shown,
                     disabled: !has_calendar,
-                    value: "{words_shown}",
-                    oninput: move |e| private_words.set(Some(e.value())),
+                    on_change: move |w| private_words.set(Some(w)),
                 }
                 span { class: "note",
                     if has_calendar {
-                        "Whole words, comma-separated. Checked in every calendar."
+                        "Whole words, every calendar."
                     } else {
                         "Add the work calendar first."
                     }
@@ -771,13 +858,13 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             div { class: "grid2",
                 div { class: "field",
                     label { r#for: "h-kw", "Event titles containing" }
-                    input {
+                    WordPills {
                         id: "h-kw",
-                        r#type: "text",
-                        value: "{hw_keywords}",
-                        oninput: move |e| hw_keywords.set(e.value()),
+                        words: hw_keywords(),
+                        disabled: false,
+                        on_change: move |w| hw_keywords.set(w),
                     }
-                    span { class: "note", "Whole words, comma-separated" }
+                    span { class: "note", "Whole words" }
                 }
                 label { class: "check hw-check",
                     input {
@@ -785,7 +872,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                         checked: hw_at_home(),
                         onchange: move |e| hw_at_home.set(e.checked()),
                     }
-                    span { "An event at the home address is home working" }
+                    span { "Events at home count too" }
                 }
             }
         }
@@ -907,7 +994,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                             }
                         }
                         div { class: "field",
-                            label { r#for: "acc-pw", "Password (used once, never stored)" }
+                            label { r#for: "acc-pw", "Password" }
                             input {
                                 id: "acc-pw",
                                 r#type: "password",
@@ -926,8 +1013,61 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
                     Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
                 }
+                if connected {
+                    fieldset { class: "car-pick",
+                        legend { "Car" }
+                        match &*cars.read() {
+                            None => rsx! { span { class: "note car-row", "Loading the cars…" } },
+                            Some(Err(e)) => rsx! { span { class: "status-bad car-row", role: "status", "Cars can't be listed: {e}" } },
+                            Some(Ok(list)) if list.is_empty() => rsx! { span { class: "note car-row", "No cars on the account." } },
+                            Some(Ok(list)) => {
+                                let picked = vw_danlon::connected_cars::pick_vehicle(list, wanted_car.as_deref())
+                                    .ok()
+                                    .map(|v| v.id.clone());
+                                rsx! {
+                                    for car in list.clone() {
+                                        label { key: "{car.id}", class: "car-row",
+                                            input {
+                                                r#type: "radio",
+                                                name: "car",
+                                                checked: picked.as_deref() == Some(car.id.as_str()),
+                                                disabled: busy(),
+                                                onchange: {
+                                                    let car = car.clone();
+                                                    move |_| {
+                                                        let result = setup::save_vehicle(&setup.peek(), &car);
+                                                        if result.is_ok() {
+                                                            reload(setup);
+                                                        }
+                                                        car_status.set(Some(
+                                                            result
+                                                                .map(|()| {
+                                                                    if has_mileage && !car.plate.trim().is_empty() {
+                                                                        "Saved · also on the logbook".to_string()
+                                                                    } else {
+                                                                        "Saved".to_string()
+                                                                    }
+                                                                })
+                                                                .map_err(|e| format!("Not saved: {e:#}")),
+                                                        ));
+                                                    }
+                                                },
+                                            }
+                                            b { class: "mono", "{car_name(&car)}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    match car_status() {
+                        None => rsx! {},
+                        Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
+                        Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
+                    }
+                }
                 span { class: "note",
-                    "Auto-syncs every 15 min · unofficial, may stop working · password never stored"
+                    "Every 15 min · unofficial · password never stored"
                 }
             }
         }
@@ -941,7 +1081,7 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     onchange: toggle_file,
                 }
                 span {
-                    "Keep secrets in a file readable only by you"
+                    "Keep secrets in a file only you can read"
                     br {}
                     span { class: "note",
                         "For systems without a keychain."

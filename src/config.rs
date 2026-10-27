@@ -671,7 +671,20 @@ impl Config {
                 "periods.unpaid_break_minutes is no longer supported; set the lunch break in [lunch] (start, minutes, title)"
             );
         }
-        let mut cfg: Config = toml::from_str(text)?;
+        // The app keeps the work calendar's link in its secret store, so its
+        // `[calendar]` (the private words) may have no source: that reads as
+        // no work calendar.
+        let sourceless = raw
+            .get("calendar")
+            .and_then(|c| c.as_table())
+            .is_some_and(|c| !c.contains_key("source"));
+        let mut cfg: Config = if sourceless {
+            let mut raw = raw;
+            raw.remove("calendar");
+            toml::Value::Table(raw).try_into()?
+        } else {
+            toml::from_str(text)?
+        };
         cfg.known_places = cfg.resolve_places()?;
         Ok(cfg)
     }

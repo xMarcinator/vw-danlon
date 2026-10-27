@@ -534,6 +534,24 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Mileage: the two logbook buttons on one row; on a phone two equal
+   halves under the status line. */
+.logbook-actions .small-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+@media (max-width: 719px) {
+  .logbook-actions .small-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 44px;
+    font-size: 14px;
+  }
+}
+
 .primary {
   font-size: 14px;
   min-height: 44px;
@@ -1439,7 +1457,7 @@ table.days tr.flagged {
    buttons are in the dock. */
 .work-card > .pt-head {
   align-items: flex-start;
-  padding: 12px 14px 0;
+  padding: 12px 14px;
 }
 
 .work-card > .pt-head .pt-dot {
@@ -1456,7 +1474,7 @@ table.days tr.flagged {
 }
 
 .work-card > .pt-head + .pt-status {
-  margin-top: 10px;
+  margin-top: 0;
 }
 
 .pt-btn.secondary {
@@ -1603,7 +1621,7 @@ table.days tr.flagged {
   }
 
   .work-card > .pt-status {
-    margin-bottom: 0;
+    margin-bottom: 12px;
   }
 }
 
@@ -3471,5 +3489,144 @@ table.rates td:first-child {
   .cal-add-btn,
   .cal-add-actions .small-btn {
     min-height: 48px;
+  }
+}
+
+/* Settings: a word list as pills in one box, the typed word last. */
+.word-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--field);
+}
+
+.word-pills:focus-within {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
+.word-pills.disabled {
+  opacity: 0.6;
+}
+
+.word-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  padding: 0 2px 0 10px;
+  border-radius: 999px;
+  background: var(--chip);
+  font-size: 13px;
+}
+
+.word-pill-x {
+  font: inherit;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--sub);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.word-pill-x:hover:not(:disabled) {
+  background: var(--line);
+}
+
+.card .word-pills input[type="text"] {
+  flex: 1 1 90px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border: none;
+  background: none;
+  outline: none;
+}
+
+.card .word-pills input:disabled {
+  opacity: 1;
+}
+
+/* Settings: the account's cars as radio rows. */
+.car-pick {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 0;
+  padding: 2px 0 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.car-pick legend {
+  margin-left: 8px;
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.car-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+label.car-row + label.car-row {
+  border-top: 1px solid var(--row);
+}
+
+.car-row input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--acc);
+}
+
+@media (max-width: 719px) {
+  .word-pills {
+    min-height: 48px;
+    padding: 6px;
+    border-radius: 10px;
+  }
+
+  .word-pill {
+    min-height: 32px;
+    padding-left: 12px;
+    font-size: 15px;
+  }
+
+  .word-pill-x {
+    width: 32px;
+    height: 32px;
+  }
+
+  .card .word-pills input[type="text"] {
+    font-size: 16px;
+    height: 32px;
+  }
+
+  .car-row {
+    min-height: 52px;
+    font-size: 14px;
+  }
+
+  .car-row input {
+    width: 20px;
+    height: 20px;
   }
 }

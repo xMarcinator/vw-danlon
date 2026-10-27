@@ -1798,6 +1798,15 @@ pub fn sync_trips_with(
     })
 }
 
+/// The account's vehicles, to pick the one to sync.
+pub fn account_vehicles(access: &AccountAccess, token: &str) -> Result<Vec<Vehicle>> {
+    let mut sleep = std::thread::sleep;
+    let session = connected_cars::retry_429(&mut sleep, || {
+        connected_cars::Session::login(access.namespace, token)
+    })?;
+    connected_cars::retry_429(&mut sleep, || session.vehicles())
+}
+
 /// The trips of a period fetched from the account, not stored.
 #[derive(Debug)]
 pub struct AccountCheck {

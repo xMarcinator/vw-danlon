@@ -10,7 +10,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use vw_danlon::backup::{self, Backup};
 use vw_danlon::config::{CalendarUse, Config};
-use vw_danlon::connected_cars;
+use vw_danlon::connected_cars::{self, Vehicle};
 use vw_danlon::db;
 use vw_danlon::service::{self, AccountAccess, SyncOutcome};
 use vw_danlon::state::State;
@@ -88,7 +88,7 @@ impl fmt::Display for Problem {
             Problem::BadAppSettings(e) => write!(f, "App settings can't be read: {e}"),
             Problem::NoConfig(p) => write!(
                 f,
-                "No config file at {}. Fill in the settings below and save to create it.",
+                "No config file at {}. Save the settings below to create it.",
                 p.display()
             ),
             Problem::BadConfig(e) => write!(f, "The config file can't be used: {e}"),
@@ -96,13 +96,10 @@ impl fmt::Display for Problem {
                 f,
                 "Secrets can't be read: {e}. Turn on \u{201c}Keep secrets in a file\u{201d} below to use a file only you can read."
             ),
-            Problem::NoCalendar => write!(
-                f,
-                "No work calendar yet. Add it under Calendars below, for working hours, to see your hours."
-            ),
+            Problem::NoCalendar => write!(f, "No work calendar yet: add it under Calendars below."),
             Problem::NoTrips => write!(
                 f,
-                "No trips yet. Import the Min Volkswagen export or sync your account to see mileage."
+                "No trips yet: import the Min Volkswagen export or sync the account."
             ),
             Problem::BadTrips(e) => write!(f, "The stored data can't be read: {e}"),
         }
@@ -313,7 +310,7 @@ fn write_app_settings(path: &Path, settings: &AppSettings) -> Result<()> {
 /// `text` with `[calendar] source` set to `link`, when there is one: the
 /// app keeps the link in the secret store, not in the config file. Without
 /// a link, a `[calendar]` without a source (as a backup from another
-/// device has it) is left out, so the app asks for the link. Each extra
+/// device has it) reads as no work calendar, so the app asks for it. Each extra
 /// calendar with an `id` and no `source` gets its link from `store`; one
 /// without a link stays unread.
 fn with_calendar_links(
@@ -340,13 +337,6 @@ fn with_calendar_links(
         }
     }
     let Some(link) = link else {
-        if doc
-            .get("calendar")
-            .and_then(|c| c.as_table_like())
-            .is_some_and(|c| !c.contains_key("source"))
-        {
-            doc.remove("calendar");
-        }
         return Ok(doc.to_string());
     };
     let cal = doc
@@ -358,13 +348,37 @@ fn with_calendar_links(
     Ok(doc.to_string())
 }
 
-/// Words from a comma-separated field, e.g. "Hjemmearbejde, Hjemme".
-fn words(text: &str) -> Vec<String> {
-    text.split(',')
-        .map(str::trim)
-        .filter(|w| !w.is_empty())
-        .map(String::from)
-        .collect()
+/// `words` trimmed, without empty words and case-insensitive duplicates
+/// (the first one is kept).
+pub fn clean_words(words: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in words {
+        let w = w.trim();
+        if !w.is_empty() && !out.iter().any(|o| o.to_lowercase() == w.to_lowercase()) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
+/// `words` without the one at `index` (the pill's ×).
+pub fn remove_word(words: &[String], index: usize) -> Vec<String> {
+    let mut out = words.to_vec();
+    if index < out.len() {
+        out.remove(index);
+    }
+    out
+}
+
+/// `words` followed by the words typed in a word field: a comma separates
+/// words, e.g. "Hjemmearbejde, Hjemme".
+pub fn add_words(words: &[String], typed: &str) -> Vec<String> {
+    clean_words(
+        words
+            .iter()
+            .cloned()
+            .chain(typed.split(',').map(String::from)),
+    )
 }
 
 /// What the Settings screen saves.
@@ -374,16 +388,15 @@ pub struct SettingsForm {
     pub home: String,
     /// `[home_working]`; none leaves it as it is.
     pub home_working: Option<HomeWorkingForm>,
-    /// The private words (`calendar.private_keywords`), comma-separated;
-    /// none leaves them as they are.
-    pub private_words: Option<String>,
+    /// The private words (`calendar.private_keywords`); none leaves them
+    /// as they are.
+    pub private_words: Option<Vec<String>>,
 }
 
 /// The Settings screen's Working from home section.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HomeWorkingForm {
-    /// Comma-separated words, e.g. "Hjemmearbejde, Hjemme".
-    pub keywords: String,
+    pub keywords: Vec<String>,
     pub at_home_address: bool,
 }
 
@@ -391,13 +404,13 @@ impl HomeWorkingForm {
     fn from_config(cfg: Option<&Config>) -> HomeWorkingForm {
         let h = cfg.map(|c| c.home_working.clone()).unwrap_or_default();
         HomeWorkingForm {
-            keywords: h.keywords.join(", "),
+            keywords: h.keywords,
             at_home_address: h.at_home_address,
         }
     }
 
     fn keywords(&self) -> Vec<String> {
-        words(&self.keywords)
+        clean_words(self.keywords.iter().cloned())
     }
 }
 
@@ -411,10 +424,7 @@ impl SettingsForm {
                 .and_then(|m| m.home.clone())
                 .unwrap_or_default(),
             home_working: Some(HomeWorkingForm::from_config(cfg)),
-            private_words: Some(
-                cfg.map(|c| c.private_words().join(", "))
-                    .unwrap_or_default(),
-            ),
+            private_words: Some(cfg.map(|c| c.private_words().to_vec()).unwrap_or_default()),
         }
     }
 }
@@ -506,10 +516,10 @@ pub fn save(setup: &Setup, form: &SettingsForm) -> Result<()> {
         .as_ref()
         .and_then(|c| c.calendar.as_ref())
         .map(|c| &c.private_keywords);
-    if let (Some(text), Some(current)) = (&form.private_words, current) {
+    if let (Some(typed), Some(current)) = (&form.private_words, current) {
         // Written when they change, or kept up to date when the file has
         // them.
-        let new_words = words(text);
+        let new_words = clean_words(typed.iter().cloned());
         let in_file = doc
             .get("calendar")
             .and_then(|c| c.as_table_like())
@@ -817,17 +827,63 @@ pub fn connect_account(
     service::remember_account(cfg, email)
 }
 
+/// The state file and the connected account's device token from `store`.
+fn account_token(cfg: &Config, store: &dyn SecretStore) -> Result<(State, String)> {
+    let (state, email) = account_email(cfg)?;
+    let token = store
+        .get(&Secret::DeviceToken(email.clone()))?
+        .with_context(|| format!("no device token for {email}: connect the account again"))?;
+    Ok((state, token))
+}
+
 /// Fetches the trips since the newest stored one from the account.
 pub fn sync_account(
     cfg: &Config,
     store: &dyn SecretStore,
     today: NaiveDate,
 ) -> Result<SyncOutcome> {
-    let (state, email) = account_email(cfg)?;
-    let token = store
-        .get(&Secret::DeviceToken(email.clone()))?
-        .with_context(|| format!("no device token for {email}: connect the account again"))?;
+    let (state, token) = account_token(cfg, store)?;
     service::sync_trips_with(cfg, &AccountAccess::new(cfg, &state), &token, None, today)
+}
+
+/// The cars on the connected account, to pick one in Settings; not kept.
+pub fn account_vehicles(cfg: &Config, store: &dyn SecretStore) -> Result<Vec<Vehicle>> {
+    let (state, token) = account_token(cfg, store)?;
+    service::account_vehicles(&AccountAccess::new(cfg, &state), &token)
+}
+
+/// Saves the car picked in Settings as `connected_cars.vehicle` (its plate,
+/// else its id), the car trips are synced from. With the logbook set up,
+/// its plate is the logbook's registration number too.
+pub fn save_vehicle(setup: &Setup, vehicle: &Vehicle) -> Result<()> {
+    let path = setup.config_path();
+    let old = setup
+        .config_text
+        .as_deref()
+        .context("the config can't be used yet")?;
+    let mut doc: toml_edit::DocumentMut = old
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let plate = vehicle.plate.trim();
+    if !doc.contains_key("connected_cars") {
+        let mut t = toml_edit::Table::new();
+        t.decor_mut()
+            .set_prefix("\n# The Min Volkswagen account's car, picked in the app.\n");
+        doc.insert("connected_cars", toml_edit::Item::Table(t));
+    }
+    doc["connected_cars"]
+        .as_table_like_mut()
+        .context("[connected_cars] is not a table")?
+        .insert(
+            "vehicle",
+            toml_edit::value(if plate.is_empty() { &vehicle.id } else { plate }),
+        );
+    if let Some(m) = doc.get_mut("mileage").and_then(|m| m.as_table_like_mut())
+        && !plate.is_empty()
+    {
+        m.insert("registration_number", toml_edit::value(plate));
+    }
+    write_checked(setup, &doc.to_string())
 }
 
 /// Deletes the device token and forgets the account.
@@ -1132,7 +1188,7 @@ pub mod tests {
         assert!(!text.contains("private_keywords"), "{text}");
 
         let form = SettingsForm {
-            private_words: Some("Læge, Frisør ,, ".into()),
+            private_words: Some(add_words(&[], "Læge, Frisør ,, ")),
             ..SettingsForm::from_config(s.config.as_ref())
         };
         save(&s, &form).unwrap();
@@ -1140,13 +1196,84 @@ pub mod tests {
         let cfg = s.config.as_ref().unwrap();
         assert_eq!(cfg.private_words(), ["Læge", "Frisør"]);
         assert_eq!(
-            SettingsForm::from_config(Some(cfg))
-                .private_words
-                .as_deref(),
-            Some("Læge, Frisør")
+            SettingsForm::from_config(Some(cfg)).private_words,
+            Some(vec!["Læge".to_string(), "Frisør".to_string()])
         );
         let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
         assert!(!text.contains(".ics"), "{text}");
+        // The link is in the secret store: the CLI reads the file as one
+        // without a work calendar.
+        let cli = Config::load(&dir.join("config.toml")).unwrap();
+        assert!(cli.calendar.is_none());
+    }
+
+    #[test]
+    fn a_picked_car_is_synced_and_on_the_logbook() {
+        let cars = [
+            Vehicle {
+                id: "123".into(),
+                plate: "AB 12 345".into(),
+            },
+            Vehicle {
+                id: "456".into(),
+                plate: "CD 67 890".into(),
+            },
+        ];
+        let dir = file_dir("vehicle");
+        std::fs::write(dir.join("config.toml"), MILEAGE).unwrap();
+        save_vehicle(&Setup::load(Ok(dir.clone())), &cars[1]).unwrap();
+        let cfg = Config::load(&dir.join("config.toml")).unwrap();
+        let wanted = cfg.connected_cars.as_ref().unwrap().vehicle.as_deref();
+        assert_eq!(wanted, Some("CD 67 890"));
+        assert_eq!(
+            cfg.mileage.as_ref().unwrap().registration_number,
+            "CD 67 890"
+        );
+        assert_eq!(
+            connected_cars::pick_vehicle(&cars, wanted).unwrap().id,
+            "456"
+        );
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(text.contains("# keep me"), "{text}");
+        assert!(!text.contains("AB 12 345"), "{text}");
+
+        // Picking again replaces it; without a logbook only the car is kept.
+        let dir = file_dir("vehicle-no-logbook");
+        std::fs::write(
+            dir.join("config.toml"),
+            "employee_number = \"1\"\n[danlon]\n",
+        )
+        .unwrap();
+        save_vehicle(&Setup::load(Ok(dir.clone())), &cars[1]).unwrap();
+        save_vehicle(&Setup::load(Ok(dir.clone())), &cars[0]).unwrap();
+        let cfg = Config::load(&dir.join("config.toml")).unwrap();
+        assert_eq!(
+            cfg.connected_cars.unwrap().vehicle.as_deref(),
+            Some("AB 12 345")
+        );
+        assert!(cfg.mileage.is_none());
+    }
+
+    #[test]
+    fn typed_words_are_added_once_and_removed() {
+        let w = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let list = w(&["Læge", "Frisør"]);
+        for (typed, want) in [
+            ("Tandlæge", w(&["Læge", "Frisør", "Tandlæge"])),
+            (
+                " Tandlæge , Gym,",
+                w(&["Læge", "Frisør", "Tandlæge", "Gym"]),
+            ),
+            ("læge", w(&["Læge", "Frisør"])),
+            ("Gym, GYM", w(&["Læge", "Frisør", "Gym"])),
+            ("  ", w(&["Læge", "Frisør"])),
+            (",,", w(&["Læge", "Frisør"])),
+        ] {
+            assert_eq!(add_words(&list, typed), want, "{typed:?}");
+        }
+        assert_eq!(remove_word(&list, 0), w(&["Frisør"]));
+        assert_eq!(remove_word(&list, 1), w(&["Læge"]));
+        assert_eq!(remove_word(&list, 2), list);
     }
 
     #[test]
@@ -1169,7 +1296,7 @@ pub mod tests {
         let s = Setup::load(Ok(dir.clone()));
         let form = SettingsForm {
             home_working: Some(HomeWorkingForm {
-                keywords: "Hjemme".into(),
+                keywords: vec!["Hjemme".into()],
                 at_home_address: false,
             }),
             ..SettingsForm::default()
@@ -1199,7 +1326,7 @@ pub mod tests {
         let s = Setup::load(Ok(dir.clone()));
         let form = SettingsForm {
             home_working: Some(HomeWorkingForm {
-                keywords: " Hjemme , WFH,, ".into(),
+                keywords: vec![" Hjemme ".into(), "WFH".into(), "".into(), "wfh".into()],
                 at_home_address: false,
             }),
             ..SettingsForm::from_config(s.config.as_ref())
@@ -1211,7 +1338,7 @@ pub mod tests {
         assert_eq!(
             SettingsForm::from_config(Some(&cfg)).home_working.unwrap(),
             HomeWorkingForm {
-                keywords: "Hjemme, WFH".into(),
+                keywords: vec!["Hjemme".into(), "WFH".into()],
                 at_home_address: false,
             }
         );
