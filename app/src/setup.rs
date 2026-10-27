@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use vw_danlon::backup::{self, Backup};
-use vw_danlon::config::Config;
+use vw_danlon::config::{CalendarUse, Config};
 use vw_danlon::connected_cars;
 use vw_danlon::db;
 use vw_danlon::service::{self, AccountAccess, SyncOutcome};
@@ -98,7 +98,7 @@ impl fmt::Display for Problem {
             ),
             Problem::NoCalendar => write!(
                 f,
-                "No work calendar yet. Paste your Proton share link below to see your hours."
+                "No work calendar yet. Add it under Calendars below, for working hours, to see your hours."
             ),
             Problem::NoTrips => write!(
                 f,
@@ -138,8 +138,6 @@ pub struct Setup {
     pub config: Option<Config>,
     /// The config file's text, for the Settings form.
     pub config_text: Option<String>,
-    /// Whether a calendar link is kept in the secret store.
-    pub link_in_store: bool,
     pub trips: Option<TripsSummary>,
     /// When the trips and state were moved in from the JSON files.
     pub migrated: Option<db::Migrated>,
@@ -171,7 +169,6 @@ impl Setup {
                     settings: AppSettings::default(),
                     config: None,
                     config_text: None,
-                    link_in_store: false,
                     trips: None,
                     migrated: None,
                     account: AccountStatus::NotSetUp,
@@ -192,7 +189,6 @@ impl Setup {
             settings,
             config: None,
             config_text: None,
-            link_in_store: false,
             trips: None,
             migrated: None,
             account: AccountStatus::NotSetUp,
@@ -206,12 +202,11 @@ impl Setup {
                 None
             }
         };
-        setup.link_in_store = link.is_some();
 
         let path = setup.config_path();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                match with_calendar_link(&text, link.as_deref())
+                match with_calendar_links(&text, link.as_deref(), Some(store.as_ref()))
                     .and_then(|t| Config::from_text(&t, &path))
                 {
                     Ok(cfg) => setup.config = Some(cfg),
@@ -318,9 +313,32 @@ fn write_app_settings(path: &Path, settings: &AppSettings) -> Result<()> {
 /// `text` with `[calendar] source` set to `link`, when there is one: the
 /// app keeps the link in the secret store, not in the config file. Without
 /// a link, a `[calendar]` without a source (as a backup from another
-/// device has it) is left out, so the app asks for the link.
-fn with_calendar_link(text: &str, link: Option<&str>) -> Result<String> {
+/// device has it) is left out, so the app asks for the link. Each extra
+/// calendar with an `id` and no `source` gets its link from `store`; one
+/// without a link stays unread.
+fn with_calendar_links(
+    text: &str,
+    link: Option<&str>,
+    store: Option<&dyn SecretStore>,
+) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = text.parse()?;
+    if let (Some(store), Some(extra)) = (
+        store,
+        doc.get_mut("extra_calendars")
+            .and_then(|c| c.as_array_of_tables_mut()),
+    ) {
+        for cal in extra.iter_mut() {
+            let Some(id) = cal.get("id").and_then(|i| i.as_str()) else {
+                continue;
+            };
+            if cal.contains_key("source") {
+                continue;
+            }
+            if let Ok(Some(link)) = store.get(&Secret::ExtraCalendarLink(id.to_string())) {
+                cal["source"] = toml_edit::value(link);
+            }
+        }
+    }
     let Some(link) = link else {
         if doc
             .get("calendar")
@@ -340,15 +358,25 @@ fn with_calendar_link(text: &str, link: Option<&str>) -> Result<String> {
     Ok(doc.to_string())
 }
 
+/// Words from a comma-separated field, e.g. "Hjemmearbejde, Hjemme".
+fn words(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 /// What the Settings screen saves.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SettingsForm {
-    /// A new calendar link; empty keeps the stored one.
-    pub calendar_link: String,
     pub workplace: String,
     pub home: String,
     /// `[home_working]`; none leaves it as it is.
     pub home_working: Option<HomeWorkingForm>,
+    /// The private words (`calendar.private_keywords`), comma-separated;
+    /// none leaves them as they are.
+    pub private_words: Option<String>,
 }
 
 /// The Settings screen's Working from home section.
@@ -369,26 +397,24 @@ impl HomeWorkingForm {
     }
 
     fn keywords(&self) -> Vec<String> {
-        self.keywords
-            .split(',')
-            .map(str::trim)
-            .filter(|w| !w.is_empty())
-            .map(String::from)
-            .collect()
+        words(&self.keywords)
     }
 }
 
 impl SettingsForm {
-    /// The form as the config has it now (the link is never shown).
+    /// The form as the config has it now.
     pub fn from_config(cfg: Option<&Config>) -> SettingsForm {
         SettingsForm {
-            calendar_link: String::new(),
             workplace: cfg.and_then(|c| c.workplace.clone()).unwrap_or_default(),
             home: cfg
                 .and_then(|c| c.mileage.as_ref())
                 .and_then(|m| m.home.clone())
                 .unwrap_or_default(),
             home_working: Some(HomeWorkingForm::from_config(cfg)),
+            private_words: Some(
+                cfg.map(|c| c.private_words().join(", "))
+                    .unwrap_or_default(),
+            ),
         }
     }
 }
@@ -421,9 +447,8 @@ pub fn detected_workplace(cfg: &Config) -> Option<Option<String>> {
     Some(service::effective_workplace(cfg, &cal.occurrences, month).map(|(w, _)| w))
 }
 
-/// Saves the form: the calendar link to the secret store, the addresses to
-/// `config.toml` (created when missing, comments kept). Nothing is written
-/// unless the resulting config can be read.
+/// Saves the form to `config.toml` (created when missing, comments kept).
+/// Nothing is written unless the resulting config can be read.
 pub fn save(setup: &Setup, form: &SettingsForm) -> Result<()> {
     let path = setup.config_path();
     let old = setup.config_text.as_deref().unwrap_or(STARTER_CONFIG);
@@ -474,26 +499,218 @@ pub fn save(setup: &Setup, form: &SettingsForm) -> Result<()> {
             t.insert("at_home_address", toml_edit::value(h.at_home_address));
         }
     }
-    let new = doc.to_string();
-
-    let store = setup.secret_store();
-    let link = form.calendar_link.trim();
-    let link = if link.is_empty() {
-        store.get(&Secret::CalendarLink)?
-    } else {
-        Some(link.to_string())
-    };
-    Config::from_text(&with_calendar_link(&new, link.as_deref())?, &path).context("not saved")?;
-
-    if !form.calendar_link.trim().is_empty() {
-        store
-            .set(&Secret::CalendarLink, form.calendar_link.trim())
-            .context("calendar link not saved")?;
+    // The private words belong to the work calendar: without one they are
+    // not in effect and are left as they are.
+    let current = setup
+        .config
+        .as_ref()
+        .and_then(|c| c.calendar.as_ref())
+        .map(|c| &c.private_keywords);
+    if let (Some(text), Some(current)) = (&form.private_words, current) {
+        // Written when they change, or kept up to date when the file has
+        // them.
+        let new_words = words(text);
+        let in_file = doc
+            .get("calendar")
+            .and_then(|c| c.as_table_like())
+            .is_some_and(|c| c.contains_key("private_keywords"));
+        if in_file || *current != new_words {
+            let cal = doc
+                .entry("calendar")
+                .or_insert(toml_edit::table())
+                .as_table_like_mut()
+                .context("[calendar] is not a table")?;
+            cal.insert(
+                "private_keywords",
+                toml_edit::value(new_words.iter().collect::<toml_edit::Array>()),
+            );
+        }
     }
-    if setup.config_text.as_deref() != Some(new.as_str()) {
+    write_checked(setup, &doc.to_string())
+}
+
+/// Writes `new` as `config.toml` (created when missing) when it differs,
+/// once it reads as a config with the links from the secret store.
+fn write_checked(setup: &Setup, new: &str) -> Result<()> {
+    let path = setup.config_path();
+    let store = setup.secret_store();
+    let link = store.get(&Secret::CalendarLink)?;
+    Config::from_text(
+        &with_calendar_links(new, link.as_deref(), Some(store.as_ref()))?,
+        &path,
+    )
+    .context("not saved")?;
+    if setup.config_text.as_deref() != Some(new) {
         std::fs::create_dir_all(&setup.dir)
             .with_context(|| format!("creating {}", setup.dir.display()))?;
-        write_atomic(&path, &new)?;
+        write_atomic(&path, new)?;
+    }
+    Ok(())
+}
+
+/// What a calendar added in Settings is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewCalendar {
+    /// The work calendar: it replaces the one there is.
+    WorkingHours,
+    /// An extra calendar for private appointments.
+    Extra(CalendarUse),
+}
+
+impl NewCalendar {
+    pub const ALL: [NewCalendar; 3] = [
+        NewCalendar::WorkingHours,
+        NewCalendar::Extra(CalendarUse::Private),
+        NewCalendar::Extra(CalendarUse::WordsOnly),
+    ];
+
+    pub fn label(self) -> &'static str {
+        use_label(match self {
+            NewCalendar::WorkingHours => None,
+            NewCalendar::Extra(u) => Some(u),
+        })
+    }
+}
+
+/// A calendar's use, as Settings names it (none: the work calendar).
+pub fn use_label(usage: Option<CalendarUse>) -> &'static str {
+    match usage {
+        None => "Working hours",
+        Some(CalendarUse::Private) => "Private",
+        Some(CalendarUse::WordsOnly) => "Words only",
+    }
+}
+
+/// Adds the calendar at `source` (a share link or a .ics file): it is read
+/// once to check it and to learn its name (a link's copy is kept), then its
+/// link goes to the secret store. Working hours replaces the work
+/// calendar's link; an extra calendar is listed in `config.toml` with its
+/// use and name. The text says what was added.
+pub fn add_calendar(setup: &Setup, source: &str, kind: NewCalendar) -> Result<String> {
+    let source = source.trim();
+    if source.is_empty() {
+        bail!("paste the calendar's share link or the path of a .ics file");
+    }
+    let path = setup.config_path();
+    let old = setup.config_text.as_deref().unwrap_or(STARTER_CONFIG);
+    let cfg = match &setup.config {
+        Some(c) => c.clone(),
+        None => Config::from_text(&with_calendar_links(old, None, None)?, &path)
+            .context("the config can't be used yet")?,
+    };
+    std::fs::create_dir_all(&setup.dir)
+        .with_context(|| format!("creating {}", setup.dir.display()))?;
+    let found = service::check_calendar(&cfg, source)?;
+    let store = setup.secret_store();
+    let mut doc: toml_edit::DocumentMut = old
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let (secret, name) = match kind {
+        NewCalendar::WorkingHours => {
+            if let (Some(expected), Some(found)) =
+                (cfg.calendar.as_ref().and_then(|c| c.name.as_ref()), &found)
+                && !found.trim().eq_ignore_ascii_case(expected.trim())
+            {
+                bail!(
+                    "the calendar is {found:?}, but config.toml expects {expected:?} (calendar.name)"
+                );
+            }
+            (Secret::CalendarLink, found.unwrap_or_else(|| "Work".into()))
+        }
+        NewCalendar::Extra(usage) => {
+            let name = found.unwrap_or_else(|| file_stem(source));
+            let id = format!("c{}", chrono::Utc::now().timestamp_millis());
+            let mut t = toml_edit::Table::new();
+            t["id"] = toml_edit::value(&id);
+            t["use"] = toml_edit::value(usage.id());
+            t["name"] = toml_edit::value(&name);
+            let list = doc
+                .entry("extra_calendars")
+                .or_insert_with(|| toml_edit::Item::ArrayOfTables(Default::default()))
+                .as_array_of_tables_mut()
+                .context("extra_calendars is not a list of tables")?;
+            if list.is_empty() {
+                t.decor_mut().set_prefix(
+                    "\n# Calendars for private appointments, added in the app (links in the secret store).\n",
+                );
+            }
+            list.push(t);
+            (Secret::ExtraCalendarLink(id), name)
+        }
+    };
+    let new = doc.to_string();
+    let link = match &secret {
+        Secret::CalendarLink => Some(source.to_string()),
+        _ => store.get(&Secret::CalendarLink)?,
+    };
+    // The new config must read with the new link before anything is kept.
+    let mut check: toml_edit::DocumentMut =
+        with_calendar_links(&new, link.as_deref(), Some(store.as_ref()))?.parse()?;
+    if let Secret::ExtraCalendarLink(_) = &secret
+        && let Some(added) = check
+            .get_mut("extra_calendars")
+            .and_then(|c| c.as_array_of_tables_mut())
+            .and_then(|l| l.iter_mut().last())
+    {
+        added["source"] = toml_edit::value(source);
+    }
+    Config::from_text(&check.to_string(), &path).context("not added")?;
+    store
+        .set(&secret, source)
+        .context("the calendar link can't be kept")?;
+    if setup.config_text.as_deref() != Some(new.as_str())
+        && let Err(e) = write_atomic(&path, &new)
+    {
+        if matches!(secret, Secret::ExtraCalendarLink(_)) {
+            let _ = store.delete(&secret);
+        }
+        return Err(e);
+    }
+    Ok(format!("Added {name} ({})", kind.label()))
+}
+
+/// A .ics file's name without the extension, else "Calendar".
+fn file_stem(source: &str) -> String {
+    Path::new(source.split(['?', '#']).next().unwrap_or(source))
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !source.contains("://") && !s.is_empty())
+        .unwrap_or("Calendar")
+        .to_string()
+}
+
+/// Removes the extra calendar at `index` of `[[extra_calendars]]` from
+/// `config.toml` and its link from the secret store. The work calendar is
+/// not removable.
+pub fn remove_calendar(setup: &Setup, index: usize) -> Result<()> {
+    let path = setup.config_path();
+    let old = setup
+        .config_text
+        .as_deref()
+        .context("the config can't be used yet")?;
+    let mut doc: toml_edit::DocumentMut = old
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let list = doc
+        .get_mut("extra_calendars")
+        .and_then(|c| c.as_array_of_tables_mut())
+        .filter(|l| index < l.len())
+        .context("no such calendar")?;
+    let id = list
+        .get(index)
+        .and_then(|t| t.get("id"))
+        .and_then(|i| i.as_str())
+        .map(String::from);
+    list.remove(index);
+    if list.is_empty() {
+        doc.remove("extra_calendars");
+    }
+    write_checked(setup, &doc.to_string())?;
+    if let Some(id) = id {
+        setup
+            .secret_store()
+            .delete(&Secret::ExtraCalendarLink(id))
+            .context("the calendar is removed, but its link can't be deleted")?;
     }
     Ok(())
 }
@@ -656,7 +873,7 @@ pub fn import_old_data(setup: &Setup, from: &Path) -> Result<String> {
 fn copy_token(setup: &Setup, from: &Path) -> Result<Option<String>> {
     let path = setup.config_path();
     let text = std::fs::read_to_string(&path)?;
-    let Ok(cfg) = Config::from_text(&with_calendar_link(&text, None)?, &path) else {
+    let Ok(cfg) = Config::from_text(&with_calendar_links(&text, None, None)?, &path) else {
         return Ok(None);
     };
     let Some(file) = cfg
@@ -709,7 +926,7 @@ pub fn import_backup(setup: &Setup, name: &str, bytes: &[u8]) -> Result<String> 
     let backup = Backup::parse(name, bytes)?;
     backup.restore(&setup.dir)?;
     Ok(format!(
-        "Imported the backup of {}: {} trips. Enter the calendar link and connect the account again.",
+        "Imported the backup of {}: {} trips. Add the calendars and connect the account again.",
         backup.created.format("%-d %b %Y"),
         backup.trips.trips.len()
     ))
@@ -812,45 +1029,124 @@ pub mod tests {
         assert_eq!(s.problems, [Problem::NoCalendar, Problem::NoTrips]);
     }
 
-    #[test]
-    fn calendar_link_from_the_store_completes_the_config() {
-        let dir = file_dir("link");
-        std::fs::write(dir.join("config.toml"), MILEAGE).unwrap();
-        let s = Setup::load(Ok(dir.clone()));
-        let form = SettingsForm {
-            calendar_link: " https://calendar.example/x.ics ".into(),
-            workplace: "Kontorvej 1, 8000 Aarhus C".into(),
-            home: "Hjemvej 3, 8200 Aarhus N".into(),
-            ..SettingsForm::from_config(None)
-        };
-        save(&s, &form).unwrap();
+    /// A calendar file named `name` in `dir` with one timed event today.
+    fn ics(dir: &Path, file: &str, name: &str) -> String {
+        let today = chrono::Local::now().format("%Y%m%d");
+        let path = dir.join(file);
+        std::fs::write(
+            &path,
+            format!(
+                "BEGIN:VCALENDAR\nX-WR-CALNAME:{name}\nBEGIN:VEVENT\nUID:1\nSUMMARY:Gym\n\
+                 DTSTART;TZID=Europe/Copenhagen:{today}T100000\nDTEND;TZID=Europe/Copenhagen:{today}T110000\n\
+                 END:VEVENT\nEND:VCALENDAR\n"
+            ),
+        )
+        .unwrap();
+        path.to_string_lossy().into_owned()
+    }
 
-        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-        assert!(text.contains("# keep me"), "{text}");
-        assert!(
-            !text.contains("calendar.example"),
-            "link must not reach the file: {text}"
+    #[test]
+    fn calendars_are_added_with_links_in_the_store_and_removed() {
+        let dir = file_dir("calendars");
+        std::fs::write(dir.join("config.toml"), MILEAGE).unwrap();
+        let (work, personal) = (ics(&dir, "w.ics", "Work"), ics(&dir, "p.ics", "Personal"));
+        let s = Setup::load(Ok(dir.clone()));
+        assert_eq!(
+            add_calendar(&s, &format!(" {work} "), NewCalendar::WorkingHours).unwrap(),
+            "Added Work (Working hours)"
         );
         let s = Setup::load(Ok(dir.clone()));
         assert_eq!(s.problems, [Problem::NoTrips]);
-        assert!(s.link_in_store);
-        let cfg = s.config.as_ref().unwrap();
         assert_eq!(
-            cfg.calendar.as_ref().unwrap().source,
-            "https://calendar.example/x.ics"
+            s.config.as_ref().unwrap().calendar.as_ref().unwrap().source,
+            work
         );
+        add_calendar(&s, &personal, NewCalendar::Extra(CalendarUse::Private)).unwrap();
+
+        // The links stay out of the file; the store completes the config.
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(
+            text.contains("# keep me") && !text.contains(".ics"),
+            "{text}"
+        );
+        let s = Setup::load(Ok(dir.clone()));
+        let extra = &s.config.as_ref().unwrap().extra_calendars;
         assert_eq!(
-            SettingsForm::from_config(Some(cfg)),
-            SettingsForm {
-                calendar_link: String::new(),
-                ..form
-            }
+            (
+                extra.len(),
+                extra[0].usage,
+                extra[0].name.as_deref(),
+                extra[0].source.as_deref()
+            ),
+            (
+                1,
+                CalendarUse::Private,
+                Some("Personal"),
+                Some(personal.as_str())
+            )
         );
         let store = FileStore(dir.join("secrets.json"));
+        let id = Secret::ExtraCalendarLink(extra[0].id.clone().unwrap());
+        assert_eq!(store.get(&id).unwrap().as_deref(), Some(personal.as_str()));
+
+        // Not a calendar, or nothing pasted: nothing is added.
+        let err = add_calendar(
+            &s,
+            &dir.join("config.toml").to_string_lossy(),
+            NewCalendar::Extra(CalendarUse::WordsOnly),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not a calendar"), "{err}");
+        assert!(add_calendar(&s, "  ", NewCalendar::WorkingHours).is_err());
         assert_eq!(
-            store.get(&Secret::CalendarLink).unwrap().as_deref(),
-            Some("https://calendar.example/x.ics")
+            Setup::load(Ok(dir.clone()))
+                .config
+                .unwrap()
+                .extra_calendars
+                .len(),
+            1
         );
+
+        remove_calendar(&s, 0).unwrap();
+        let s = Setup::load(Ok(dir.clone()));
+        assert!(s.config.as_ref().unwrap().extra_calendars.is_empty());
+        assert_eq!(store.get(&id).unwrap(), None);
+        assert!(remove_calendar(&s, 0).is_err());
+    }
+
+    #[test]
+    fn private_words_are_saved_where_they_apply() {
+        let dir = file_dir("private-words");
+        std::fs::write(dir.join("config.toml"), MILEAGE).unwrap();
+        let work = ics(&dir, "w.ics", "Work");
+        add_calendar(
+            &Setup::load(Ok(dir.clone())),
+            &work,
+            NewCalendar::WorkingHours,
+        )
+        .unwrap();
+        // The defaults add nothing.
+        let s = Setup::load(Ok(dir.clone()));
+        save(&s, &SettingsForm::from_config(s.config.as_ref())).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(!text.contains("private_keywords"), "{text}");
+
+        let form = SettingsForm {
+            private_words: Some("Læge, Frisør ,, ".into()),
+            ..SettingsForm::from_config(s.config.as_ref())
+        };
+        save(&s, &form).unwrap();
+        let s = Setup::load(Ok(dir.clone()));
+        let cfg = s.config.as_ref().unwrap();
+        assert_eq!(cfg.private_words(), ["Læge", "Frisør"]);
+        assert_eq!(
+            SettingsForm::from_config(Some(cfg))
+                .private_words
+                .as_deref(),
+            Some("Læge, Frisør")
+        );
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(!text.contains(".ics"), "{text}");
     }
 
     #[test]
@@ -858,10 +1154,8 @@ pub mod tests {
         let dir = file_dir("first");
         let s = Setup::load(Ok(dir.clone()));
         let form = SettingsForm {
-            calendar_link: "https://calendar.example/y.ics".into(),
             workplace: "Kontorvej 1".into(),
-            home: String::new(),
-            home_working: None,
+            ..SettingsForm::default()
         };
         save(&s, &form).unwrap();
         let cfg = Config::load(&dir.join("config.toml")).unwrap();
@@ -933,19 +1227,11 @@ pub mod tests {
         .unwrap();
         let s = Setup::load(Ok(dir.clone()));
         let form = SettingsForm {
-            calendar_link: "https://calendar.example/z.ics".into(),
-            workplace: String::new(),
             home: "Hjemvej 3".into(),
-            home_working: None,
+            ..SettingsForm::default()
         };
         let err = save(&s, &form).unwrap_err();
         assert!(err.to_string().contains("Mileage screen"), "{err}");
-        assert_eq!(
-            FileStore(dir.join("secrets.json"))
-                .get(&Secret::CalendarLink)
-                .unwrap(),
-            None
-        );
     }
 
     #[test]
@@ -961,11 +1247,7 @@ pub mod tests {
             matches!(s.problems[0], Problem::SecretStore(_)) && msg.contains("vault"),
             "{msg}"
         );
-        let form = SettingsForm {
-            calendar_link: "https://calendar.example/w.ics".into(),
-            ..SettingsForm::default()
-        };
-        assert!(save(&s, &form).is_err());
+        assert!(save(&s, &SettingsForm::default()).is_err());
         // Only the database, created when the app first reads the data.
         let files = std::fs::read_dir(&dir)
             .unwrap()

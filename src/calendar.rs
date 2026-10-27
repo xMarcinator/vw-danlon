@@ -28,6 +28,14 @@ pub enum Occurrence {
         summary: String,
         location: String,
     },
+    /// A timed private appointment from an extra calendar (see
+    /// [`crate::config::ExtraCalendar`]): never planned hours, lunch or a
+    /// work address.
+    Private {
+        start: DateTime<Tz>,
+        end: DateTime<Tz>,
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

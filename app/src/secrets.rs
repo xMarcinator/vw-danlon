@@ -1,4 +1,4 @@
-//! Where the app keeps secrets (the calendar link and the Connected Cars
+//! Where the app keeps secrets (the calendar links and the Connected Cars
 //! device token): the platform's secret store, or, only when the user opts
 //! in, a file readable only by them.
 
@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 pub enum Secret {
     /// The calendar share link (it holds the key to the calendar).
     CalendarLink,
+    /// An extra calendar's link, by its `id` in `[[extra_calendars]]`.
+    ExtraCalendarLink(String),
     /// The Connected Cars device token for an account email.
     DeviceToken(String),
 }
@@ -23,6 +25,7 @@ impl Secret {
     fn keychain(&self) -> (&'static str, &str) {
         match self {
             Secret::CalendarLink => ("vw-danlon-calendar", "calendar-link"),
+            Secret::ExtraCalendarLink(id) => ("vw-danlon-calendar", id),
             Secret::DeviceToken(email) => ("vw-danlon", email),
         }
     }
@@ -30,6 +33,7 @@ impl Secret {
     fn file_key(&self) -> String {
         match self {
             Secret::CalendarLink => "calendar-link".into(),
+            Secret::ExtraCalendarLink(id) => format!("calendar-link:{id}"),
             Secret::DeviceToken(email) => format!("connected-cars-token:{email}"),
         }
     }

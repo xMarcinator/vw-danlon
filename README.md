@@ -334,7 +334,16 @@ the same name. The program stops if the link points at another calendar.
   - trips to or from its address, or starting during it, are private and
     never in the mileage logbook or the Danløn export.
 
-  An empty `private_keywords` list switches this off.
+  An empty `private_keywords` list switches this off. The words apply to
+  every calendar; in the app they are set in Settings, Private
+  appointments.
+- **Extra calendars** (`[[extra_calendars]]`, or Settings, Calendars, Add
+  calendar in the app) add private appointments from other calendars, each
+  by its share link or a .ics file: with `use = "private"` every timed
+  event in it is a private appointment, with `use = "words_only"` only
+  those with a private word. They never set planned hours, days off or
+  vacation. The app keeps their links with the secrets, and backups leave
+  them out.
 - **All-day events** are ferie and fridage. These days get norm 0, also when
   the title is a private word. A title with a word from `[vacation]`
   `keywords` or `feriefridag_keywords` makes them vacation (see "Vacation").

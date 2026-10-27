@@ -111,7 +111,7 @@ pub async fn refresh_calendar_now_and_then(
     }
 }
 
-/// Fetches the calendar link and keeps the copy, off the UI thread.
+/// Fetches the calendar links and keeps the copies, off the UI thread.
 pub async fn refresh_calendar(setup: Signal<crate::setup::Setup>, mut sync: Signal<CalendarSync>) {
     let Some(cfg) = setup.peek().config.clone() else {
         return;

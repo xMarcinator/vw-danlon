@@ -45,6 +45,14 @@ days_off_keywords = []                # e.g. ["ferie", "fri"] to filter all-day 
 private_keywords = ["Læge", "Tandlæge", "Fysioterapeut"]  # timed entries that are private, not work time
 # default_location = "Kontorvej 1, 8000 Aarhus C"   # for days without a located entry
 
+# More calendars, for private appointments only: they never set planned
+# hours, days off or vacation. use = "private": every timed event is a
+# private appointment; use = "words_only": only titles with a private word.
+# [[extra_calendars]]
+# source = "https://calendar.proton.me/api/calendar/v1/url/…/calendar.ics"
+# use = "private"
+# name = "Personal"
+
 [periods]
 round_to_minutes = 0
 count_travel_time = false   # true: include the drive to/from the work address

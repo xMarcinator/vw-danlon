@@ -18,10 +18,29 @@ pub struct Picked {
     pub bytes: Vec<u8>,
 }
 
-/// A file shared to the app (Android), or why it couldn't be read; Settings
-/// imports it.
+/// What was shared to the app (Android): a file, or why it couldn't be
+/// read, which Settings imports; or a calendar link, which Settings offers
+/// to add.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Shared(pub Result<Picked, String>);
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub enum Shared {
+    File(Result<Picked, String>),
+    Link(String),
+}
+
+/// The calendar link in text shared to the app: its first http(s) or
+/// webcal link, e.g. from "Share" on a Proton Calendar link.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn shared_link(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| matches!(c, '<' | '>' | '"' | '\'' | '(' | ')')))
+        .find(|w| {
+            ["https://", "http://", "webcal://"].iter().any(|p| {
+                w.len() > p.len() && w.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p))
+            })
+        })
+        .map(String::from)
+}
 
 #[cfg(not(target_os = "android"))]
 const UPLOAD_ICON: &str = "M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5M12 15V3M7 8l5-5 5 5";
@@ -150,7 +169,7 @@ pub fn PickButton(
 
 #[cfg(test)]
 mod tests {
-    use super::shared_name;
+    use super::{shared_link, shared_name};
 
     #[test]
     fn a_shared_file_is_named_for_the_import() {
@@ -166,6 +185,23 @@ mod tests {
             (Some("notes.txt"), Some("text/plain"), "notes.txt"),
         ] {
             assert_eq!(shared_name(display, mime), want, "{display:?} {mime:?}");
+        }
+    }
+
+    #[test]
+    fn a_shared_calendar_link_is_found_in_the_text() {
+        let link = "https://calendar.proton.me/api/calendar/v1/url/KEY/calendar.ics?CacheKey=x";
+        for (text, want) in [
+            (link.to_string(), Some(link)),
+            (format!("Kalender: <{link}>\n"), Some(link)),
+            (
+                "webcal://cal.example/x.ics".into(),
+                Some("webcal://cal.example/x.ics"),
+            ),
+            ("Møde på æøå https:// og ingen link".into(), None),
+            ("".into(), None),
+        ] {
+            assert_eq!(shared_link(&text).as_deref(), want, "{text:?}");
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Reaching outside the app: opening the Danløn app (Android) or its web
 //! site (desktop), printing the logbook (the desktop webview's print
 //! dialog, or on Android, whose webview does not print, the share sheet),
-//! the clipboard, and on Android the file shared to the app. All in Rust
+//! the clipboard, and on Android the file or link shared to the app. All in Rust
 //! (JNI on Android), no JavaScript.
 
 use anyhow::Result;
@@ -319,17 +319,19 @@ pub fn copy_text(text: &str) -> Result<()> {
 #[cfg(target_os = "android")]
 const SHARED_MAX: usize = 64 << 20;
 
-/// Takes the file shared to the app, if the activity was started with one:
-/// "Share to vw-danlon" (`ACTION_SEND`, the file in `EXTRA_STREAM`) or
-/// "Open with" (`ACTION_VIEW`, the file as the data). The activity's intent
-/// is then replaced by a plain one, so the file is taken once.
+/// Takes the file or calendar link shared to the app, if the activity was
+/// started with one: "Share to vw-danlon" (`ACTION_SEND`, the file in
+/// `EXTRA_STREAM`, or text with a link in `EXTRA_TEXT`) or "Open with"
+/// (`ACTION_VIEW`, the file as the data). The activity's intent is then
+/// replaced by a plain one, so it is taken once.
 ///
 /// The activity is `singleTask` and its `onNewIntent` keeps the new intent
 /// (both patched into the generated project by the release workflow), so a
 /// share while the app is already running reaches the same activity and is
 /// taken here when the app comes back to the foreground.
 #[cfg(target_os = "android")]
-pub fn take_shared_file() -> Result<Option<crate::import::Picked>> {
+pub fn take_shared_file() -> Result<Option<crate::import::Shared>> {
+    use crate::import::Shared;
     use jni::objects::{JByteArray, JString, JValue};
     let picked = android::with_context(|env, activity| {
         let intent = env
@@ -394,7 +396,27 @@ pub fn take_shared_file() -> Result<Option<crate::import::Picked>> {
             &[JValue::Object(&plain)],
         )?;
         if uri.is_null() {
-            return Ok(None);
+            if action != "android.intent.action.SEND" {
+                return Ok(None);
+            }
+            // Shared text, e.g. a calendar's share link.
+            let key = android::string(env, "android.intent.extra.TEXT")?;
+            let text = env
+                .call_method(
+                    &intent,
+                    "getCharSequenceExtra",
+                    "(Ljava/lang/String;)Ljava/lang/CharSequence;",
+                    &[JValue::Object(&key)],
+                )?
+                .l()?;
+            if text.is_null() {
+                return Ok(None);
+            }
+            let text = env
+                .call_method(&text, "toString", "()Ljava/lang/String;", &[])?
+                .l()?;
+            let text: String = env.get_string(&JString::from(text))?.into();
+            return Ok(crate::import::shared_link(&text).map(Shared::Link));
         }
         let resolver = env
             .call_method(
@@ -445,10 +467,13 @@ pub fn take_shared_file() -> Result<Option<crate::import::Picked>> {
             bytes.extend(part.iter().map(|&b| b as u8));
         }
         env.call_method(&stream, "close", "()V", &[])?;
-        Ok(Some(crate::import::Picked { name, bytes }))
+        Ok(Some(Shared::File(Ok(crate::import::Picked {
+            name,
+            bytes,
+        }))))
     })
     .map_err(|e| e.context("the shared file can't be read"))?;
-    if let Some(p) = &picked
+    if let Some(Shared::File(Ok(p))) = &picked
         && p.bytes.len() > SHARED_MAX
     {
         anyhow::bail!("{} is too large to be a trips file", p.name);

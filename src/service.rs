@@ -13,7 +13,7 @@ use chrono_tz::Tz;
 
 use crate::calendar::{self, Occurrence};
 use crate::checklist::{self, ChecklistDay};
-use crate::config::{Config, MileageConfig, PrivateConfig};
+use crate::config::{CalendarUse, Config, MileageConfig, PrivateConfig};
 use crate::connected_cars::{self, TokenStore, Vehicle};
 use crate::db;
 use crate::mileage::{self, MileageMonth, Status};
@@ -79,37 +79,97 @@ pub fn calendar(cfg: &Config, month: Month, mode: CalendarMode) -> Result<Calend
     calendar_between(cfg, history_start(month), month.last_day(), mode)
 }
 
-/// Calendar occurrences from `from` to `to`.
+/// Calendar occurrences from `from` to `to`: the work calendar's, then the
+/// private appointments of the extra calendars (see [`extra_occurrences`]).
+/// An extra calendar that can't be read is named in the warning.
 pub fn calendar_between(
     cfg: &Config,
     from: NaiveDate,
     to: NaiveDate,
     mode: CalendarMode,
 ) -> Result<Calendar> {
-    let Some(cal) = &cfg.calendar else {
-        return Ok(Calendar::default());
+    let mut out = match &cfg.calendar {
+        Some(cal) => {
+            let (text, fetched_at, fetch_error) = calendar_text(cfg, &cal.source, mode)?;
+            let mut warning = None;
+            if let Some(expected) = &cal.name {
+                match calendar::name(&text) {
+                    Some(actual) if actual.trim().eq_ignore_ascii_case(expected.trim()) => {}
+                    Some(actual) => anyhow::bail!(
+                        "calendar is {actual:?}, expected {expected:?} — check calendar.source"
+                    ),
+                    None => {
+                        warning = Some(format!(
+                            "calendar has no name; cannot check it is {expected:?}"
+                        ))
+                    }
+                }
+            }
+            Calendar {
+                occurrences: calendar::occurrences(&text, cfg.timezone, from, to)?,
+                warning,
+                fetched_at,
+                fetch_error,
+            }
+        }
+        None => Calendar::default(),
     };
-    let (text, fetched_at, fetch_error) = calendar_text(cfg, &cal.source, mode)?;
-    let mut warning = None;
-    if let Some(expected) = &cal.name {
-        match calendar::name(&text) {
-            Some(actual) if actual.trim().eq_ignore_ascii_case(expected.trim()) => {}
-            Some(actual) => anyhow::bail!(
-                "calendar is {actual:?}, expected {expected:?} — check calendar.source"
-            ),
-            None => {
-                warning = Some(format!(
-                    "calendar has no name; cannot check it is {expected:?}"
-                ))
+    for extra in &cfg.extra_calendars {
+        let Some(source) = &extra.source else {
+            continue;
+        };
+        let read = calendar_text(cfg, source, mode)
+            .and_then(|(text, ..)| extra_occurrences(cfg, extra.usage, &text, from, to));
+        match read {
+            Ok(occ) => out.occurrences.extend(occ),
+            Err(e) => {
+                let name = extra.name.as_deref().unwrap_or("extra calendar");
+                let text = format!("calendar {name:?} can't be read: {e:#}");
+                out.warning = Some(match out.warning.take() {
+                    Some(w) => format!("{w}; {text}"),
+                    None => text,
+                });
             }
         }
     }
-    Ok(Calendar {
-        occurrences: calendar::occurrences(&text, cfg.timezone, from, to)?,
-        warning,
-        fetched_at,
-        fetch_error,
-    })
+    Ok(out)
+}
+
+/// An extra calendar's private appointments from `from` to `to`: every
+/// timed event of a Private calendar, the timed events with a private word
+/// of a Words only one. All-day events are ignored.
+fn extra_occurrences(
+    cfg: &Config,
+    usage: CalendarUse,
+    text: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<Occurrence>> {
+    Ok(calendar::occurrences(text, cfg.timezone, from, to)?
+        .into_iter()
+        .filter_map(|occ| match occ {
+            Occurrence::Timed {
+                start,
+                end,
+                summary,
+                ..
+            }
+            | Occurrence::Private {
+                start,
+                end,
+                summary,
+            } if usage == CalendarUse::Private
+                || month::has_word(&summary, cfg.private_words()) =>
+            {
+                Some(Occurrence::Private {
+                    start,
+                    end,
+                    summary,
+                })
+            }
+            _ => None,
+        })
+        .collect())
 }
 
 fn is_link(source: &str) -> bool {
@@ -155,25 +215,151 @@ fn fetch_and_keep(cfg: &Config, source: &str) -> Result<(String, DateTime<Utc>, 
     Ok((text, at, changed))
 }
 
-/// Fetches the calendar link and keeps the copy, for the app's background
-/// and on-demand refresh: when it was fetched and whether it changed. None
-/// without a calendar link.
+/// Fetches the calendar links (the work calendar's and the extra ones) and
+/// keeps the copies, for the app's background and on-demand refresh: when
+/// they were fetched and whether any changed. None without a calendar link;
+/// an error only when none could be fetched.
 pub fn refresh_calendar(cfg: &Config) -> Result<Option<(DateTime<Utc>, bool)>> {
-    let Some(cal) = cfg.calendar.as_ref().filter(|c| is_link(&c.source)) else {
-        return Ok(None);
+    let links = cfg
+        .calendar
+        .as_ref()
+        .map(|c| c.source.as_str())
+        .into_iter()
+        .chain(
+            cfg.extra_calendars
+                .iter()
+                .filter_map(|c| c.source.as_deref()),
+        )
+        .filter(|s| is_link(s));
+    let (mut done, mut first_error) = (None::<(DateTime<Utc>, bool)>, None);
+    for link in links {
+        match fetch_and_keep(cfg, link) {
+            Ok((_, at, changed)) => {
+                let any = done.is_some_and(|(_, c)| c);
+                done = Some((at, any || changed));
+            }
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match (done, first_error) {
+        (Some(d), _) => Ok(Some(d)),
+        (None, Some(e)) => Err(e),
+        (None, None) => Ok(None),
+    }
+}
+
+/// A calendar as Settings lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalendarStatus {
+    /// Its name (X-WR-CALNAME), else the configured one.
+    pub name: Option<String>,
+    /// None: the work calendar (working hours).
+    pub usage: Option<CalendarUse>,
+    /// The extra calendar's place in `extra_calendars`.
+    pub index: Option<usize>,
+    /// Where it is read from.
+    pub read: CalendarRead,
+    /// Its events in the month: all for the work calendar, the private
+    /// appointments for an extra one.
+    pub events: usize,
+}
+
+/// How a calendar was last read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CalendarRead {
+    /// A link, fetched at this time.
+    Synced(DateTime<Utc>),
+    /// A file, read now.
+    File,
+    /// A link not fetched yet.
+    NotSynced,
+    /// No link on this device (a backup from another one).
+    NoLink,
+    /// The file or the kept copy can't be read.
+    Failed(String),
+}
+
+/// The calendars with their names, last sync and events in `month`, from
+/// the kept copies (nothing is fetched).
+pub fn calendar_statuses(cfg: &Config, month: Month) -> Vec<CalendarStatus> {
+    let (from, to) = (month.first_day(), month.last_day());
+    let read = |source: &str| -> Result<Option<(String, CalendarRead)>> {
+        if !is_link(source) {
+            return Ok(Some((calendar::fetch(source)?, CalendarRead::File)));
+        }
+        Ok(db::cached_calendar(&cfg.database, source)?
+            .map(|(text, at)| (text, CalendarRead::Synced(at))))
     };
-    let (_, at, changed) = fetch_and_keep(cfg, &cal.source)?;
-    Ok(Some((at, changed)))
+    let status = |source: Option<&str>,
+                  name: Option<&String>,
+                  usage: Option<CalendarUse>,
+                  index: Option<usize>| {
+        let mut s = CalendarStatus {
+            name: name.cloned(),
+            usage,
+            index,
+            read: CalendarRead::NoLink,
+            events: 0,
+        };
+        let Some(source) = source else { return s };
+        let counted = read(source).and_then(|kept| {
+            let Some((text, how)) = kept else {
+                return Ok((None, CalendarRead::NotSynced, 0));
+            };
+            let events = match usage {
+                None => calendar::occurrences(&text, cfg.timezone, from, to)?.len(),
+                Some(u) => extra_occurrences(cfg, u, &text, from, to)?.len(),
+            };
+            Ok((calendar::name(&text), how, events))
+        });
+        match counted {
+            Ok((found, how, events)) => {
+                s.name = found.or(s.name);
+                s.read = how;
+                s.events = events;
+            }
+            Err(e) => s.read = CalendarRead::Failed(format!("{e:#}")),
+        }
+        s
+    };
+    let mut out = Vec::new();
+    if let Some(c) = &cfg.calendar {
+        out.push(status(Some(&c.source), c.name.as_ref(), None, None));
+    }
+    for (i, c) in cfg.extra_calendars.iter().enumerate() {
+        out.push(status(
+            c.source.as_deref(),
+            c.name.as_ref(),
+            Some(c.usage),
+            Some(i),
+        ));
+    }
+    out
+}
+
+/// Reads the calendar at `source` (a link or a .ics file) once, to check it
+/// is a calendar before it is added, and keeps the copy of a link: its name
+/// (X-WR-CALNAME), if it has one.
+pub fn check_calendar(cfg: &Config, source: &str) -> Result<Option<String>> {
+    let text = if is_link(source) {
+        fetch_and_keep(cfg, source)?.0
+    } else {
+        calendar::fetch(source)?
+    };
+    if !text.contains("BEGIN:VEVENT") && !text.contains("BEGIN:VCALENDAR") {
+        bail!("{source} is not a calendar (no BEGIN:VCALENDAR)");
+    }
+    let today = Utc::now().with_timezone(&cfg.timezone).date_naive();
+    calendar::occurrences(&text, cfg.timezone, today, today)?;
+    Ok(calendar::name(&text))
 }
 
 /// The calendar's timed entries, classified with the configured private
 /// words, lunch title and home-working words and address.
 pub fn timed_entries<'a>(cfg: &Config, cal: &'a [Occurrence]) -> Vec<TimedEntry<'a>> {
-    let private_words = cfg
-        .calendar
-        .as_ref()
-        .map(|c| c.private_keywords.as_slice())
-        .unwrap_or_default();
+    let private_words = cfg.private_words();
     let mut entries = month::timed_entries(cal, private_words, &cfg.lunch.title);
     for e in &mut entries {
         if e.kind == EntryKind::Work && month::is_home_working(cfg, e.summary, e.location) {
@@ -730,7 +916,7 @@ pub fn set_left_work(cfg: &Config, date: NaiveDate, at: Option<NaiveDateTime>) -
 
 fn occurrence_date(o: &Occurrence) -> NaiveDate {
     match o {
-        Occurrence::Timed { start, .. } => start.date_naive(),
+        Occurrence::Timed { start, .. } | Occurrence::Private { start, .. } => start.date_naive(),
         Occurrence::AllDay { date, .. } => *date,
     }
 }
@@ -1905,6 +2091,172 @@ mod tests {
             timed("Læge", "2026-11-03 13:00", "2026-11-03 14:00"),
         ];
         (dir, cfg, cal)
+    }
+
+    /// A work calendar and two extra calendars as files: Personal (Private)
+    /// with a gym session and an all-day "Ferie", Family (Words only) with
+    /// a doctor's visit and a birthday.
+    fn extra_setup(name: &str) -> Config {
+        let dir = crate::trips::tests::temp_dir(name);
+        let event = |summary: &str, start: &str, end: &str| {
+            format!(
+                "BEGIN:VEVENT\nUID:{summary}\nSUMMARY:{summary}\nLOCATION:Kunde A\n\
+                 DTSTART;TZID=Europe/Copenhagen:{start}\nDTEND;TZID=Europe/Copenhagen:{end}\nEND:VEVENT\n"
+            )
+        };
+        let ics = |name: &str, events: &[String]| {
+            format!(
+                "BEGIN:VCALENDAR\nX-WR-CALNAME:{name}\n{}END:VCALENDAR\n",
+                events.concat()
+            )
+        };
+        std::fs::write(
+            dir.join("work.ics"),
+            ics(
+                "Work",
+                &[event("Arbejde", "20261103T080000", "20261103T160000")],
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("personal.ics"),
+            ics(
+                "Personal",
+                &[
+                    event("Gym", "20261103T100000", "20261103T110000"),
+                    "BEGIN:VEVENT\nUID:f\nSUMMARY:Ferie\nDTSTART;VALUE=DATE:20261104\nDTEND;VALUE=DATE:20261105\nEND:VEVENT\n".into(),
+                ],
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("family.ics"),
+            ics(
+                "Family",
+                &[
+                    event("Læge", "20261103T130000", "20261103T140000"),
+                    event("Fødselsdag", "20261103T180000", "20261103T200000"),
+                ],
+            ),
+        )
+        .unwrap();
+        Config::from_text(
+            "employee_number = \"1\"\n[danlon]\n[calendar]\nsource = \"work.ics\"\n\
+             [[extra_calendars]]\nsource = \"personal.ics\"\nuse = \"private\"\n\
+             [[extra_calendars]]\nsource = \"family.ics\"\nuse = \"words_only\"\n\
+             [[extra_calendars]]\nid = \"elsewhere\"\nuse = \"private\"\nname = \"Old\"\n",
+            &dir.join("config.toml"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn extra_calendars_add_only_private_appointments() {
+        let cfg = extra_setup("svc-extra");
+        let month = Month {
+            year: 2026,
+            month: 11,
+        };
+        let cal = calendar(&cfg, month, CalendarMode::Offline).unwrap();
+        assert_eq!(cal.warning, None);
+        let kinds: Vec<(&str, EntryKind)> = timed_entries(&cfg, &cal.occurrences)
+            .iter()
+            .map(|e| (e.summary, e.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("Arbejde", EntryKind::Work),
+                ("Gym", EntryKind::Private),
+                ("Læge", EntryKind::Private),
+            ]
+        );
+
+        // Hours and days off are the work calendar's alone.
+        let mut work_only = cfg.clone();
+        work_only.extra_calendars.clear();
+        let alone = calendar(&work_only, month, CalendarMode::Offline).unwrap();
+        let day = state::parse_date("2026-11-03").unwrap();
+        let with = build_month(&cfg, month, &[], &cal.occurrences, day).unwrap();
+        let without = build_month(&work_only, month, &[], &alone.occurrences, day).unwrap();
+        for (a, b) in with.days.iter().zip(&without.days) {
+            assert_eq!(
+                (a.norm_hours, a.planned, &a.off_reason, &a.work_locations),
+                (b.norm_hours, b.planned, &b.off_reason, &b.work_locations),
+                "{}",
+                a.date
+            );
+        }
+        let tuesday = with.days.iter().find(|d| d.date == day).unwrap();
+        assert_eq!(tuesday.appointments.len(), 2);
+
+        // Settings: names from the files, events in the month, the one
+        // without a link on this device.
+        let statuses: Vec<_> = calendar_statuses(&cfg, month)
+            .into_iter()
+            .map(|s| (s.name, s.usage, s.read, s.events))
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                (Some("Work".into()), None, CalendarRead::File, 1),
+                (
+                    Some("Personal".into()),
+                    Some(CalendarUse::Private),
+                    CalendarRead::File,
+                    1
+                ),
+                (
+                    Some("Family".into()),
+                    Some(CalendarUse::WordsOnly),
+                    CalendarRead::File,
+                    1
+                ),
+                (
+                    Some("Old".into()),
+                    Some(CalendarUse::Private),
+                    CalendarRead::NoLink,
+                    0
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_extra_calendar_link_uses_the_kept_copy_and_a_missing_one_is_named() {
+        let mut cfg = extra_setup("svc-extra-link");
+        let link = "http://127.0.0.1:1/personal.ics";
+        cfg.extra_calendars[0].source = Some(link.into());
+        cfg.extra_calendars[0].name = Some("Personal".into());
+        let month = Month {
+            year: 2026,
+            month: 11,
+        };
+        let cal = calendar(&cfg, month, CalendarMode::Fresh).unwrap();
+        let warning = cal.warning.unwrap();
+        assert!(warning.contains("\"Personal\" can't be read"), "{warning}");
+        assert!(check_calendar(&cfg, link).is_err());
+        assert!(refresh_calendar(&cfg).is_err());
+
+        let text = std::fs::read_to_string(cfg.database.with_file_name("personal.ics")).unwrap();
+        db::store_calendar(&cfg.database, link, &text, Utc::now()).unwrap();
+        for mode in [CalendarMode::Fresh, CalendarMode::Offline] {
+            let cal = calendar(&cfg, month, mode).unwrap();
+            assert_eq!(cal.warning, None);
+            assert!(
+                timed_entries(&cfg, &cal.occurrences)
+                    .iter()
+                    .any(|e| e.summary == "Gym" && e.kind == EntryKind::Private)
+            );
+        }
+        assert_eq!(
+            check_calendar(&cfg, cfg.extra_calendars[1].source.as_deref().unwrap()).unwrap(),
+            Some("Family".into())
+        );
+        let not_ics = cfg.database.with_file_name("config.toml");
+        std::fs::write(&not_ics, "employee_number = 1").unwrap();
+        let err = check_calendar(&cfg, not_ics.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("is not a calendar"), "{err}");
     }
 
     fn view_at(cfg: &Config, cal: &[Occurrence], now: &str) -> PrivateTime {

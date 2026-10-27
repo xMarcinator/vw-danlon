@@ -3364,3 +3364,112 @@ table.rates td:first-child {
 .num {
   font-variant-numeric: tabular-nums;
 }
+
+/* Settings: Calendars. */
+.cal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.cal-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  align-items: center;
+  padding: 10px 6px 10px 12px;
+}
+
+.cal-list li + li {
+  border-top: 1px solid var(--row);
+}
+
+.cal-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cal-name b {
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cal-list .note {
+  grid-column: 1;
+  overflow-wrap: anywhere;
+}
+
+.cal-remove {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  font-size: 14px;
+  min-height: 44px;
+  padding: 0 10px;
+  border: none;
+  background: none;
+  color: var(--bad);
+  cursor: pointer;
+}
+
+.cal-add-btn {
+  font-size: 15px;
+  min-height: 40px;
+  border: 1px solid var(--acc);
+  border-radius: 10px;
+  background: var(--surf);
+  color: var(--acc-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.cal-add-btn.needs {
+  border: 2px solid var(--warn-line);
+}
+
+.cal-add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--acc);
+  border-radius: 10px;
+}
+
+.cal-add .segmented button {
+  min-height: 44px;
+  padding: 0 4px;
+  font-size: 14px;
+}
+
+.cal-card .status-ok,
+.cal-card .status-bad {
+  overflow-wrap: anywhere;
+}
+
+.cal-add-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.cal-add-actions .small-btn {
+  flex: 1 1 0;
+  font-size: 15px;
+  min-height: 40px;
+}
+
+@media (max-width: 719px) {
+  .cal-add-btn,
+  .cal-add-actions .small-btn {
+    min-height: 48px;
+  }
+}

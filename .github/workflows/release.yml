@@ -198,7 +198,8 @@ jobs:
           sed -i 's/android:configChanges="[^"]*"/android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|fontScale|fontWeightAdjustment|density|locale|layoutDirection|colorMode"/' \
             "$g/app/src/main/AndroidManifest.xml"
           # "Share to vw-danlon" (and "Open with") for the Min Volkswagen
-          # export, a CSV/JSON trips file or a backup; the app reads the
+          # export, a CSV/JSON trips file, a backup, or a calendar's share
+          # link as text/plain (opens Settings, Add calendar); the app reads the
           # activity's intent over JNI (platform::take_shared_file). singleTask,
           # with onNewIntent keeping the new intent, so a share while the app
           # runs reaches the running activity instead of starting a second
@@ -211,6 +212,7 @@ jobs:
               "text/csv",
               "text/comma-separated-values",
               "application/json",
+              "text/plain",
               "*/*",
           ]
           data = "".join(f'<data android:mimeType="{m}" />' for m in mimes)

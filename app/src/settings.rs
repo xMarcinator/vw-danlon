@@ -1,15 +1,18 @@
-//! The Settings screen: what is missing, the calendar link (kept in the
-//! secret store), the addresses, the trips source, where secrets are kept,
-//! and the theme.
+//! The Settings screen: what is missing, the calendars (links kept in the
+//! secret store) and the private words, the addresses, the trips source,
+//! where secrets are kept, and the theme.
 
 use dioxus::prelude::*;
-use vw_danlon::service::SyncOutcome;
+use vw_danlon::config::{CalendarUse, Config};
+use vw_danlon::service::{self, CalendarRead, CalendarStatus, SyncOutcome};
 
 use crate::Screen;
 #[cfg(not(target_os = "android"))]
 use crate::import::PickButton;
 use crate::import::{self, Picked};
-use crate::setup::{self, AccountStatus, HomeWorkingForm, Problem, SettingsForm, Setup, Theme};
+use crate::setup::{
+    self, AccountStatus, HomeWorkingForm, NewCalendar, Problem, SettingsForm, Setup, Theme,
+};
 
 /// Switches the theme now and remembers it in `app.toml`.
 pub fn apply_theme(mut setup: Signal<Setup>, theme: Theme) {
@@ -45,6 +48,74 @@ fn synced_text(s: &SyncOutcome) -> String {
     text
 }
 
+/// A calendar row in Settings: its name, use, how it was read, and the
+/// extra calendar's place in the config (removable).
+#[derive(Debug, Clone, PartialEq)]
+struct CalendarRow {
+    name: String,
+    usage: Option<CalendarUse>,
+    status: String,
+    index: Option<usize>,
+}
+
+impl CalendarRow {
+    fn new(cfg: &Config, c: CalendarStatus) -> CalendarRow {
+        let now = crate::screens::now(cfg);
+        let events = match c.usage {
+            Some(CalendarUse::WordsOnly) => format!("{} match the words", c.events),
+            _ if c.events == 1 => "1 event this month".to_string(),
+            _ => format!("{} events this month", c.events),
+        };
+        let status = match c.read {
+            CalendarRead::Synced(at) => {
+                let at = at.with_timezone(&cfg.timezone);
+                let when = if at.date_naive() == now.date_naive() {
+                    at.format("%H:%M")
+                } else {
+                    at.format("%-d %b %H:%M")
+                };
+                format!("Synced {when} · {events}")
+            }
+            CalendarRead::File => format!("File · {events}"),
+            CalendarRead::NotSynced => "Not synced yet".to_string(),
+            CalendarRead::NoLink => {
+                "No link on this device: remove it and add it again".to_string()
+            }
+            CalendarRead::Failed(e) => format!("Can't be read: {e}"),
+        };
+        CalendarRow {
+            name: c.name.unwrap_or_else(|| match c.usage {
+                None => "Work".into(),
+                Some(_) => "Calendar".into(),
+            }),
+            usage: c.usage,
+            status,
+            index: c.index,
+        }
+    }
+
+    fn chip(&self) -> &'static str {
+        match self.usage {
+            None => "chip acc",
+            Some(CalendarUse::Private) => "chip info",
+            Some(CalendarUse::WordsOnly) => "chip",
+        }
+    }
+}
+
+/// The calendars' rows for this month, from the kept copies.
+fn calendar_rows(cfg: &Config) -> Vec<CalendarRow> {
+    let today = crate::screens::now(cfg).date_naive();
+    let month = vw_danlon::month::Month {
+        year: chrono::Datelike::year(&today),
+        month: chrono::Datelike::month(&today),
+    };
+    service::calendar_statuses(cfg, month)
+        .into_iter()
+        .map(|c| CalendarRow::new(cfg, c))
+        .collect()
+}
+
 /// A Data section job: what it did, as text.
 type DataJob = Box<dyn FnOnce(&Setup) -> anyhow::Result<String> + Send>;
 
@@ -53,9 +124,9 @@ const IMPORT_OLD: &str = "Import old data…";
 
 #[cfg(not(target_os = "android"))]
 const DATA_NOTE: &str =
-    "Backups leave out the calendar link and account token. Importing replaces this app's data.";
+    "Backups leave out the calendar links and account token. Importing replaces this app's data.";
 #[cfg(target_os = "android")]
-const DATA_NOTE: &str = "Without calendar link and token. To import a backup, share its file to vw-danlon; importing replaces this phone's data.";
+const DATA_NOTE: &str = "Without calendar links and token. To import a backup, share its file to vw-danlon; importing replaces this phone's data.";
 
 /// Where the trips file comes from.
 #[cfg(not(target_os = "android"))]
@@ -75,7 +146,7 @@ fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
     let path = dir.join(name);
     std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
     Ok(format!(
-        "Saved {}. The calendar link and account token are not in it.",
+        "Saved {}. The calendar links and account token are not in it.",
         path.display()
     ))
 }
@@ -83,7 +154,7 @@ fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
 #[cfg(target_os = "android")]
 fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
     crate::platform::share(name, "application/json", json, None)?;
-    Ok("Shared the backup. The calendar link and account token are not in it.".into())
+    Ok("Shared the backup. The calendar links and account token are not in it.".into())
 }
 
 /// Reads the data directory again after a change.
@@ -113,7 +184,25 @@ async fn in_background<T: Send + 'static>(
 #[component]
 pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let initial = SettingsForm::from_config(setup.peek().config.as_ref());
-    let mut link = use_signal(String::new);
+    // The private words as typed; none shows the config's.
+    let mut private_words = use_signal(|| None::<String>);
+    // Add calendar: open, the link or file, its use, and how adding went.
+    let mut adding = use_signal(|| false);
+    let mut new_source = use_signal(String::new);
+    let mut new_kind = use_signal(|| NewCalendar::Extra(CalendarUse::Private));
+    let mut cal_status = use_signal(|| None::<Result<String, String>>);
+    let cal_sync = use_context::<Signal<crate::screens::CalendarSync>>();
+    // The calendars with their names and last sync, off the UI thread.
+    let calendars = use_resource(move || {
+        let cfg = setup.read().config.clone();
+        let _ = cal_sync.read().version;
+        async move {
+            let cfg = cfg?;
+            tokio::task::spawn_blocking(move || calendar_rows(&cfg))
+                .await
+                .ok()
+        }
+    });
     let mut workplace = use_signal(|| initial.workplace.clone());
     let mut home = use_signal(|| initial.home.clone());
     let initial_hw = initial.home_working.clone().unwrap_or(HomeWorkingForm {
@@ -156,6 +245,12 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let s = setup.read();
     let store = s.secret_store().describe();
     let no_calendar = s.problems.contains(&Problem::NoCalendar);
+    let has_calendar = s.config.as_ref().is_some_and(|c| c.calendar.is_some());
+    let words_shown = private_words().unwrap_or_else(|| {
+        SettingsForm::from_config(s.config.as_ref())
+            .private_words
+            .unwrap_or_default()
+    });
     let has_mileage = s.config.as_ref().is_some_and(|c| c.mileage.is_some());
     // The yearly rates, newest first: (year, low, high, threshold km).
     let mut rates: Vec<(i32, String, String, String)> = s
@@ -181,13 +276,6 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     rates.sort_by_key(|r| std::cmp::Reverse(r.0));
     let file_mode = s.settings.secret_file.is_some();
     let theme = s.settings.theme;
-    let link_hint = if s.link_in_store {
-        "A link is saved. Paste a new one to replace it."
-    } else if s.config.as_ref().is_some_and(|c| c.calendar.is_some()) {
-        "Paste the link to keep it in the secret store."
-    } else {
-        "https://calendar.proton.me/…"
-    };
     let trips = match &s.trips {
         Some(t) if t.count > 0 => format!(
             "{} trips · {} – {}",
@@ -227,24 +315,68 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
 
     let save = move |_| {
         let form = SettingsForm {
-            calendar_link: link(),
             workplace: workplace(),
             home: home(),
             home_working: Some(HomeWorkingForm {
                 keywords: hw_keywords(),
                 at_home_address: hw_at_home(),
             }),
+            private_words: private_words(),
         };
         let result = setup::save(&setup.peek(), &form);
         match result {
             Ok(()) => {
                 let dir = setup.peek().dir.clone();
                 setup.set(Setup::load(Ok(dir)));
-                link.set(String::new());
+                private_words.set(None);
                 status.set(Status::Saved);
             }
             Err(e) => status.set(Status::Failed(format!("{e:#}"))),
         }
+    };
+
+    let mut open_add = move |source: String| {
+        new_source.set(source);
+        new_kind.set(if has_calendar {
+            NewCalendar::Extra(CalendarUse::Private)
+        } else {
+            NewCalendar::WorkingHours
+        });
+        cal_status.set(None);
+        adding.set(true);
+    };
+    // Fetches the calendar once to check it, then keeps it.
+    let add_calendar = move |_| {
+        let (source, kind) = (new_source(), new_kind());
+        busy.set(true);
+        cal_status.set(Some(Ok("Checking the calendar…".into())));
+        let dir = setup.peek().dir.clone();
+        spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                setup::add_calendar(&Setup::load(Ok(dir)), &source, kind)
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.map_err(|e| format!("Not added: {e:#}")));
+            if result.is_ok() {
+                adding.set(false);
+                new_source.set(String::new());
+                reload(setup);
+            }
+            cal_status.set(Some(result));
+            busy.set(false);
+        });
+    };
+    let mut remove_calendar = move |index: usize, name: String| {
+        let result = setup::remove_calendar(&setup.peek(), index);
+        if result.is_ok() {
+            reload(setup);
+        }
+        cal_status.set(Some(
+            result
+                .map(|()| format!("Removed {name}"))
+                .map_err(|e| format!("Not removed: {e:#}")),
+        ));
     };
 
     let on_picked = move |picked: Result<Picked, String>| {
@@ -342,15 +474,22 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         Err(e) => data_status.set(Some(Err(e))),
     };
     // A file shared to the app (Android): a backup waits for Import backup
-    // (it replaces the data), anything else is imported as trips.
+    // (it replaces the data), anything else is imported as trips. A shared
+    // calendar link opens Add calendar with it.
     let mut shared = use_context::<Signal<Option<import::Shared>>>();
     let mut shared_backup = use_signal(|| None::<Picked>);
     use_effect(move || {
         if shared.read().is_none() {
             return;
         }
-        let Some(import::Shared(picked)) = shared.write().take() else {
-            return;
+        let picked = match shared.write().take() {
+            Some(import::Shared::File(picked)) => picked,
+            Some(import::Shared::Link(link)) => {
+                let mut open_add = open_add;
+                open_add(link);
+                return;
+            }
+            None => return,
         };
         let mut on_picked = on_picked;
         match picked {
@@ -425,20 +564,130 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             }
         }
 
-        section { class: "card", "aria-labelledby": "s-cal",
-            h2 { id: "s-cal", "Work calendar" }
-            label { class: "label", r#for: "cal-src", "Proton share link or .ics file" }
-            input {
-                id: "cal-src",
-                r#type: "url",
-                class: if no_calendar { "mono needs" } else { "mono" },
-                placeholder: "{link_hint}",
-                autocomplete: "off",
-                value: "{link}",
-                oninput: move |e| link.set(e.value()),
+        section { class: "card cal-card", "aria-labelledby": "s-cal",
+            h2 { id: "s-cal", "Calendars" }
+            match calendars.read().clone().flatten() {
+                Some(rows) if !rows.is_empty() => rsx! {
+                    ul { class: "cal-list",
+                        for row in rows {
+                            li {
+                                span { class: "cal-name",
+                                    b { "{row.name}" }
+                                    span { class: row.chip(), "{setup::use_label(row.usage)}" }
+                                }
+                                if let Some(index) = row.index {
+                                    button {
+                                        class: "cal-remove",
+                                        "aria-label": "Remove {row.name}",
+                                        disabled: busy(),
+                                        onclick: {
+                                            let name = row.name.clone();
+                                            move |_| remove_calendar(index, name.clone())
+                                        },
+                                        "Remove"
+                                    }
+                                }
+                                span { class: "note", "{row.status}" }
+                            }
+                        }
+                    }
+                },
+                _ => rsx! {},
+            }
+            if adding() {
+                div { class: "cal-add",
+                    label { class: "label", r#for: "cal-new", "Proton share link or .ics file" }
+                    input {
+                        id: "cal-new",
+                        r#type: "url",
+                        class: "mono",
+                        placeholder: "https://calendar.proton.me/api/calendar/v1/url/…",
+                        autocomplete: "off",
+                        value: "{new_source}",
+                        oninput: move |e| new_source.set(e.value()),
+                    }
+                    span { class: "note",
+                        "In Proton Calendar on the web: the calendar's Settings → Share with anyone → Create link."
+                        if cfg!(target_os = "android") {
+                            " Or share the link to vw-danlon."
+                        }
+                    }
+                    span { class: "label", id: "cal-use", "Use" }
+                    div { class: "segmented", role: "radiogroup", "aria-labelledby": "cal-use",
+                        for k in NewCalendar::ALL {
+                            button {
+                                role: "radio",
+                                "aria-checked": if k == new_kind() { "true" } else { "false" },
+                                onclick: move |_| new_kind.set(k),
+                                "{k.label()}"
+                            }
+                        }
+                    }
+                    span { class: "sub",
+                        if new_kind() == NewCalendar::WorkingHours {
+                            if has_calendar {
+                                "Replaces the work calendar: planned hours, days off and vacation."
+                            } else {
+                                "Planned hours, days off and vacation."
+                            }
+                        } else {
+                            "Private: every timed event in it is private time. Words only: only titles with the private words below."
+                        }
+                    }
+                    div { class: "cal-add-actions",
+                        button {
+                            class: "small-btn",
+                            onclick: move |_| {
+                                adding.set(false);
+                                cal_status.set(None);
+                            },
+                            "Cancel"
+                        }
+                        button {
+                            class: "small-btn primary-sm",
+                            disabled: busy() || new_source().trim().is_empty(),
+                            onclick: add_calendar,
+                            "Add"
+                        }
+                    }
+                }
+            } else {
+                button {
+                    class: if no_calendar { "cal-add-btn needs" } else { "cal-add-btn" },
+                    onclick: move |_| open_add(String::new()),
+                    crate::Icon { d: "M12 5v14M5 12h14", size: 16 }
+                    "Add calendar"
+                }
+            }
+            match cal_status() {
+                None => rsx! {},
+                Some(Ok(t)) => rsx! { span { class: "status-ok", role: "status", "{t}" } },
+                Some(Err(e)) => rsx! { span { class: "status-bad", role: "status", "{e}" } },
             }
             span { class: "note",
-                "Kept in {store}."
+                "The links are kept in {store}. One calendar is for working hours."
+            }
+        }
+
+        section { class: "card", "aria-labelledby": "s-priv",
+            h2 { id: "s-priv", "Private appointments" }
+            span { class: "sub", "Not company time." }
+            div { class: "field",
+                label { r#for: "priv-kw", "Event titles containing" }
+                input {
+                    id: "priv-kw",
+                    r#type: "text",
+                    disabled: !has_calendar,
+                    value: "{words_shown}",
+                    oninput: move |e| private_words.set(Some(e.value())),
+                }
+                span { class: "note",
+                    if has_calendar {
+                        "Whole words, comma-separated. Checked in every calendar."
+                    } else {
+                        "Add the work calendar first."
+                    }
+                }
             }
         }
 

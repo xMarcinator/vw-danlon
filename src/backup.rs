@@ -1,6 +1,6 @@
 //! A backup file, to move the data to another device (the computer's data
 //! to the phone): the config, the trips and the state in one JSON file.
-//! The calendar link is taken out of the config and the device token is
+//! The calendar links are taken out of the config and the device token is
 //! never in the data, so both are entered again on the other device.
 //!
 //! Also moves the data of a folder the CLI used (`config.toml` with
@@ -44,7 +44,7 @@ impl Backup {
     }
 
     /// The data in the database `db` with the config file at `config`,
-    /// without the calendar link.
+    /// without the calendar links.
     pub fn export(config: &Path, db: &Path) -> Result<Backup> {
         let text = std::fs::read_to_string(config)
             .with_context(|| format!("reading config {}", config.display()))?;
@@ -202,27 +202,48 @@ pub fn import_folder(from: &Path, to: &Path) -> Result<FolderImport> {
     })
 }
 
-/// The config text without `[calendar] source` (the calendar link, which
-/// holds the key to the calendar, or a file on this machine).
+/// The config text without `[calendar] source` and the extra calendars'
+/// `source` (the calendar links, which hold the keys to the calendars, or
+/// files on this machine).
 pub fn without_calendar_link(text: &str) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().context("parsing the config")?;
     if let Some(cal) = doc.get_mut("calendar").and_then(|c| c.as_table_like_mut()) {
         cal.remove("source");
     }
+    if let Some(extra) = doc
+        .get_mut("extra_calendars")
+        .and_then(|c| c.as_array_of_tables_mut())
+    {
+        for cal in extra.iter_mut() {
+            cal.remove("source");
+        }
+    }
     Ok(doc.to_string())
 }
 
-/// The config text with a relative calendar file path made absolute
-/// against `dir`.
+/// The config text with relative calendar file paths (the work calendar's
+/// and the extra ones') made absolute against `dir`.
 fn with_absolute_calendar_file(text: &str, dir: &Path) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().context("parsing config.toml")?;
-    if let Some(cal) = doc.get_mut("calendar").and_then(|c| c.as_table_like_mut())
-        && let Some(source) = cal.get("source").and_then(|s| s.as_str())
-        && !source.contains("://")
-        && Path::new(source).is_relative()
+    let absolute = |cal: &mut dyn toml_edit::TableLike| {
+        if let Some(source) = cal.get("source").and_then(|s| s.as_str())
+            && !source.contains("://")
+            && Path::new(source).is_relative()
+        {
+            let absolute = dir.join(source).to_string_lossy().into_owned();
+            cal.insert("source", toml_edit::value(absolute));
+        }
+    };
+    if let Some(cal) = doc.get_mut("calendar").and_then(|c| c.as_table_like_mut()) {
+        absolute(cal);
+    }
+    if let Some(extra) = doc
+        .get_mut("extra_calendars")
+        .and_then(|c| c.as_array_of_tables_mut())
     {
-        let absolute = dir.join(source).to_string_lossy().into_owned();
-        cal.insert("source", toml_edit::value(absolute));
+        for cal in extra.iter_mut() {
+            absolute(cal);
+        }
     }
     Ok(doc.to_string())
 }
@@ -234,7 +255,9 @@ mod tests {
 
     const CONFIG: &str = "employee_number = \"1\"\n\n[calendar]\n\
         source = \"https://calendar.proton.me/api/calendar/v1/url/SECRET/calendar.ics\"\n\
-        name = \"Arbejdstid\"\n\n[connected_cars]\nemail = \"a@example.com\"\n\
+        name = \"Arbejdstid\"\n\n[[extra_calendars]]\nuse = \"private\"\nname = \"Personal\"\n\
+        source = \"https://calendar.proton.me/api/calendar/v1/url/PRIVATE-SECRET/calendar.ics\"\n\n\
+        [connected_cars]\nemail = \"a@example.com\"\n\
         token_file = \"connected-cars-token\"\n\n[danlon]\n";
 
     #[test]
@@ -293,6 +316,11 @@ mod tests {
         assert_eq!(State::load(&phone_db).unwrap(), State::load(&db).unwrap());
         let config = std::fs::read_to_string(phone.join("config.toml")).unwrap();
         assert!(config.contains("name = \"Arbejdstid\"") && !config.contains("source"));
+        // The extra calendar stays, without its link.
+        assert!(
+            config.contains("[[extra_calendars]]") && config.contains("name = \"Personal\""),
+            "{config}"
+        );
 
         for (bytes, want) in [
             (&b"{\"trips\": []}"[..], "x.json is not a vw-danlon backup"),

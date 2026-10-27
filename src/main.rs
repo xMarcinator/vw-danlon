@@ -135,7 +135,7 @@ enum Command {
     /// holiday year, and each period with the year it draws from.
     Vacation,
     /// A backup file of the config, trips and state, to move them to the app
-    /// on another device. The calendar link and device token are not in it.
+    /// on another device. The calendar links and device token are not in it.
     Backup {
         #[command(subcommand)]
         action: BackupAction,
@@ -467,7 +467,7 @@ fn main() -> Result<()> {
             std::fs::write(&file, backup.to_json()?)
                 .with_context(|| format!("writing {}", file.display()))?;
             println!(
-                "Wrote {}: {} trips; the calendar link and device token are not in it",
+                "Wrote {}: {} trips; the calendar links and device token are not in it",
                 file.display(),
                 backup.trips.trips.len()
             );

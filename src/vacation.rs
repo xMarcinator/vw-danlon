@@ -172,7 +172,7 @@ pub fn leave_days(cfg: &Config, calendar: &[Occurrence], days: &[Day]) -> Vec<Le
                 }),
                 _ => None,
             },
-            Occurrence::Timed { .. } => None,
+            Occurrence::Timed { .. } | Occurrence::Private { .. } => None,
         })
         .collect();
     // One event per date: the first, as for the day's reason.

@@ -19,6 +19,9 @@ pub struct Config {
     #[serde(default)]
     pub holidays: HolidayConfig,
     pub calendar: Option<CalendarConfig>,
+    /// More calendars, for private appointments only (see [`ExtraCalendar`]).
+    #[serde(default)]
+    pub extra_calendars: Vec<ExtraCalendar>,
     /// Your fixed workplace address. Arriving here always counts as being at
     /// work (e.g. when a colleague drives you on to the day's address), and
     /// home ↔ workplace trips are commuting, never mileage allowance.
@@ -156,6 +159,48 @@ pub struct CalendarConfig {
     pub name: Option<String>,
     /// Work address for days whose calendar entry has none (or no entry).
     pub default_location: Option<String>,
+}
+
+/// `[[extra_calendars]]`: a calendar besides the work calendar. It only
+/// adds private appointments; it never sets planned hours, days off or
+/// vacation, and its all-day events are ignored.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtraCalendar {
+    /// Proton Calendar share link (https://… or webcal://…) or a local .ics
+    /// file. The app keeps the link in the secret store under `id` instead;
+    /// without either (a backup from another device) the calendar is not
+    /// read.
+    pub source: Option<String>,
+    /// What its events are.
+    #[serde(rename = "use")]
+    pub usage: CalendarUse,
+    /// The calendar's name, as shown in the app.
+    pub name: Option<String>,
+    /// The app's key for the link in the secret store.
+    pub id: Option<String>,
+}
+
+/// What an extra calendar's timed events are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarUse {
+    /// Every timed event is a private appointment.
+    Private,
+    /// Only timed events whose title has a private word
+    /// (`calendar.private_keywords`) are private appointments; the rest is
+    /// ignored.
+    WordsOnly,
+}
+
+impl CalendarUse {
+    /// The name in `config.toml`.
+    pub fn id(self) -> &'static str {
+        match self {
+            CalendarUse::Private => "private",
+            CalendarUse::WordsOnly => "words_only",
+        }
+    }
 }
 
 /// Working from home: a timed work event in the calendar that is home
@@ -593,6 +638,15 @@ impl Config {
             cal.source = base.join(&cal.source).to_string_lossy().into_owned();
         }
         let config_dir = path.parent().unwrap_or(Path::new("."));
+        for source in cfg
+            .extra_calendars
+            .iter_mut()
+            .filter_map(|c| c.source.as_mut())
+        {
+            if !source.contains("://") && Path::new(source.as_str()).is_relative() {
+                *source = config_dir.join(&*source).to_string_lossy().into_owned();
+            }
+        }
         if let Some(file) = cfg
             .connected_cars
             .as_mut()
@@ -652,6 +706,16 @@ impl Config {
             known,
             radius_m: p.radius_m,
         })
+    }
+
+    /// Timed events whose title has one of these words are private
+    /// appointments, in every calendar (`calendar.private_keywords`; none
+    /// without a work calendar).
+    pub fn private_words(&self) -> &[String] {
+        self.calendar
+            .as_ref()
+            .map(|c| c.private_keywords.as_slice())
+            .unwrap_or_default()
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -725,6 +789,41 @@ mod tests {
             msg.contains("[danlon.api]") && msg.contains("unknown field `api`"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn extra_calendars_are_optional_and_read_with_their_use() {
+        let base = "employee_number = \"1\"\n[danlon]\n";
+        let cfg = Config::from_text(base, Path::new("/cfg/config.toml")).unwrap();
+        assert!(cfg.extra_calendars.is_empty());
+
+        let text = format!(
+            "{base}[[extra_calendars]]\nsource = \"private.ics\"\nuse = \"private\"\nname = \"Personal\"\n\
+             [[extra_calendars]]\nid = \"c1\"\nuse = \"words_only\"\n"
+        );
+        let cfg = Config::from_text(&text, Path::new("/cfg/config.toml")).unwrap();
+        assert_eq!(
+            cfg.extra_calendars,
+            [
+                ExtraCalendar {
+                    source: Some("/cfg/private.ics".into()),
+                    usage: CalendarUse::Private,
+                    name: Some("Personal".into()),
+                    id: None,
+                },
+                ExtraCalendar {
+                    source: None,
+                    usage: CalendarUse::WordsOnly,
+                    name: None,
+                    id: Some("c1".into()),
+                },
+            ]
+        );
+        let err = Config::parse(&format!(
+            "{base}[[extra_calendars]]\nsource = \"x.ics\"\nuse = \"working_hours\"\n"
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("working_hours"), "{err:#}");
     }
 
     #[test]

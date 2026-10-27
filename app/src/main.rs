@@ -174,8 +174,9 @@ fn App() -> Element {
             resumed.write().0 += 1;
         }
     });
-    // A file shared to the app (Android), taken at start and on each return;
-    // Settings imports it.
+    // A file or calendar link shared to the app (Android), taken at start
+    // and on each return; Settings imports the file or offers to add the
+    // calendar.
     let shared = use_context_provider(|| Signal::new(None::<import::Shared>));
     #[cfg(target_os = "android")]
     use_effect(move || {
@@ -186,12 +187,12 @@ fn App() -> Element {
                 .await
                 .map_err(|e| e.to_string())
                 .and_then(|r| r.map_err(|e| format!("{e:#}")));
-            let picked = match taken {
+            let taken = match taken {
                 Ok(None) => return,
-                Ok(Some(p)) => Ok(p),
-                Err(e) => Err(e),
+                Ok(Some(t)) => t,
+                Err(e) => import::Shared::File(Err(e)),
             };
-            shared.set(Some(import::Shared(picked)));
+            shared.set(Some(taken));
             screen.set(Screen::Settings);
         });
     });

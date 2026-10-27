@@ -330,6 +330,9 @@ impl MonthReport {
     }
 }
 
+/// The location of an extra calendar's private appointment: none.
+static NO_LOCATION: String = String::new();
+
 /// The month's days, with totals up to and including `today`
 /// (`NaiveDate::MAX`: the whole month). The lunch overrides in `state` beat
 /// a lunch calendar event, which beats the `[lunch]` default. Recorded
@@ -367,11 +370,7 @@ pub fn build(
         .as_ref()
         .and_then(|c| c.default_location.clone());
     let match_addresses = cfg.calendar.is_some();
-    let private_words: &[String] = cfg
-        .calendar
-        .as_ref()
-        .map(|c| c.private_keywords.as_slice())
-        .unwrap_or_default();
+    let private_words = cfg.private_words();
 
     // Planned working time per date, from timed calendar events.
     let mut planned: BTreeMap<NaiveDate, Vec<Span>> = BTreeMap::new();
@@ -396,13 +395,28 @@ pub fn build(
                 };
                 off.entry(*date).or_insert(reason);
             }
-            Occurrence::Timed {
-                start,
-                end,
-                summary,
-                location,
-            } => {
-                match classify(summary, private_words, &cfg.lunch.title) {
+            Occurrence::Timed { .. } | Occurrence::Private { .. } => {
+                let (start, end, summary, location, kind) = match occ {
+                    Occurrence::Timed {
+                        start,
+                        end,
+                        summary,
+                        location,
+                    } => (
+                        start,
+                        end,
+                        summary,
+                        location,
+                        classify(summary, private_words, &cfg.lunch.title),
+                    ),
+                    Occurrence::Private {
+                        start,
+                        end,
+                        summary,
+                    } => (start, end, summary, &NO_LOCATION, EntryKind::Private),
+                    Occurrence::AllDay { .. } => continue,
+                };
+                match kind {
                     EntryKind::Private => {
                         let window = PlannedWindow {
                             title: summary.clone(),
@@ -766,11 +780,7 @@ pub fn detect_workplace(cfg: &Config, calendar: &[Occurrence], until: NaiveDate)
     const DAYS: i64 = 60;
     const MIN_DAYS: usize = 3;
     let from = until - Duration::days(DAYS);
-    let private_words: &[String] = cfg
-        .calendar
-        .as_ref()
-        .map(|c| c.private_keywords.as_slice())
-        .unwrap_or_default();
+    let private_words = cfg.private_words();
     let mut places: Vec<(String, BTreeSet<NaiveDate>)> = Vec::new();
     for e in timed_entries(calendar, private_words, &cfg.lunch.title) {
         let date = e.start.date_naive();
@@ -859,6 +869,17 @@ pub fn timed_entries<'a>(
                 summary,
                 location,
             }),
+            Occurrence::Private {
+                start,
+                end,
+                summary,
+            } => Some(TimedEntry {
+                kind: EntryKind::Private,
+                start: *start,
+                end: *end,
+                summary,
+                location: "",
+            }),
             Occurrence::AllDay { .. } => None,
         })
         .collect()
@@ -903,7 +924,7 @@ fn classify(summary: &str, private_words: &[String], lunch_title: &str) -> Entry
 
 /// Whether `summary` contains one of `keywords` as whole words,
 /// case-insensitively.
-fn has_word(summary: &str, keywords: &[String]) -> bool {
+pub(crate) fn has_word(summary: &str, keywords: &[String]) -> bool {
     let words = |s: &str| -> Vec<String> {
         s.split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
