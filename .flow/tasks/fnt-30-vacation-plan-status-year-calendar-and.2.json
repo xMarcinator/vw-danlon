@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-31T10:36:58.000000Z",
+  "depends_on": [
+    "fnt-30-vacation-plan-status-year-calendar-and.1"
+  ],
+  "id": "fnt-30-vacation-plan-status-year-calendar-and.2",
+  "priority": null,
+  "spec": "fnt-30-vacation-plan-status-year-calendar-and",
+  "spec_path": ".flow/tasks/fnt-30-vacation-plan-status-year-calendar-and.2.md",
+  "status": "todo",
+  "title": "Vacation overview: status, 24-month SVG chart, expiry table, registration ticks",
+  "updated_at": "2026-10-31T10:36:58.000000Z"
+}
