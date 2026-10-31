@@ -1094,6 +1094,9 @@ fn print_vacation(cfg: &Config, mode: service::CalendarMode) -> Result<()> {
         v.calendar_fetched_at,
         v.calendar_fetch_error.as_deref(),
     );
+    // Registration ticks are not stored yet: every coming period is listed.
+    let status = vacation::status(&v.plan, &[]);
+    println!("{}", vacation::render_plan(&v.plan, &status));
     print!("{}", vacation::render(&v.rules, &v.overview));
     Ok(())
 }

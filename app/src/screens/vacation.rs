@@ -343,6 +343,8 @@ mod tests {
             employment_start: Some(d("2026-05-01")),
             per_month: 208,
             feriefridage: 5,
+            feriefridage_from: (5, 1),
+            max_forskud: 500,
         };
         let p = Period {
             kind: LeaveKind::Ferie,

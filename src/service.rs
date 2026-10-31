@@ -24,7 +24,7 @@ use crate::state::{
 };
 use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
-use crate::vacation::{self, Overview, Rules};
+use crate::vacation::{self, LeaveDay, Overview, Plan, Rules};
 
 /// The first day of the data `month` needs: 1 January of the year before,
 /// so the year's mileage and the 60-day rule's 12 months are counted.
@@ -1613,7 +1613,13 @@ pub fn day_work_steps(
 #[derive(Debug)]
 pub struct VacationView {
     pub rules: Rules,
+    /// The open holiday years from the calendar alone.
     pub overview: Overview,
+    /// The calendar's leave days through the end of the projection, for
+    /// [`vacation::plan`] with a draft.
+    pub leave: Vec<LeaveDay>,
+    /// The projection with the repeats and no draft.
+    pub plan: Plan,
     pub calendar_warning: Option<String>,
     /// When the calendar was fetched, and why fetching failed (see
     /// [`Calendar`]).
@@ -1621,12 +1627,17 @@ pub struct VacationView {
     pub calendar_fetch_error: Option<String>,
 }
 
-/// The vacation overview: the calendar from the oldest open holiday year's
-/// start to the newest one's use-by date.
+/// The vacation overview and projection: the calendar from the start of the
+/// feriefridage period holding the oldest open holiday year's start to the
+/// newest one's use-by date or the end of the projection, whichever is later.
 pub fn vacation(cfg: &Config, today: NaiveDate, mode: CalendarMode) -> Result<VacationView> {
+    let rules = Rules::from_config(cfg);
     let open = vacation::open_years(today);
-    let from = open[0].first_day();
-    let to = open[open.len() - 1].use_by();
+    let use_by = open[open.len() - 1].use_by();
+    let from = open[0]
+        .first_day()
+        .min(rules.feriefridage_first(rules.feriefridage_year(open[0].first_day())));
+    let to = use_by.max(vacation::horizon(today));
     let cal = calendar_between(cfg, from, to, mode)?;
     let mut days = Vec::new();
     let mut month = Month {
@@ -1641,12 +1652,15 @@ pub fn vacation(cfg: &Config, today: NaiveDate, mode: CalendarMode) -> Result<Va
             month: next.month(),
         };
     }
-    let rules = Rules::from_config(cfg);
     let leave = vacation::leave_days(cfg, &cal.occurrences, &days);
-    let overview = vacation::overview(&rules, &leave, today);
+    let until_use_by: Vec<LeaveDay> = leave.iter().filter(|d| d.date <= use_by).cloned().collect();
+    let overview = vacation::overview(&rules, &until_use_by, today);
+    let plan = vacation::plan(cfg, &leave, today, &vacation::Draft::default());
     Ok(VacationView {
         rules,
         overview,
+        leave,
+        plan,
         calendar_warning: cal.warning,
         calendar_fetched_at: cal.fetched_at,
         calendar_fetch_error: cal.fetch_error,

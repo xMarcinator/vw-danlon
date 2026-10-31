@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::{NaiveDate, NaiveTime, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveTime, Weekday};
 use serde::{Deserialize, Deserializer};
 
 use crate::address::Places;
@@ -397,6 +397,30 @@ pub struct VacationConfig {
     /// Vacation days earned per full month of employment.
     #[serde(default = "default_days_per_month")]
     pub days_per_month: f64,
+    /// Vacation that repeats every year (see [`Repeat`]).
+    #[serde(default)]
+    pub repeats: Vec<Repeat>,
+    /// First day ("MM-DD") of the feriefridage period, which runs a year
+    /// (from the contract; not in ferieloven).
+    #[serde(default = "default_feriefridage_from")]
+    pub feriefridage_from: String,
+    /// Most vacation days taken before they are earned (forskud); more needs
+    /// a form signed by management (from the contract; § 7 sets no maximum).
+    #[serde(default = "default_max_forskud")]
+    pub max_forskud: f64,
+}
+
+/// A vacation that repeats every year until a calendar event with the same
+/// title in that calendar year replaces it: ISO weeks, or the week before
+/// Christmas (the Monday before 24 December through 23 December).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Repeat {
+    pub title: String,
+    #[serde(default)]
+    pub weeks: Vec<u32>,
+    #[serde(default)]
+    pub christmas: bool,
 }
 
 fn default_vacation_keywords() -> Vec<String> {
@@ -415,6 +439,14 @@ fn default_days_per_month() -> f64 {
     2.08
 }
 
+fn default_feriefridage_from() -> String {
+    "05-01".into()
+}
+
+fn default_max_forskud() -> f64 {
+    5.0
+}
+
 impl Default for VacationConfig {
     fn default() -> Self {
         VacationConfig {
@@ -423,6 +455,9 @@ impl Default for VacationConfig {
             employment_start: None,
             feriefridage: default_feriefridage(),
             days_per_month: default_days_per_month(),
+            repeats: Vec::new(),
+            feriefridage_from: default_feriefridage_from(),
+            max_forskud: default_max_forskud(),
         }
     }
 }
@@ -431,6 +466,24 @@ impl VacationConfig {
     /// `days_per_month` in hundredths of a day (2,08 → 208).
     pub fn hundredths_per_month(&self) -> i64 {
         (self.days_per_month * 100.0).round() as i64
+    }
+
+    /// `max_forskud` in hundredths of a day.
+    pub fn max_forskud_hundredths(&self) -> i64 {
+        (self.max_forskud * 100.0).round() as i64
+    }
+
+    /// `feriefridage_from` as (month, day); 29 February is not allowed.
+    pub fn feriefridage_start(&self) -> Result<(u32, u32)> {
+        let date =
+            NaiveDate::parse_from_str(&format!("2001-{}", self.feriefridage_from), "%Y-%m-%d")
+                .with_context(|| {
+                    format!(
+                        "vacation.feriefridage_from must be MM-DD, got {:?}",
+                        self.feriefridage_from
+                    )
+                })?;
+        Ok((date.month(), date.day()))
     }
 }
 
@@ -741,6 +794,24 @@ impl Config {
         if self.vacation.days_per_month.is_nan() || self.vacation.days_per_month <= 0.0 {
             bail!("vacation.days_per_month must be a positive number of days");
         }
+        if self.vacation.max_forskud.is_nan() || self.vacation.max_forskud < 0.0 {
+            bail!("vacation.max_forskud must be zero or more days");
+        }
+        self.vacation.feriefridage_start()?;
+        for r in &self.vacation.repeats {
+            if r.title.trim().is_empty() {
+                bail!("vacation.repeats: every repeat needs a title");
+            }
+            if r.weeks.is_empty() == !r.christmas {
+                bail!(
+                    "vacation.repeats {:?}: set either weeks or christmas = true",
+                    r.title
+                );
+            }
+            if let Some(w) = r.weeks.iter().find(|w| !(1..=53).contains(*w)) {
+                bail!("vacation.repeats {:?}: week {w} is not 1–53", r.title);
+            }
+        }
         Ok(())
     }
 }
@@ -791,6 +862,54 @@ mod tests {
         let err = Config::parse(&format!("{base}[vacation]\nemployment_start = \"1 May\"\n"))
             .unwrap_err();
         assert!(format!("{err:#}").contains("YYYY-MM-DD"), "{err:#}");
+    }
+
+    #[test]
+    fn vacation_plan_keys_default_parse_and_are_checked() {
+        let base = "employee_number = \"1\"\n[danlon]\n";
+        let v = Config::parse(base).unwrap().vacation;
+        assert_eq!(
+            (
+                v.repeats.len(),
+                v.feriefridage_start().unwrap(),
+                v.max_forskud_hundredths()
+            ),
+            (0, (5, 1), 500)
+        );
+
+        let cfg = Config::parse(&format!(
+            "{base}[vacation]\nferiefridage_from = \"01-01\"\nmax_forskud = 3\n\
+             repeats = [{{ title = \"Sommerferie\", weeks = [28, 29, 30] }}, \
+             {{ title = \"Juleferie\", christmas = true }}]\n"
+        ))
+        .unwrap();
+        cfg.validate().unwrap();
+        let v = cfg.vacation;
+        assert_eq!(v.feriefridage_start().unwrap(), (1, 1));
+        assert_eq!(v.max_forskud_hundredths(), 300);
+        assert_eq!(v.repeats[0].weeks, [28, 29, 30]);
+        assert!(v.repeats[1].christmas && v.repeats[1].weeks.is_empty());
+
+        for (bad, says) in [
+            ("feriefridage_from = \"02-30\"", "MM-DD"),
+            ("feriefridage_from = \"02-29\"", "MM-DD"),
+            ("max_forskud = -1", "max_forskud"),
+            ("repeats = [{ title = \"X\" }]", "either weeks or christmas"),
+            (
+                "repeats = [{ title = \"X\", weeks = [1], christmas = true }]",
+                "either weeks or christmas",
+            ),
+            ("repeats = [{ title = \"X\", weeks = [54] }]", "not 1–53"),
+            (
+                "repeats = [{ title = \" \", weeks = [1] }]",
+                "needs a title",
+            ),
+        ] {
+            let err = Config::parse(&format!("{base}[vacation]\n{bad}\n"))
+                .and_then(|c| c.validate())
+                .unwrap_err();
+            assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+        }
     }
 
     #[test]

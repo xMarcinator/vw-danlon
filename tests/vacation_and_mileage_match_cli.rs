@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 
 use vw_danlon::config::Config;
 use vw_danlon::month::Month;
-use vw_danlon::{mileage, service, trip_store};
+use vw_danlon::{mileage, service, trip_store, vacation};
 
 fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -51,7 +51,11 @@ fn vacation_view_matches_the_vacation_command() {
     let v = service::vacation(&cfg, today, service::CalendarMode::Fresh).unwrap();
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        vw_danlon::vacation::render(&v.rules, &v.overview)
+        format!(
+            "{}\n{}",
+            vacation::render_plan(&v.plan, &vacation::status(&v.plan, &[])),
+            vacation::render(&v.rules, &v.overview)
+        )
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }

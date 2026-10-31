@@ -100,8 +100,14 @@ threshold_km = 20000
 # keywords = ["Ferie"]
 # feriefridag_keywords = ["Feriefridag"]   # wins over keywords
 # employment_start = 2026-05-01            # earning starts here; unset: from 1 Sep
-# feriefridage = 5                         # per holiday year, from the contract
+# feriefridage = 5                         # per period, from the contract; used before vacation days
 # days_per_month = 2.08                    # days earned per full month
+# feriefridage_from = "05-01"             # feriefridage run a year from this day (contract)
+# max_forskud = 5                          # days ahead before a management form is needed
+# repeats = [                              # planned every year until an event with the title replaces it
+#   { title = "Sommerferie", weeks = [28, 29, 30] },   # ISO weeks
+#   { title = "Juleferie", christmas = true },         # Monday before 24 Dec – 23 Dec
+# ]
 
 # Working from home: a timed work event whose title has one of these words
 # (whole word, any case), or whose location is mileage.home, counts its
