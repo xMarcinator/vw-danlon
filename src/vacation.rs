@@ -645,6 +645,38 @@ pub struct Plan {
     pub max_forskud: Days,
     /// Planned days that come from `[vacation].repeats`, not the calendar.
     pub repeat_days: BTreeSet<NaiveDate>,
+    /// Where each leave working day's vacation comes from, in date order.
+    pub spent: Vec<Spent>,
+}
+
+impl Plan {
+    /// What the period from `first` to `last` uses of `pool`, in hundredths.
+    pub fn used_of(&self, pool: Pool, first: NaiveDate, last: NaiveDate) -> Days {
+        Days(
+            self.spent
+                .iter()
+                .filter(|s| s.date >= first && s.date <= last)
+                .filter(|s| match (s.source, pool) {
+                    (Source::Year(a), Pool::Year(b)) => a == b,
+                    (Source::Feriefridag(a), Pool::Feriefridage(b)) => a == b,
+                    _ => false,
+                })
+                .map(|s| s.days.0)
+                .sum(),
+        )
+    }
+}
+
+/// A holiday year's balance on `on` as the Danløn app shows it: what it
+/// earned in the months ended by then, less the days taken by then.
+pub fn balance_on(rules: &Rules, days: &[LeaveDay], year: HolidayYear, on: NaiveDate) -> Days {
+    let (_, spent) = run(rules, days, on);
+    let taken: i64 = spent
+        .iter()
+        .filter(|s| s.source == Source::Year(year) && s.date <= on)
+        .map(|s| s.days.0)
+        .sum();
+    Days(rules.earned_through(year, on).0 - taken)
 }
 
 /// The last day of the projection: the end of its last month.
@@ -783,6 +815,7 @@ pub fn project(rules: &Rules, days: &[LeaveDay], today: NaiveDate) -> Plan {
         forskud,
         max_forskud: Days(rules.max_forskud),
         repeat_days: BTreeSet::new(),
+        spent,
     }
 }
 
@@ -925,8 +958,9 @@ fn plural(n: i64, one: &str, many: &str) -> String {
 }
 
 /// The status line, first match: a loss, a forskud over the limit, a
-/// payout, a period in the next 60 days not yet registered (`registered`
-/// holds title and first date), else nothing to do.
+/// payout, a calendar period in the next 60 days not yet registered
+/// (`registered` holds title and first date; repeats are not in the
+/// calendar yet), else nothing to do.
 pub fn status(plan: &Plan, registered: &[(String, NaiveDate)]) -> Status {
     let clear = "Nothing is lost".to_string();
     if let Some(loss) = plan.losses.first() {
@@ -986,6 +1020,7 @@ pub fn status(plan: &Plan, registered: &[(String, NaiveDate)]) -> Status {
     let soon = plan.today + Duration::days(REGISTER_WITHIN_DAYS);
     let due = plan.overview.periods.iter().find(|p| {
         p.working_days > 0
+            && !plan.repeat_days.contains(&p.first)
             && p.first > plan.today
             && p.first <= soon
             && !registered
@@ -1593,6 +1628,36 @@ END:VEVENT
     }
 
     #[test]
+    fn the_balance_on_a_date_is_earned_less_taken() {
+        // Employed from 1 May 2026: 2025/26 earned 8,32; 2 days taken by
+        // 13 Nov, one more planned later.
+        let r = vacation_only(Some("2026-05-01"));
+        let mut leave = ferie("2026-11-12", "2026-11-13");
+        leave.extend(ferie("2026-11-20", "2026-11-20"));
+        let y = HolidayYear(2025);
+        assert_eq!(balance_on(&r, &leave, y, d("2026-11-13")), Days(632));
+        assert_eq!(balance_on(&r, &leave, y, d("2026-11-11")), Days(832));
+        // 2026/27 on 31 Oct: Sep and Oct earned.
+        assert_eq!(
+            balance_on(&r, &leave, HolidayYear(2026), d("2026-10-31")),
+            Days(416)
+        );
+        let p = project(&r, &leave, d("2026-10-31"));
+        assert_eq!(
+            p.used_of(Pool::Year(y), d("2026-11-12"), d("2026-11-13")),
+            Days(200)
+        );
+        assert_eq!(
+            p.used_of(
+                Pool::Year(HolidayYear(2026)),
+                d("2026-11-01"),
+                d("2026-11-30")
+            ),
+            Days(0)
+        );
+    }
+
+    #[test]
     fn forskud_over_the_limit_needs_a_form() {
         // Employed from 1 May 2026; 15 days in January 2027 draw on 2026/27,
         // which has 8,32 usable then: the 14th day (21 Jan) goes 5,68 ahead.
@@ -1709,6 +1774,7 @@ END:VEVENT
             forskud: None,
             max_forskud: Days(500),
             repeat_days: BTreeSet::new(),
+            spent: vec![],
         }
     }
 

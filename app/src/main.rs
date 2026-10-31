@@ -214,7 +214,7 @@ fn App() -> Element {
                     h1 { "{current.label()}" }
                 }
                 main {
-                    class: if current == Screen::Month { "content full" } else { "content" },
+                    class: if matches!(current, Screen::Month | Screen::Vacation) { "content full" } else { "content" },
                     onmounted: move |e| {
                         let mut el = content.0;
                         el.set(Some(e.data()));

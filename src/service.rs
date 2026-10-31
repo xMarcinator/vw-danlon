@@ -4,7 +4,7 @@
 //! Nothing here prints or prompts; warnings come back as values.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -19,12 +19,12 @@ use crate::db;
 use crate::mileage::{self, MileageMonth, Status};
 use crate::month::{self, EntryKind, Month, MonthReport, Span, TimedEntry, Today};
 use crate::state::{
-    self, Appointment, EventChoice, IntervalKind, PlannedWindow, PrivateInterval, RunningTimer,
-    State,
+    self, Appointment, DanlonBalance, EventChoice, IntervalKind, PlannedWindow, PrivateInterval,
+    Registered, RegisteredPeriod, RunningTimer, State,
 };
 use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
-use crate::vacation::{self, LeaveDay, Overview, Plan, Rules};
+use crate::vacation::{self, HolidayYear, LeaveDay, Overview, Plan, Rules};
 
 /// The first day of the data `month` needs: 1 January of the year before,
 /// so the year's mileage and the 60-day rule's 12 months are counted.
@@ -1620,6 +1620,10 @@ pub struct VacationView {
     pub leave: Vec<LeaveDay>,
     /// The projection with the repeats and no draft.
     pub plan: Plan,
+    /// Vacation periods' registration ticks.
+    pub registered: Vec<RegisteredPeriod>,
+    /// Holiday-year balances typed in from the Danløn app.
+    pub danlon_balances: BTreeMap<i32, DanlonBalance>,
     pub calendar_warning: Option<String>,
     /// When the calendar was fetched, and why fetching failed (see
     /// [`Calendar`]).
@@ -1656,14 +1660,55 @@ pub fn vacation(cfg: &Config, today: NaiveDate, mode: CalendarMode) -> Result<Va
     let until_use_by: Vec<LeaveDay> = leave.iter().filter(|d| d.date <= use_by).cloned().collect();
     let overview = vacation::overview(&rules, &until_use_by, today);
     let plan = vacation::plan(cfg, &leave, today, &vacation::Draft::default());
+    let state = State::load(&cfg.database)?;
     Ok(VacationView {
         rules,
         overview,
         leave,
         plan,
+        registered: state.registered,
+        danlon_balances: state.danlon_balances,
         calendar_warning: cal.warning,
         calendar_fetched_at: cal.fetched_at,
         calendar_fetch_error: cal.fetch_error,
+    })
+}
+
+impl VacationView {
+    /// The periods registered everywhere, for [`vacation::status`].
+    pub fn fully_registered(&self) -> Vec<(String, NaiveDate)> {
+        self.registered
+            .iter()
+            .filter(|r| r.ticks.all())
+            .map(|r| (r.title.clone(), r.first))
+            .collect()
+    }
+}
+
+/// Sets where the vacation period `title` starting on `first` is registered.
+pub fn set_registered(
+    cfg: &Config,
+    title: &str,
+    first: NaiveDate,
+    ticks: Registered,
+) -> Result<()> {
+    State::update(&cfg.database, |s| s.set_registered(title, first, ticks))
+}
+
+/// Stores (or with `None` forgets) a holiday year's balance typed in from
+/// the Danløn app.
+pub fn set_danlon_balance(
+    cfg: &Config,
+    year: HolidayYear,
+    balance: Option<DanlonBalance>,
+) -> Result<()> {
+    State::update(&cfg.database, |s| match balance {
+        Some(b) => {
+            s.danlon_balances.insert(year.0, b);
+        }
+        None => {
+            s.danlon_balances.remove(&year.0);
+        }
     })
 }
 

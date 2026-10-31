@@ -225,6 +225,11 @@ pub struct Bar {
     pub on_step: Callback<i32>,
     pub on_pick: Callback<View>,
     pub on_today: Callback<()>,
+    /// The phone's choice of what the page shows (Overview · Calendar), in
+    /// the dock between the arrows; none: the views or the note.
+    pub tabs: Vec<&'static str>,
+    pub tab: usize,
+    pub on_tab: Callback<usize>,
 }
 
 impl Bar {
@@ -248,6 +253,9 @@ impl Bar {
             on_step: Callback::new(move |by: i32| on_change.call(period.step(by))),
             on_pick: Callback::new(move |to: View| on_change.call(period.pick(to, today))),
             on_today: Callback::new(move |_| on_change.call(period.today(today))),
+            tabs: Vec::new(),
+            tab: 0,
+            on_tab: Callback::new(|_| {}),
         }
     }
 
@@ -272,6 +280,42 @@ impl Bar {
             on_step,
             on_pick: Callback::new(|_| {}),
             on_today,
+            tabs: Vec::new(),
+            tab: 0,
+            on_tab: Callback::new(|_| {}),
+        }
+    }
+
+    /// With the phone's `tabs` in the dock, `tab` shown.
+    pub fn with_tabs(self, tabs: &[&'static str], tab: usize, on_tab: Callback<usize>) -> Self {
+        Bar {
+            tabs: tabs.to_vec(),
+            tab,
+            on_tab,
+            ..self
+        }
+    }
+
+    /// The phone's tabs in the dock.
+    fn tab_switch(&self) -> Element {
+        let on_tab = self.on_tab;
+        let shown = self.tab;
+        rsx! {
+            div {
+                class: "segmented dock-seg",
+                style: "grid-template-columns: repeat({self.tabs.len()}, minmax(0, 1fr))",
+                role: "radiogroup",
+                "aria-label": "Show",
+                for (i , label) in self.tabs.iter().copied().enumerate() {
+                    button {
+                        r#type: "button",
+                        role: "radio",
+                        "aria-checked": if i == shown { "true" } else { "false" },
+                        onclick: move |_| on_tab.call(i),
+                        "{label}"
+                    }
+                }
+            }
         }
     }
 
@@ -386,7 +430,11 @@ impl Bar {
                     onclick: move |_| on_step.call(-1),
                     Icon { d: "m15 6-6 6 6 6", size: 22 }
                 }
-                {self.switch("dock-seg")}
+                if self.tabs.is_empty() {
+                    {self.switch("dock-seg")}
+                } else {
+                    {self.tab_switch()}
+                }
                 button {
                     r#type: "button",
                     class: "period-arrow",

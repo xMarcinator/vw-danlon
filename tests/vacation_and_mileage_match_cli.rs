@@ -53,7 +53,7 @@ fn vacation_view_matches_the_vacation_command() {
         String::from_utf8(out.stdout).unwrap(),
         format!(
             "{}\n{}",
-            vacation::render_plan(&v.plan, &vacation::status(&v.plan, &[])),
+            vacation::render_plan(&v.plan, &vacation::status(&v.plan, &v.fully_registered())),
             vacation::render(&v.rules, &v.overview)
         )
     );

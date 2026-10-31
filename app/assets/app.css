@@ -3630,3 +3630,577 @@ label.car-row + label.car-row {
     height: 20px;
   }
 }
+
+/* Vacation: the status line, the 24-month chart, when each pool expires,
+   the periods to register and the year calendar with its draft. Wide, the
+   calendar sits left of the overview; on a phone the dock picks one. */
+.vac-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--acc-soft);
+  border: 1px solid var(--acc);
+  color: var(--acc-text);
+  font-size: 14px;
+}
+
+.vac-status.warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn);
+}
+
+.vac-next {
+  display: flex;
+  gap: 6px;
+  color: var(--text);
+}
+
+.vac-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.vac-cal {
+  flex: 5 1 520px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vac-over {
+  flex: 4 1 360px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vac-cal-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.vac-cal-head h2 {
+  margin: 0;
+  flex-grow: 1;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.vac-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip.key-ferie {
+  background: var(--acc);
+  color: var(--on-acc);
+}
+
+.chip.key-repeat,
+.chip.dashed {
+  background: var(--acc-soft);
+  color: var(--acc-text);
+  border: 1px dashed var(--acc);
+}
+
+.chip.dashed {
+  background: none;
+  color: var(--sub);
+  border-color: var(--ctl);
+}
+
+.chip.key-we {
+  background: var(--row);
+  color: var(--ctl);
+}
+
+.vac-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vac-draft.wide-only {
+  padding: 8px 8px 8px 14px;
+  border-radius: 12px;
+  background: var(--surf);
+  border: 1px solid var(--line);
+}
+
+.vac-draft-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--sub);
+}
+
+.vac-draft-row b {
+  color: var(--text);
+}
+
+.vac-copied {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--chip);
+  font: 12px/1.45 ui-monospace, "IBM Plex Mono", monospace;
+  color: var(--sub);
+  white-space: pre-wrap;
+}
+
+.vac-months {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.vac-month {
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 8px 10px;
+}
+
+.vac-month h3 {
+  margin: 0 0 6px 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vac-days {
+  display: grid;
+  grid-template-columns: 18px repeat(7, minmax(0, 1fr));
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vac-days .wd {
+  font-size: 10px;
+  color: var(--ctl);
+  text-align: center;
+  align-self: center;
+}
+
+.cal-day {
+  font: inherit;
+  font-size: 12px;
+  height: 26px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text);
+}
+
+button.cal-day {
+  cursor: pointer;
+}
+
+button.cal-day:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 1px;
+}
+
+.cal-day.we {
+  background: var(--row);
+  color: var(--ctl);
+}
+
+.cal-day.hol {
+  background: var(--info-bg);
+  color: var(--info);
+  font-weight: 500;
+}
+
+.cal-day.acies {
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-weight: 500;
+}
+
+.cal-day.ferie {
+  background: var(--acc);
+  color: var(--on-acc);
+  font-weight: 600;
+}
+
+.cal-day.repeat {
+  border: 1px dashed var(--acc);
+  background: var(--acc-soft);
+  color: var(--acc-text);
+}
+
+.cal-day.fri {
+  background: var(--client-bg);
+  color: var(--client);
+  font-weight: 600;
+}
+
+.cal-day.add {
+  border: 2px solid var(--acc);
+  color: var(--acc-text);
+  font-weight: 600;
+}
+
+.cal-day.del {
+  border: 2px dashed var(--bad);
+  color: var(--bad);
+  text-decoration: line-through;
+}
+
+.cal-day.past {
+  opacity: 0.45;
+}
+
+.cal-day.today {
+  box-shadow: inset 0 0 0 2px var(--text);
+}
+
+.vac-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 16px 4px;
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.vac-legend .key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 5px;
+  background: var(--acc);
+}
+
+.vac-legend .key.k-fri {
+  background: var(--client);
+}
+
+.vac-legend .key.k-line {
+  width: 12px;
+  height: 3px;
+  vertical-align: 3px;
+  background: var(--info);
+}
+
+.vac-legend .key.k-deadline {
+  width: 3px;
+  background: var(--bad);
+}
+
+.vac-chart-wrap {
+  padding: 0 8px 4px;
+}
+
+.vac-chart {
+  display: block;
+  font-family: inherit;
+}
+
+.vac-chart .vc-grid {
+  stroke: var(--row);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.vac-chart .vc-grid.zero {
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+}
+
+.vac-chart .vc-axis,
+.vac-chart .vc-tick {
+  font-size: 10px;
+  fill: var(--ctl);
+}
+
+.vac-chart .vc-tick.major {
+  fill: var(--sub);
+}
+
+.vac-chart .vc-bar {
+  fill: var(--acc);
+}
+
+.vac-chart .vc-bar.fri {
+  fill: var(--client);
+}
+
+.vac-chart .vc-deadline {
+  stroke: var(--bad);
+  stroke-width: 1.5;
+}
+
+.vac-chart .vc-deadline.dashed {
+  stroke-dasharray: 4 3;
+}
+
+.vac-chart .vc-lost,
+.vac-chart .vc-paid {
+  font-size: 10px;
+  font-weight: 600;
+  fill: var(--bad);
+}
+
+.vac-chart .vc-paid {
+  fill: var(--info);
+}
+
+.vac-chart .vc-balance {
+  fill: none;
+  stroke: var(--info);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.vac-chart .vc-balance-end {
+  fill: var(--info);
+}
+
+.vac-warnings {
+  margin: 0;
+  padding: 4px 16px 12px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--sub);
+}
+
+.vac-pools {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.vac-pool {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  padding: 10px 16px;
+}
+
+.vac-pool + .vac-pool {
+  border-top: 1px solid var(--row);
+}
+
+.vac-pool > b:first-child {
+  font-size: 14px;
+}
+
+.vac-pool .bad {
+  color: var(--bad);
+}
+
+.vac-pool .sub {
+  font-size: 12px;
+}
+
+.vac-pool .right {
+  text-align: right;
+}
+
+.vac-reg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+}
+
+.vac-reg-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.vac-reg-head b {
+  flex-grow: 1;
+  font-size: 14px;
+}
+
+.vac-ticks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vac-tick {
+  font: inherit;
+  font-size: 12px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--sub);
+}
+
+.vac-tick.on {
+  background: var(--acc-soft);
+  border-color: var(--acc);
+  color: var(--acc-text);
+}
+
+.vac-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--sub);
+}
+
+@media (max-width: 719px) {
+  .vac-grid[data-view="overview"] .vac-cal,
+  .vac-grid[data-view="calendar"] .vac-over {
+    display: none;
+  }
+
+  .vac-status {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+
+  .vac-cal-head {
+    display: none;
+  }
+
+  .vac-months {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vac-month {
+    padding: 10px 10px 12px;
+  }
+
+  .vac-month h3 {
+    font-size: 14px;
+  }
+
+  .vac-days {
+    grid-template-columns: 26px repeat(7, minmax(0, 1fr));
+    gap: 3px;
+  }
+
+  .vac-days .wd {
+    font-size: 11px;
+  }
+
+  .cal-day {
+    font-size: 13px;
+    height: 36px;
+    border-radius: 8px;
+  }
+
+  .vac-draft .small-btn {
+    min-height: 40px;
+    font-size: 14px;
+  }
+
+  .vac-ticks .vac-tick {
+    min-height: 36px;
+  }
+}
+
+/* Vacation: Danløn's balance per holiday year, typed in by hand. */
+.vac-link {
+  font: inherit;
+  font-size: 13px;
+  min-height: 32px;
+  padding: 0 6px;
+  border: none;
+  background: none;
+  color: var(--info);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  justify-self: start;
+}
+
+.vac-dl-wide {
+  grid-column: 1 / -1;
+}
+
+.vac-dl {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  margin-top: 6px;
+  padding: 4px 4px 4px 10px;
+  border-radius: 8px;
+  background: var(--chip);
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.vac-dl-text {
+  flex-grow: 1;
+}
+
+.vac-dl-diff {
+  font-weight: 600;
+  color: var(--acc-text);
+}
+
+.vac-dl-diff.apart {
+  color: var(--warn);
+}
+
+.vac-dl-form {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.vac-dl-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vac-dl-form input {
+  font: inherit;
+  font-size: 14px;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--text);
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.vac-dl-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}

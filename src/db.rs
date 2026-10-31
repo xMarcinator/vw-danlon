@@ -25,8 +25,9 @@ pub const FILE_NAME: &str = "vw-danlon.db";
 /// home-working timer ([`HOME_SCHEMA`]), version 3 the trip overrides
 /// ([`OVERRIDE_SCHEMA`]), version 4 calendar time and the deleted private
 /// appointments ([`CALENDAR_TIME_SCHEMA`]), version 5 when you left work
-/// without a trip ([`WORK_END_SCHEMA`]).
-const VERSION: i32 = 5;
+/// without a trip ([`WORK_END_SCHEMA`]), version 6 the vacation periods'
+/// registration ticks and the balances read in Danløn ([`VACATION_SCHEMA`]).
+const VERSION: i32 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -107,6 +108,22 @@ const WORK_END_SCHEMA: &str = "
 CREATE TABLE work_end (day TEXT PRIMARY KEY, at TEXT NOT NULL);
 ";
 
+/// What version 6 added: per vacation period (its title and first date),
+/// whether it is registered in Danløn, the calendar and Teams; and per
+/// holiday year (the year it starts), a balance typed in from the Danløn app
+/// with the date it was read, in hundredths of a day.
+const VACATION_SCHEMA: &str = "
+CREATE TABLE vacation_registered (
+    title TEXT NOT NULL,
+    first TEXT NOT NULL,
+    danlon INTEGER NOT NULL,
+    calendar INTEGER NOT NULL,
+    teams INTEGER NOT NULL,
+    PRIMARY KEY (title, first)
+);
+CREATE TABLE danlon_balance (year INTEGER PRIMARY KEY, read_on TEXT NOT NULL, days INTEGER NOT NULL);
+";
+
 /// What version 4 added: whether a private interval is calendar time (the
 /// planned window of an appointment left untouched), and the private
 /// appointments whose time you deleted.
@@ -163,6 +180,9 @@ fn upgrade(conn: &mut Connection, path: &Path) -> Result<()> {
     }
     if version <= 4 {
         tx.execute_batch(WORK_END_SCHEMA)?;
+    }
+    if version <= 5 {
+        tx.execute_batch(VACATION_SCHEMA)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()
@@ -307,6 +327,7 @@ fn build(path: &Path, tmp: &Path) -> Result<Vec<PathBuf>> {
     tx.execute_batch(OVERRIDE_SCHEMA)?;
     tx.execute_batch(CALENDAR_TIME_SCHEMA)?;
     tx.execute_batch(WORK_END_SCHEMA)?;
+    tx.execute_batch(VACATION_SCHEMA)?;
     let mut moved = Vec::new();
     if let Some(t) = &trips {
         crate::trip_store::insert(&tx, &t.trips)?;
@@ -509,6 +530,7 @@ mod tests {
         conn.execute_batch(
             "DROP TABLE home_intervals; DROP TABLE home_running; DROP TABLE trip_overrides; \
              DROP TABLE private_dismissed; DROP TABLE work_end; \
+             DROP TABLE vacation_registered; DROP TABLE danlon_balance; \
              ALTER TABLE private_intervals DROP COLUMN calendar_time; \
              PRAGMA user_version = 1;",
         )
@@ -523,6 +545,7 @@ mod tests {
         assert!(s.trip_overrides.is_empty());
         assert!(s.dismissed.is_empty());
         assert!(s.left_work.is_empty());
+        assert!(s.registered.is_empty() && s.danlon_balances.is_empty());
         assert!(!has_column(&conn, "private_intervals", "calendar_time").unwrap());
         drop(conn);
 

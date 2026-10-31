@@ -39,6 +39,42 @@ pub struct State {
     /// early)"): an arrival at a work address without a departure ends
     /// then.
     pub left_work: BTreeMap<NaiveDate, NaiveDateTime>,
+    /// Vacation periods ticked off as registered, by title and first date.
+    pub registered: Vec<RegisteredPeriod>,
+    /// Holiday-year balances typed in from the Danløn app, by the calendar
+    /// year the holiday year starts in.
+    pub danlon_balances: BTreeMap<i32, DanlonBalance>,
+}
+
+/// Where a vacation period is registered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registered {
+    pub danlon: bool,
+    pub calendar: bool,
+    pub teams: bool,
+}
+
+impl Registered {
+    /// Registered everywhere.
+    pub fn all(&self) -> bool {
+        self.danlon && self.calendar && self.teams
+    }
+}
+
+/// A vacation period's ticks; the period is its calendar title and first date.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredPeriod {
+    pub title: String,
+    pub first: NaiveDate,
+    pub ticks: Registered,
+}
+
+/// A holiday year's balance as the Danløn app showed it on a date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DanlonBalance {
+    pub read_on: NaiveDate,
+    /// Hundredths of a day.
+    pub days: i64,
 }
 
 /// The account `account connect` registered, and when trips were last synced.
@@ -455,6 +491,30 @@ impl State {
         Ok(i)
     }
 
+    /// The ticks of the period `title` starting on `first`.
+    pub fn registered(&self, title: &str, first: NaiveDate) -> Registered {
+        self.registered
+            .iter()
+            .find(|r| r.title == title && r.first == first)
+            .map(|r| r.ticks)
+            .unwrap_or_default()
+    }
+
+    /// Sets the ticks of a period; none ticked forgets it.
+    pub fn set_registered(&mut self, title: &str, first: NaiveDate, ticks: Registered) {
+        self.registered
+            .retain(|r| !(r.title == title && r.first == first));
+        if ticks != Registered::default() {
+            self.registered.push(RegisteredPeriod {
+                title: title.into(),
+                first,
+                ticks,
+            });
+            self.registered
+                .sort_by(|a, b| (a.first, &a.title).cmp(&(b.first, &b.title)));
+        }
+    }
+
     /// Reads the state from the database `db`.
     pub fn load(db: &Path) -> Result<Self> {
         let conn = crate::db::open(db)?;
@@ -589,7 +649,51 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
         trip_overrides: read_overrides(conn)?,
         dismissed: read_dismissed(conn)?,
         left_work: read_left_work(conn)?,
+        registered: read_registered(conn)?,
+        danlon_balances: read_danlon_balances(conn)?,
     })
+}
+
+/// The vacation registration ticks; none in a database from before them
+/// (opened read-only, so not upgraded).
+fn read_registered(conn: &Connection) -> rusqlite::Result<Vec<RegisteredPeriod>> {
+    if !crate::db::has_table(conn, "vacation_registered")? {
+        return Ok(Vec::new());
+    }
+    conn.prepare(
+        "SELECT title, first, danlon, calendar, teams FROM vacation_registered \
+         ORDER BY first, title",
+    )?
+    .query_map([], |r| {
+        Ok(RegisteredPeriod {
+            title: r.get(0)?,
+            first: r.get(1)?,
+            ticks: Registered {
+                danlon: r.get(2)?,
+                calendar: r.get(3)?,
+                teams: r.get(4)?,
+            },
+        })
+    })?
+    .collect()
+}
+
+/// The balances typed in from Danløn; none in a database from before them.
+fn read_danlon_balances(conn: &Connection) -> rusqlite::Result<BTreeMap<i32, DanlonBalance>> {
+    if !crate::db::has_table(conn, "danlon_balance")? {
+        return Ok(BTreeMap::new());
+    }
+    conn.prepare("SELECT year, read_on, days FROM danlon_balance")?
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                DanlonBalance {
+                    read_on: r.get(1)?,
+                    days: r.get(2)?,
+                },
+            ))
+        })?
+        .collect()
 }
 
 /// The private appointments whose time you deleted; none in a database
@@ -684,6 +788,7 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
          DELETE FROM private_running; DELETE FROM account; \
          DELETE FROM home_intervals; DELETE FROM home_running; DELETE FROM trip_overrides; \
          DELETE FROM private_dismissed; DELETE FROM work_end; \
+         DELETE FROM vacation_registered; DELETE FROM danlon_balance; \
          DELETE FROM meta WHERE key IN ('private_next_id', 'home_next_id');",
     )?;
     let mut st = conn.prepare("INSERT INTO lunch (day, start, minutes) VALUES (?1, ?2, ?3)")?;
@@ -764,6 +869,24 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
     for (day, at) in &state.left_work {
         st.execute(params![day, at])?;
     }
+    let mut st = conn.prepare(
+        "INSERT INTO vacation_registered (title, first, danlon, calendar, teams) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for r in &state.registered {
+        st.execute(params![
+            r.title,
+            r.first,
+            r.ticks.danlon,
+            r.ticks.calendar,
+            r.ticks.teams
+        ])?;
+    }
+    let mut st =
+        conn.prepare("INSERT INTO danlon_balance (year, read_on, days) VALUES (?1, ?2, ?3)")?;
+    for (year, b) in &state.danlon_balances {
+        st.execute(params![year, b.read_on, b.days])?;
+    }
     Ok(())
 }
 
@@ -827,6 +950,44 @@ mod tests {
                 minutes: 30
             }
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vacation_ticks_and_danlon_balances_survive_a_reopen() {
+        let dir = temp_dir("state-vacation");
+        let path = dir.join(crate::db::FILE_NAME);
+        let first = d("2026-12-19");
+        let ticks = Registered {
+            danlon: true,
+            calendar: true,
+            teams: false,
+        };
+        State::update(&path, |s| {
+            s.set_registered("Juleferie", first, ticks);
+            s.danlon_balances.insert(
+                2025,
+                DanlonBalance {
+                    read_on: d("2026-10-31"),
+                    days: 950,
+                },
+            );
+        })
+        .unwrap();
+        let s = State::load(&path).unwrap();
+        assert_eq!(s.registered("Juleferie", first), ticks);
+        assert!(!s.registered("Juleferie", first).all());
+        assert_eq!(
+            s.registered("Juleferie", d("2026-12-20")),
+            Registered::default()
+        );
+        assert_eq!(s.danlon_balances[&2025].days, 950);
+        // Unticking everything forgets the period.
+        State::update(&path, |s| {
+            s.set_registered("Juleferie", first, Registered::default())
+        })
+        .unwrap();
+        assert!(State::load(&path).unwrap().registered.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -8,6 +8,7 @@ pub mod mileage;
 pub mod month;
 pub mod period;
 pub mod vacation;
+pub mod vacation_plan;
 pub mod week;
 
 use std::collections::BTreeSet;
