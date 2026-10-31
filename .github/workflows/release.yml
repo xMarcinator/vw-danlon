@@ -34,6 +34,10 @@ env:
   DX_VERSION: 0.7.10
   NDK_VERSION: 30.0.16248370
   CARGO_TERM_COLOR: always
+  # Fetch git dependencies (the private chart crates) with the git CLI, so
+  # they use the deploy key the ssh-agent step loads. The repository's
+  # .cargo/config.toml says the same, but Windows runners did not honour it.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
 
