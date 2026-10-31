@@ -17,7 +17,17 @@ The year calendar, following the canvas (Phone · Vacation · Calendar, and the 
 **Files:** app/src/screens/vacation.rs, app/src/screens/mod.rs (PeriodPicker views), app/assets/app.css
 
 ## Acceptance
-- [ ] Tapping a day changes the status and chart without a reload; Discard restores them
-- [ ] Copy puts the expected text on the clipboard (desktop); on Android it is not checked here
-- [ ] Touch targets on phone at least 36 px tall; keyboard focus visible on desktop
-- [ ] No JavaScript; cargo test, clippy clean (host and the Android target)
+- [x] Tapping a day changes the status and chart without a reload; Discard restores them (the draft signal feeds `vacation::plan`; the toggle is unit-tested, the tap itself not run in an app)
+- [x] Copy puts the expected text on the clipboard (desktop); on Android it is not checked here (`draft_text` tested; `platform::copy_text`)
+- [x] Touch targets on phone at least 36 px tall; keyboard focus visible on desktop
+- [x] No JavaScript; cargo test, clippy clean (host and the Android target)
+
+## Done summary
+- **Model:** `vacation_plan::year_calendar` builds January – December, Monday first, with ISO week numbers. Each day is plain, weekend (no `[work_week]` hours), holiday, Acies day off (Grundlovsdag, juleaften, nytårsaften from `[holidays]`), vacation, repeat, feriefridag, draft add or draft remove. Past days are dimmed; today is ringed.
+- **Tapping:** future working days are buttons. `toggle` undoes a draft change, takes a planned day out, or adds a free one.
+- **Draft:** it lives in a signal. With a draft, the screen runs `vacation::plan(cfg, leave, today, draft)`, so the status, chart, table and lists update at once.
+- **Draft bar:** "N changes in the draft · nothing is saved", Discard, and Copy (`draft_text` through `platform::copy_text`, with the copied text shown or the error).
+- **Phone:** `Bar::with_tabs` puts `‹ Overview · Calendar ›` in the dock between the year arrows, and the draft bar sits above it. Cells are 36px.
+- **Desktop:** the calendar is on the left (`flex 5 1 520px`, months in an auto-fill grid) and the overview on the right; at narrow widths they stack.
+- **Calendar year:** today's year while the shown holiday year holds today, else the year the holiday year starts in (`calendar_year`, tested).
+- Tests: `the_year_calendar_marks_days_and_taps_into_the_draft`, `the_calendar_year_follows_today_in_the_current_holiday_year`.
