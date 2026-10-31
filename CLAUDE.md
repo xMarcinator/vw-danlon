@@ -27,6 +27,18 @@ Releases page, on any computer.
 - The workflow caches Cargo (registry, target, `~/.cargo/bin` incl. `dx`),
   the Android NDK/build-tools/platform and Gradle between runs.
 
+## The chart crates
+
+The vacation chart is drawn by `flow-next-charts` and `flow-next-draw` from
+the private `xMarcinator/flow-next-tracker` repository, pinned by commit in
+`app/Cargo.toml` (`.cargo/config.toml` makes cargo fetch with git, so local
+SSH keys work). The release workflow reads that repository with the secret
+`FLOW_NEXT_TRACKER_DEPLOY_KEY`, a read-only deploy key on flow-next-tracker
+whose private half is stored in this repository's secrets; the user sets it,
+never the agent. To move the pin, change both `rev`s and run `cargo update
+-p flow-next-charts -p flow-next-draw`. The app paints the chart's scene
+itself in `app/src/chart.rs`, mapping its theme roles to CSS tokens.
+
 ## The signing key
 
 The Android release keystore is stored only in the repository's GitHub

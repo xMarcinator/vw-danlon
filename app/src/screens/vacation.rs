@@ -189,82 +189,12 @@ fn draft_bar(
     }
 }
 
-/// The next 24 months as SVG, on the app's colour tokens.
+/// The next 24 months, laid out by `flow-next-charts` and painted on the
+/// app's colour tokens.
 fn chart_view(c: &vp::Chart) -> Element {
-    let (ex, ey) = c.end;
-    rsx! {
-        svg {
-            class: "vac-chart",
-            view_box: "0 0 {vp::W} {vp::H}",
-            width: "100%",
-            role: "img",
-            "aria-label": "{c.label}",
-            for g in c.grid.iter() {
-                line {
-                    class: if g.value == 0 { "vc-grid zero" } else { "vc-grid" },
-                    x1: "26",
-                    x2: "332",
-                    y1: "{g.y}",
-                    y2: "{g.y}",
-                }
-                text {
-                    class: "vc-axis",
-                    x: "21",
-                    y: "{g.y + 3.5}",
-                    text_anchor: "end",
-                    "{g.value}"
-                }
-            }
-            for b in c.bars.iter() {
-                rect {
-                    class: if b.feriefridag { "vc-bar fri" } else { "vc-bar" },
-                    x: "{b.x}",
-                    y: "{b.y}",
-                    width: "{b.w}",
-                    height: "{b.h}",
-                    rx: "2",
-                    title { "{b.title}" }
-                }
-            }
-            for t in c.ticks.iter() {
-                text {
-                    class: if t.major { "vc-tick major" } else { "vc-tick" },
-                    x: "{t.x}",
-                    y: "190",
-                    text_anchor: "middle",
-                    "{t.text}"
-                }
-            }
-            for l in c.deadlines.iter() {
-                line {
-                    class: if l.dashed { "vc-deadline dashed" } else { "vc-deadline" },
-                    x1: "{l.x}",
-                    x2: "{l.x}",
-                    y1: "12",
-                    y2: "170",
-                }
-                if let Some(lost) = &l.lost {
-                    text {
-                        class: "vc-lost",
-                        x: "{l.x - 3.0}",
-                        y: "10",
-                        text_anchor: "end",
-                        "{lost}"
-                    }
-                }
-                if let Some(paid) = &l.paid {
-                    text {
-                        class: "vc-paid",
-                        x: "{l.x - 3.0}",
-                        y: if l.lost.is_some() { "21" } else { "10" },
-                        text_anchor: "end",
-                        "{paid}"
-                    }
-                }
-            }
-            polyline { class: "vc-balance", points: "{c.points}" }
-            circle { class: "vc-balance-end", cx: "{ex}", cy: "{ey}", r: "3" }
-        }
+    match c.scene() {
+        Ok(scene) => crate::chart::painting(&scene.drawing, "vac", "vac-chart", &c.label),
+        Err(e) => rsx! { span { class: "note", role: "alert", "The chart can't be drawn: {e}" } },
     }
 }
 

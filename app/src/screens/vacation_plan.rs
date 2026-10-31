@@ -6,6 +6,11 @@
 use std::collections::BTreeMap;
 
 use chrono::{Datelike, Duration, NaiveDate};
+use flow_next_charts::config::{
+    Annotation, Grid, LabelPosition, LegendOptions, Position, Ticks,
+};
+use flow_next_charts::{self as charts, ChartConfig, ChartType, ColorRef, Dataset, Scale, Scene};
+use flow_next_draw::Pattern;
 use vw_danlon::config::{Config, Repeat};
 use vw_danlon::holidays;
 use vw_danlon::month::LeaveKind;
@@ -43,171 +48,141 @@ fn amount(s: &Settlement) -> String {
     }
 }
 
-/// The chart's viewBox and margins, as in the mockup.
-pub const W: f64 = 340.0;
-pub const H: f64 = 196.0;
-const LEFT: f64 = 26.0;
-const RIGHT: f64 = 8.0;
-const TOP: f64 = 18.0;
-const BOTTOM: f64 = 26.0;
+/// The chart's size, as in the mockup; it scales to the panel's width.
+pub const W: f32 = 340.0;
+pub const H: f32 = 196.0;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct GridLine {
-    pub y: f64,
-    pub value: i64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChartBar {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub feriefridag: bool,
-    pub title: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Tick {
-    pub x: f64,
-    pub text: String,
-    /// January, with the year.
-    pub major: bool,
-}
-
-/// A red line at the end of a month with a deadline.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Deadline {
-    pub x: f64,
-    /// The feriefridage deadline; 31 December is solid.
-    pub dashed: bool,
-    pub lost: Option<String>,
-    pub paid: Option<String>,
-}
-
+/// The next 24 months as a `flow-next-charts` config: days used as bars
+/// down from 0 (vacation, then feriefridage, stacked), the balance at month
+/// end as a line, and red lines after December and after the month the
+/// feriefridage end, labelled with what is lost or paid out there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chart {
-    pub grid: Vec<GridLine>,
-    pub bars: Vec<ChartBar>,
-    pub ticks: Vec<Tick>,
-    pub deadlines: Vec<Deadline>,
-    /// The balance line's points, "x,y x,y …".
-    pub points: String,
-    pub end: (f64, f64),
+    pub config: ChartConfig,
     /// The summary for screen readers.
     pub label: String,
 }
 
-fn round1(v: f64) -> f64 {
-    (v * 10.0).round() / 10.0
+impl Chart {
+    /// The chart laid out at its mockup size; an error names what the
+    /// library refused in the config (a bug here, not bad data).
+    pub fn scene(&self) -> Result<Scene, String> {
+        let mut chart = charts::Chart::new(self.config.clone()).map_err(|e| e.to_string())?;
+        Ok(chart.layout(W, H))
+    }
 }
 
-/// The next 24 months on one linear scale: days used as bars down from 0
-/// (vacation, then feriefridage), the balance at month end as a line, and
-/// red lines after December and after the month the feriefridage end.
+/// The dashes of the feriefridage deadline; 31 December is solid.
+pub const FRIDAG_DASH: [f32; 2] = [4.0, 3.0];
+
 pub fn chart(plan: &Plan, rules: &Rules) -> Chart {
     let ms = &plan.months;
-    let n = ms.len().max(1) as f64;
-    let bw = (W - LEFT - RIGHT) / n;
-    let used = |i: usize| ms[i].vacation_used.0 as f64 / 100.0 + f64::from(ms[i].feriefridage_used);
-    let balance = |i: usize| ms[i].balance.0 as f64 / 100.0;
-    let max_b = (0..ms.len()).map(balance).fold(5.0, f64::max);
-    let min_v = (0..ms.len())
-        .flat_map(|i| [-used(i), balance(i)])
-        .fold(0.0, f64::min);
-    let top = (max_b / 5.0).ceil() * 5.0;
-    let bot = (min_v / 5.0).floor() * 5.0;
-    let y = |v: f64| round1(TOP + (top - v) / (top - bot) * (H - TOP - BOTTOM));
-    let x = |i: usize| round1(LEFT + i as f64 * bw);
-    let mid = |i: usize| round1(LEFT + i as f64 * bw + bw / 2.0);
-
-    let grid = (bot as i64..=top as i64)
-        .step_by(5)
-        .map(|v| GridLine {
-            y: y(v as f64),
-            value: v,
-        })
-        .collect();
     let fridag_end = rules.feriefridage_last(FridagYear(2000)).month();
-    let mut bars = Vec::new();
-    let mut ticks = Vec::new();
-    let mut deadlines = Vec::new();
+    let labels: Vec<String> = ms
+        .iter()
+        .map(|m| m.month.first_day().format("%b %y").to_string())
+        .collect();
+    let vacation: Vec<f64> = ms.iter().map(|m| -(m.vacation_used.0 as f64) / 100.0).collect();
+    let fridage: Vec<f64> = ms.iter().map(|m| -f64::from(m.feriefridage_used)).collect();
+    let balance: Vec<f64> = ms.iter().map(|m| m.balance.0 as f64 / 100.0).collect();
+    // Grid lines every 5 days from a multiple of 5 below the deepest bar to
+    // one above the highest balance, so 0 is always one of them.
+    let top = balance.iter().copied().fold(5.0, f64::max);
+    let bot = (0..ms.len())
+        .map(|i| vacation[i] + fridage[i])
+        .fold(0.0, f64::min);
+    let (top, bot) = ((top / 5.0).ceil() * 5.0, (bot / 5.0).floor() * 5.0);
+
+    let mut annotations = Vec::new();
     for (i, m) in ms.iter().enumerate() {
-        let name = m.month.first_day().format("%B %Y").to_string();
-        let vac = m.vacation_used.0 as f64 / 100.0;
-        let fri = f64::from(m.feriefridage_used);
-        let w = round1(bw - 4.0);
-        if vac > 0.0 {
-            bars.push(ChartBar {
-                x: x(i) + 2.0,
-                y: y(0.0),
-                w,
-                h: round1(y(-vac) - y(0.0)),
-                feriefridag: false,
-                title: format!(
-                    "{name}: {}",
-                    plural(whole(m.vacation_used), "vacation day", "vacation days")
-                ),
-            });
-        }
-        if fri > 0.0 {
-            bars.push(ChartBar {
-                x: x(i) + 2.0,
-                y: y(-vac),
-                w,
-                h: round1(y(-vac - fri) - y(-vac)),
-                feriefridag: true,
-                title: format!(
-                    "{name}: {}",
-                    plural(
-                        m.feriefridage_used.to_string(),
-                        "feriefridag",
-                        "feriefridage"
-                    )
-                ),
-            });
-        }
         let month = m.month.month;
-        if month == 1 {
-            ticks.push(Tick {
-                x: mid(i),
-                text: m.month.first_day().format("%b %y").to_string(),
-                major: true,
-            });
-        } else if month % 3 == 1 {
-            ticks.push(Tick {
-                x: mid(i),
-                text: m.month.first_day().format("%b").to_string()[..1].to_string(),
-                major: false,
-            });
+        if month != 12 && month != fridag_end {
+            continue;
         }
-        if month == 12 || month == fridag_end {
-            let here = |list: &[Settlement]| -> Option<Days> {
-                let sum: i64 = list
-                    .iter()
-                    .filter(|s| m.month.contains(s.date))
-                    .map(|s| s.days.0)
-                    .sum();
-                (sum > 0).then_some(Days(sum))
-            };
-            deadlines.push(Deadline {
-                x: x(i + 1),
-                dashed: month != 12,
-                lost: here(&plan.losses).map(|d| format!("−{}", whole(d))),
-                paid: here(&plan.payouts).map(|d| format!("paid {}", whole(d))),
-            });
+        let here = |list: &[Settlement]| -> Option<Days> {
+            let sum: i64 = list
+                .iter()
+                .filter(|s| m.month.contains(s.date))
+                .map(|s| s.days.0)
+                .sum();
+            (sum > 0).then_some(Days(sum))
+        };
+        let mut said = Vec::new();
+        if let Some(d) = here(&plan.losses) {
+            said.push(format!("−{}", whole(d)));
         }
+        if let Some(d) = here(&plan.payouts) {
+            said.push(format!("paid {}", whole(d)));
+        }
+        // The line sits on the month's end: between this category and the next.
+        let mut line = Annotation::line(
+            m.month.first_day().format("%b-%Y").to_string().to_lowercase(),
+            "x",
+            i as f64 + 0.5,
+        )
+        .border_color(ColorRef::role("accent"));
+        if month != 12 {
+            line = line.border_dash(FRIDAG_DASH);
+        }
+        if !said.is_empty() {
+            line = line.with_label(said.join(" · "), LabelPosition::End);
+        }
+        annotations.push(line);
     }
-    let points = (0..ms.len())
-        .map(|i| format!("{},{}", mid(i), y(balance(i))))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let last = ms.len().saturating_sub(1);
-    let end = if ms.is_empty() {
-        (0.0, 0.0)
-    } else {
-        (mid(last), y(balance(last)))
-    };
+
+    let config = ChartConfig::bar()
+        .labels(labels)
+        .dataset(
+            Dataset::new("Vacation days", vacation)
+                .stack("spent")
+                .background(ColorRef::role("series.1"))
+                .pattern(Pattern::Plain)
+                .order(2),
+        )
+        .dataset(
+            Dataset::new("Feriefridage", fridage)
+                .stack("spent")
+                .background(ColorRef::role("series.2"))
+                .pattern(Pattern::Plain)
+                .order(2),
+        )
+        .dataset(
+            Dataset::new("Balance", balance)
+                .kind(ChartType::Line)
+                .border(ColorRef::role("series.3"))
+                .border_width(2.0)
+                .border_dash(Vec::new())
+                .point_radius(0.0)
+                .order(0),
+        )
+        .scale(
+            "x",
+            Scale::category()
+                .stacked(true)
+                .ticks(Ticks::default().max_rotation(0.0).max_ticks_limit(8))
+                .grid(Grid {
+                    display: false,
+                    ..Grid::default()
+                }),
+        )
+        .scale(
+            "y",
+            Scale::linear()
+                .stacked(true)
+                .min(bot)
+                .max(top)
+                .ticks(Ticks::default().step_size(5.0).auto_skip(false))
+                .grid(Grid {
+                    border_dash: vec![2.0, 3.0],
+                    ..Grid::default()
+                }),
+        )
+        .legend(LegendOptions {
+            display: false,
+            position: Position::Top,
+        })
+        .annotations(annotations);
+
     let mut said: Vec<String> = plan
         .losses
         .iter()
@@ -226,15 +201,7 @@ pub fn chart(plan: &Plan, rules: &Rules) -> Chart {
             said.join(", ")
         }
     );
-    Chart {
-        grid,
-        bars,
-        ticks,
-        deadlines,
-        points,
-        end,
-        label,
-    }
+    Chart { config, label }
 }
 
 /// The warnings under the chart: every loss and payout the status line does
@@ -693,6 +660,7 @@ pub const WEEKDAYS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flow_next_charts::DataPoint;
     use vw_danlon::vacation::{self, HolidayYear};
 
     fn d(s: &str) -> NaiveDate {
@@ -720,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn the_chart_has_one_scale_for_bars_line_and_grid() {
+    fn the_chart_stacks_spent_days_under_zero_with_a_line_and_deadlines() {
         let c = cfg("employment_start = 2026-05-01\nferiefridage = 0");
         let today = d("2026-10-31");
         let p = vacation::plan(
@@ -730,30 +698,49 @@ mod tests {
             &Draft::default(),
         );
         let ch = chart(&p, &vacation::Rules::from_config(&c));
-        // 0 is a grid line, and so is a multiple of 5 above the top balance.
-        let zero = ch.grid.iter().find(|g| g.value == 0).unwrap();
-        assert!(ch.grid.iter().all(|g| g.value % 5 == 0));
-        // December's bar starts at 0 and goes down 5 days.
-        let bar = &ch.bars[0];
-        assert_eq!(bar.y, zero.y);
-        assert_eq!(bar.title, "December 2026: 5 vacation days");
-        let five = ch.grid.iter().find(|g| g.value == -5).map(|g| g.y);
-        assert_eq!(five, Some(round1(bar.y + bar.h)));
-        assert!(!bar.feriefridag);
-        // Deadlines after every December (solid) and April (dashed).
-        let dashed: Vec<bool> = ch.deadlines.iter().map(|l| l.dashed).collect();
+        let ds = &ch.config.data.datasets;
+        assert_eq!(ds.len(), 3);
+        assert_eq!(ch.config.data.labels[0], "Oct 26");
+        // December's bar goes down 5 days; the two bar datasets share a stack.
+        assert_eq!(ds[0].data[2], DataPoint::from(-5.0));
+        assert_eq!(ds[0].stack.as_deref(), Some("spent"));
+        assert_eq!(ds[1].stack.as_deref(), Some("spent"));
+        assert_eq!(ds[2].kind, Some(ChartType::Line));
+        assert_eq!(ds[2].data.len(), 24);
+        // Deadlines after every December (solid) and April (dashed), on the
+        // month's end: half a category past it.
+        let lines = &ch.config.options.plugins.as_ref().unwrap().annotation.as_ref().unwrap().annotations;
+        let dashed: Vec<bool> = lines.iter().map(|l| !l.border_dash.is_empty()).collect();
         assert_eq!(dashed, [false, true, false, true]);
+        assert_eq!(lines[0].id, "dec-2026");
+        assert_eq!(lines[0].value, Some(2.5));
         // 3,32 of 2025/26's 8,32 are left on 31 Dec 2026, all lost.
-        assert_eq!(ch.deadlines[0].lost.as_deref(), Some("−3,32"));
-        assert_eq!(ch.deadlines[0].paid, None);
-        assert_eq!(ch.points.split(' ').count(), 24);
+        assert_eq!(lines[0].label.as_ref().map(|l| l.content.as_str()), Some("−3,32"));
+        assert!(lines[1].label.is_none());
         assert!(
             ch.label.contains("3,32 days of 2025/26 lost 31 Dec 2026"),
             "{}",
             ch.label
         );
-        assert_eq!(ch.ticks[0].text, "O");
-        assert!(ch.ticks.iter().any(|t| t.major && t.text == "Jan 27"));
+        // The library takes the config and draws the deadline lines.
+        let scene = ch.scene().unwrap();
+        let svg = scene.to_svg(&charts::ChartTheme::fallback());
+        assert!(svg.contains("annotation-dec-2026"), "{svg}");
+        assert!(svg.contains("dataset-2"), "{svg}");
+    }
+
+    /// `cargo test -p vw-danlon-app dump_chart -- --ignored` writes the chart
+    /// in the library's fallback colours to $VW_CHART_SVG for a look.
+    #[test]
+    #[ignore]
+    fn dump_chart_svg() {
+        let c = cfg("employment_start = 2026-05-01\nferiefridage = 5");
+        let mut cal = leave("Juleferie", "2026-12-14", "2026-12-18");
+        cal.extend(leave("Sommer", "2027-07-05", "2027-07-23"));
+        let p = vacation::plan(&c, &cal, d("2026-10-31"), &Draft::default());
+        let ch = chart(&p, &vacation::Rules::from_config(&c));
+        let svg = ch.scene().unwrap().to_svg(&charts::ChartTheme::fallback());
+        std::fs::write(std::env::var("VW_CHART_SVG").unwrap(), svg).unwrap();
     }
 
     #[test]
@@ -908,3 +895,4 @@ mod tests {
         assert_eq!(repeats_note(&[]), None);
     }
 }
+

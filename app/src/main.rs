@@ -3,6 +3,7 @@
 
 use dioxus::prelude::*;
 
+mod chart;
 mod import;
 mod platform;
 mod screens;

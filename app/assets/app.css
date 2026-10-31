@@ -3912,66 +3912,25 @@ button.cal-day:focus-visible {
 .vac-chart {
   display: block;
   font-family: inherit;
-}
-
-.vac-chart .vc-grid {
-  stroke: var(--row);
-  stroke-width: 1;
-  stroke-dasharray: 2 3;
-}
-
-.vac-chart .vc-grid.zero {
-  stroke-width: 1.5;
-  stroke-dasharray: none;
-}
-
-.vac-chart .vc-axis,
-.vac-chart .vc-tick {
-  font-size: 10px;
-  fill: var(--ctl);
-}
-
-.vac-chart .vc-tick.major {
-  fill: var(--sub);
-}
-
-.vac-chart .vc-bar {
-  fill: var(--acc);
-}
-
-.vac-chart .vc-bar.fri {
-  fill: var(--client);
-}
-
-.vac-chart .vc-deadline {
-  stroke: var(--bad);
-  stroke-width: 1.5;
-}
-
-.vac-chart .vc-deadline.dashed {
-  stroke-dasharray: 4 3;
-}
-
-.vac-chart .vc-lost,
-.vac-chart .vc-paid {
-  font-size: 10px;
-  font-weight: 600;
-  fill: var(--bad);
-}
-
-.vac-chart .vc-paid {
-  fill: var(--info);
-}
-
-.vac-chart .vc-balance {
-  fill: none;
-  stroke: var(--info);
-  stroke-width: 2;
-  stroke-linejoin: round;
-}
-
-.vac-chart .vc-balance-end {
-  fill: var(--info);
+  /* flow-next-charts paints theme roles; they take the app's tokens here. */
+  --chart-series-1: var(--acc);
+  --chart-series-2: var(--client);
+  --chart-series-3: var(--info);
+  --chart-series-4: var(--sub);
+  --chart-series-5: var(--sub);
+  --chart-series-6: var(--sub);
+  --chart-series-7: var(--sub);
+  --chart-series-8: var(--sub);
+  --chart-background: var(--surf);
+  --chart-grid: var(--row);
+  --chart-axis: var(--row);
+  --chart-tick: var(--ctl);
+  --chart-tooltip: var(--surf);
+  --chart-tooltip-text: var(--text);
+  --chart-crosshair: var(--ctl);
+  --chart-focus: var(--acc);
+  --chart-muted: var(--sub);
+  --chart-accent: var(--bad);
 }
 
 .vac-warnings {
