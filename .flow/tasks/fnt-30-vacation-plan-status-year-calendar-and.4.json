@@ -1,0 +1,16 @@
+{
+  "assignee": null,
+  "claim_note": "",
+  "claimed_at": null,
+  "created_at": "2026-10-31T10:49:03.000000Z",
+  "depends_on": [
+    "fnt-30-vacation-plan-status-year-calendar-and.2"
+  ],
+  "id": "fnt-30-vacation-plan-status-year-calendar-and.4",
+  "priority": null,
+  "spec": "fnt-30-vacation-plan-status-year-calendar-and",
+  "spec_path": ".flow/tasks/fnt-30-vacation-plan-status-year-calendar-and.4.md",
+  "status": "todo",
+  "title": "Danløn balance: enter it and show where it differs (mockups first)",
+  "updated_at": "2026-10-31T10:49:03.000000Z"
+}

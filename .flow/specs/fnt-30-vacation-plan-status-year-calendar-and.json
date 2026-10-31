@@ -3,7 +3,7 @@
   "created_at": "2026-10-31T10:36:58.000000Z",
   "depends_on_epics": [],
   "id": "fnt-30-vacation-plan-status-year-calendar-and",
-  "next_task": 4,
+  "next_task": 5,
   "plan_review_status": "unknown",
   "plan_reviewed_at": null,
   "spec_path": ".flow/specs/fnt-30-vacation-plan-status-year-calendar-and.md",
@@ -20,5 +20,5 @@
     "mergeBaseTracker": null,
     "url": null
   },
-  "updated_at": "2026-10-31T10:36:58.000000Z"
+  "updated_at": "2026-10-31T10:49:03.000000Z"
 }
