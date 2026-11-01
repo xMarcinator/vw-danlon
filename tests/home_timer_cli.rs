@@ -133,10 +133,13 @@ fn report_marks_today_and_shows_later_days_planned_only() {
     assert!(row(today).contains("◀ today"), "{report}");
     let tomorrow = today.succ_opt().unwrap();
     if tomorrow.format("%Y-%m").to_string() == month {
-        let later = row(tomorrow);
+        // After the date ("2026-11-02" holds "-0" itself): planned only,
+        // no difference.
+        let full = row(tomorrow);
+        let later = &full[10..];
         assert!(
             !later.contains("◀ today") && !later.contains('+') && !later.contains("-0"),
-            "{later}"
+            "{full}"
         );
     }
     for total in [
