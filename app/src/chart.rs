@@ -225,7 +225,10 @@ mod tests {
     #[test]
     fn a_role_paints_as_its_custom_property_and_a_literal_as_written() {
         assert_eq!(role(&Paint::role("series.1")), "var(--chart-series-1)");
-        assert_eq!(role(&Paint::role("tooltip.text")), "var(--chart-tooltip-text)");
+        assert_eq!(
+            role(&Paint::role("tooltip.text")),
+            "var(--chart-tooltip-text)"
+        );
         assert_eq!(role(&Paint("#ff0000".into())), "#ff0000");
         let s = Style::stroked(Paint::role("accent"), 1.5).dashed(4.0, 3.0);
         assert_eq!(

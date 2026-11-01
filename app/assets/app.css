@@ -3658,33 +3658,151 @@ label.car-row + label.car-row {
   color: var(--text);
 }
 
-.vac-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  align-items: flex-start;
+/* Month and Year: the calendar on the left, everything else stacked on
+   the right in page order; on a phone one column in page order. */
+.vac-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 4fr);
+  gap: 12px 14px;
+  align-items: start;
+}
+
+.vac-layout > * {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.vac-layout > .vac-a-cal {
+  grid-column: 1;
+  grid-row: 1 / span 8;
 }
 
 .vac-cal {
-  flex: 5 1 520px;
-  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
-.vac-over {
-  flex: 4 1 360px;
-  min-width: 0;
+.vac-mcal {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  padding: 14px 16px 16px;
+}
+
+.vac-month-open {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 32px;
+  margin: 0 0 4px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.vac-month-open:hover {
+  background: var(--chip);
+}
+
+.vac-month-open:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
+.vac-days.big {
+  grid-template-columns: 30px repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.vac-days.big .wd {
+  font-size: 12px;
+}
+
+.vac-days.big .cal-day {
+  height: 56px;
+  font-size: 16px;
+  border-radius: 10px;
+}
+
+.vac-minis {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 10px;
+  padding: 10px 10px 12px;
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.vac-minis.narrow-only {
+  display: none;
+}
+
+.vac-mini {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.vac-mini .vac-month-open {
+  align-self: flex-start;
+}
+
+.vac-mini-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vac-mini-days .cal-day {
+  height: 20px;
+  font-size: 10px;
+  border-radius: 4px;
+}
+
+.vac-deadline {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--acc-soft);
+  border: 1px solid var(--acc);
+  color: var(--acc-text);
+  font-size: 14px;
+}
+
+.vac-deadline.warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+  color: var(--warn);
+}
+
+.vac-deadline-mark {
+  font-weight: 700;
+}
+
+.period-ticks {
+  grid-column: 1 / -1;
 }
 
 .vac-cal-head {
   display: flex;
-  align-items: baseline;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.vac-cal-head .note {
+  margin-left: auto;
 }
 
 .vac-cal-head h2 {
@@ -3933,6 +4051,13 @@ button.cal-day:focus-visible {
   --chart-accent: var(--bad);
 }
 
+/* Month view: the shown month's column behind the bars. The painter sets
+   the annotation's fill inline from the grid role, too faint to find. */
+.vac-chart #vac-annotation-shown rect {
+  fill: var(--acc-soft) !important;
+  stroke: none !important;
+}
+
 .vac-warnings {
   margin: 0;
   padding: 4px 16px 12px 32px;
@@ -4029,18 +4154,43 @@ button.cal-day:focus-visible {
 }
 
 @media (max-width: 719px) {
-  .vac-grid[data-view="overview"] .vac-cal,
-  .vac-grid[data-view="calendar"] .vac-over {
-    display: none;
+  .vac-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vac-layout > *,
+  .vac-layout > .vac-a-cal {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .vac-minis.narrow-only {
+    display: grid !important;
+  }
+
+  .vac-mcal {
+    padding: 10px 10px 12px;
+  }
+
+  .vac-days.big {
+    grid-template-columns: 26px repeat(7, minmax(0, 1fr));
+    gap: 3px;
+  }
+
+  .vac-days.big .cal-day {
+    height: 40px;
+    font-size: 15px;
+    border-radius: 8px;
+  }
+
+  .vac-deadline {
+    padding: 10px 12px;
+    font-size: 13px;
   }
 
   .vac-status {
     padding: 10px 12px;
     font-size: 13px;
-  }
-
-  .vac-cal-head {
-    display: none;
   }
 
   .vac-months {

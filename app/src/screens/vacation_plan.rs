@@ -7,16 +7,17 @@ use std::collections::BTreeMap;
 
 use chrono::{Datelike, Duration, NaiveDate};
 use flow_next_charts::config::{
-    Annotation, Grid, LabelPosition, LegendOptions, Position, Ticks,
+    Annotation, DrawTime, Grid, LabelPosition, LegendOptions, Position, Ticks,
 };
 use flow_next_charts::{self as charts, ChartConfig, ChartType, ColorRef, Dataset, Scale, Scene};
 use flow_next_draw::Pattern;
 use vw_danlon::config::{Config, Repeat};
 use vw_danlon::holidays;
-use vw_danlon::month::LeaveKind;
+use vw_danlon::month::{LeaveKind, Month};
 use vw_danlon::state::{Registered, RegisteredPeriod};
 use vw_danlon::vacation::{
-    Days, Draft, FridagYear, LeaveDay, Plan, Pool, Rules, Settlement, Status, StatusKind,
+    self as vacation, Days, Draft, FridagYear, HolidayYear, LeaveDay, Plan, Pool, Rules,
+    Settlement, Source, Status, StatusKind,
 };
 
 /// Hours a vacation day stands for in the Danløn app.
@@ -75,14 +76,17 @@ impl Chart {
 /// The dashes of the feriefridage deadline; 31 December is solid.
 pub const FRIDAG_DASH: [f32; 2] = [4.0, 3.0];
 
-pub fn chart(plan: &Plan, rules: &Rules) -> Chart {
+pub fn chart(plan: &Plan, rules: &Rules, shown: Option<Month>) -> Chart {
     let ms = &plan.months;
     let fridag_end = rules.feriefridage_last(FridagYear(2000)).month();
     let labels: Vec<String> = ms
         .iter()
         .map(|m| m.month.first_day().format("%b %y").to_string())
         .collect();
-    let vacation: Vec<f64> = ms.iter().map(|m| -(m.vacation_used.0 as f64) / 100.0).collect();
+    let vacation: Vec<f64> = ms
+        .iter()
+        .map(|m| -(m.vacation_used.0 as f64) / 100.0)
+        .collect();
     let fridage: Vec<f64> = ms.iter().map(|m| -f64::from(m.feriefridage_used)).collect();
     let balance: Vec<f64> = ms.iter().map(|m| m.balance.0 as f64 / 100.0).collect();
     // Grid lines every 5 days from a multiple of 5 below the deepest bar to
@@ -116,7 +120,11 @@ pub fn chart(plan: &Plan, rules: &Rules) -> Chart {
         }
         // The line sits on the month's end: between this category and the next.
         let mut line = Annotation::line(
-            m.month.first_day().format("%b-%Y").to_string().to_lowercase(),
+            m.month
+                .first_day()
+                .format("%b-%Y")
+                .to_string()
+                .to_lowercase(),
             "x",
             i as f64 + 0.5,
         )
@@ -128,6 +136,19 @@ pub fn chart(plan: &Plan, rules: &Rules) -> Chart {
             line = line.with_label(said.join(" · "), LabelPosition::End);
         }
         annotations.push(line);
+    }
+    // In Month view the shown month is shaded behind its bars.
+    if let Some(i) = shown.and_then(|s| ms.iter().position(|m| m.month == s)) {
+        let mut shade = Annotation::bounds(
+            "shown",
+            (Some(i as f64 - 0.5), Some(i as f64 + 0.5)),
+            (None, None),
+        )
+        .background_color(ColorRef::role("grid"))
+        .border_color(ColorRef::role("grid"))
+        .draw_time(DrawTime::BeforeDatasetsDraw);
+        shade.border_width = Some(0.0);
+        annotations.push(shade);
     }
 
     let config = ChartConfig::bar()
@@ -202,6 +223,274 @@ pub fn chart(plan: &Plan, rules: &Rules) -> Chart {
         }
     );
     Chart { config, label }
+}
+
+/// One number card at the top of Month and Year, as on Hours.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Kpi {
+    pub label: String,
+    pub value: String,
+    pub sub: String,
+    /// "bad" for a loss or a negative balance, "good" for days earned.
+    pub tone: &'static str,
+}
+
+fn kpi(label: impl Into<String>, value: impl Into<String>, sub: impl Into<String>) -> Kpi {
+    Kpi {
+        label: label.into(),
+        value: value.into(),
+        sub: sub.into(),
+        tone: "",
+    }
+}
+
+/// The balance on `on` as the plan counts it: what the holiday years still
+/// usable then have earned and not used.
+fn balance_at(rules: &Rules, leave: &[LeaveDay], on: NaiveDate) -> Days {
+    Days(
+        vacation::open_years(on)
+            .into_iter()
+            .map(|y| vacation::balance_on(rules, leave, y, on).0)
+            .sum(),
+    )
+}
+
+/// What the plan spends from `first` to `last`: vacation days, then
+/// feriefridage.
+fn spent_between(plan: &Plan, first: NaiveDate, last: NaiveDate) -> (Days, Days) {
+    plan.spent
+        .iter()
+        .filter(|s| s.date >= first && s.date <= last)
+        .fold((Days(0), Days(0)), |(v, f), s| match s.source {
+            Source::Feriefridag(_) => (v, Days(f.0 + s.days.0)),
+            _ => (Days(v.0 + s.days.0), f),
+        })
+}
+
+/// A holiday year's settlement (loss or payout) in month `m`.
+fn settled_in(list: &[Settlement], m: Month) -> Option<&Settlement> {
+    list.iter()
+        .find(|s| m.contains(s.date) && matches!(s.pool, Pool::Year(_)))
+}
+
+/// "1 Nov".
+fn day_month(d: NaiveDate) -> String {
+    d.format("%-d %b").to_string()
+}
+
+/// "—" outside the plan.
+fn or_dash(d: Option<Days>) -> String {
+    d.map_or("—".to_string(), |d| d.to_string())
+}
+
+/// Month view's cards: the balance at the start, the days used, the days
+/// earned and the balance at the end. A month before today is counted from
+/// the calendar; the rest come from the plan.
+pub fn month_kpis(plan: &Plan, rules: &Rules, leave: &[LeaveDay], m: Month) -> Vec<Kpi> {
+    let (first, last) = (m.first_day(), m.last_day());
+    let at = plan.months.iter().position(|p| p.month == m);
+    let start = match at {
+        Some(i) if i > 0 => Some(plan.months[i - 1].balance),
+        _ if first <= plan.today => Some(balance_at(rules, leave, first - Duration::days(1))),
+        _ => None,
+    };
+    let end = match at {
+        Some(i) => Some(plan.months[i].balance),
+        None if last < plan.today => Some(balance_at(rules, leave, last)),
+        None => None,
+    };
+    let (used, fridage) = spent_between(plan, first, last);
+    let earning = HolidayYear::containing(first);
+    let earned = Days(
+        rules.earned_through(earning, last).0
+            - rules.earned_through(earning, first - Duration::days(1)).0,
+    );
+    let lost = settled_in(&plan.losses, m);
+    let paid = settled_in(&plan.payouts, m);
+    let mut end_sub: Vec<String> = Vec::new();
+    if let Some(l) = lost {
+        end_sub.push(format!("after {} expire", l.days));
+    }
+    if let Some(p) = paid {
+        end_sub.push(format!("{} paid out", p.days));
+    }
+    if end.is_none() {
+        end_sub.push("outside the plan".into());
+    }
+    vec![
+        kpi(
+            format!("Balance {}", day_month(first)),
+            or_dash(start),
+            if start.is_none() {
+                "outside the plan"
+            } else {
+                ""
+            },
+        ),
+        kpi(
+            "Used",
+            plural(whole(used), "day", "days"),
+            if fridage.0 > 0 {
+                format!(
+                    "+ {}",
+                    plural(whole(fridage), "feriefridag", "feriefridage")
+                )
+            } else {
+                String::new()
+            },
+        ),
+        Kpi {
+            tone: if earned.0 > 0 { "good" } else { "" },
+            ..kpi("Earned", format!("+{earned}"), "at month end")
+        },
+        Kpi {
+            tone: if lost.is_some() || end.is_some_and(|d| d.0 < 0) {
+                "bad"
+            } else {
+                ""
+            },
+            ..kpi(
+                format!("Balance {}", day_month(last)),
+                or_dash(end),
+                end_sub.join(" · "),
+            )
+        },
+    ]
+}
+
+/// Year view's cards for a calendar year: days taken by today, days planned
+/// after it, what expires on 31 December and the balance then.
+pub fn year_kpis(plan: &Plan, rules: &Rules, leave: &[LeaveDay], year: i32) -> Vec<Kpi> {
+    let jan = NaiveDate::from_ymd_opt(year, 1, 1).expect("1 January exists");
+    let dec = NaiveDate::from_ymd_opt(year, 12, 31).expect("31 December exists");
+    let both = |(v, f): (Days, Days)| Days(v.0 + f.0);
+    let taken = both(spent_between(plan, jan, dec.min(plan.today)));
+    let planned = both(spent_between(
+        plan,
+        (plan.today + Duration::days(1)).max(jan),
+        dec,
+    ));
+    let repeats = plan.repeat_days.iter().any(|d| d.year() == year);
+    let last = Month { year, month: 12 };
+    let lost = settled_in(&plan.losses, last);
+    let paid = settled_in(&plan.payouts, last);
+    let balance = match plan.months.iter().find(|p| p.month == last) {
+        Some(p) => Some(p.balance),
+        None if dec < plan.today => Some(balance_at(rules, leave, dec)),
+        None => None,
+    };
+    let mut expire_sub: Vec<String> = Vec::new();
+    if let Some(Settlement {
+        pool: Pool::Year(y),
+        ..
+    }) = lost
+    {
+        expire_sub.push(format!("of {y}"));
+    }
+    if let Some(p) = paid {
+        expire_sub.push(format!("{} paid out", p.days));
+    }
+    vec![
+        kpi(
+            format!("Taken in {year}"),
+            plural(whole(taken), "day", "days"),
+            if jan > plan.today { "not started" } else { "" },
+        ),
+        kpi(
+            format!("Planned in {year}"),
+            plural(whole(planned), "day", "days"),
+            if dec <= plan.today {
+                "the year is over"
+            } else if repeats {
+                "with the repeats"
+            } else {
+                ""
+            },
+        ),
+        Kpi {
+            tone: if lost.is_some() { "bad" } else { "" },
+            ..kpi(
+                format!("Expires 31 Dec {year}"),
+                lost.map_or("0".to_string(), |l| format!("−{}", l.days)),
+                expire_sub.join(" · "),
+            )
+        },
+        Kpi {
+            tone: if balance.is_some_and(|d| d.0 < 0) {
+                "bad"
+            } else {
+                ""
+            },
+            ..kpi(
+                format!("Balance 31 Dec {year}"),
+                or_dash(balance),
+                if balance.is_none() {
+                    "outside the plan"
+                } else {
+                    ""
+                },
+            )
+        },
+    ]
+}
+
+/// A deadline in the month shown: what expires or is paid out (warn), or
+/// that nothing does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonthDeadline {
+    pub head: String,
+    pub text: String,
+    pub warn: bool,
+}
+
+pub fn month_deadline(plan: &Plan, rules: &Rules, m: Month) -> Option<MonthDeadline> {
+    if m.last_day() < plan.today {
+        return None;
+    }
+    let settled: Vec<(&Settlement, bool)> = plan
+        .losses
+        .iter()
+        .map(|s| (s, false))
+        .chain(plan.payouts.iter().map(|s| (s, true)))
+        .filter(|(s, _)| m.contains(s.date))
+        .collect();
+    if let Some((first, _)) = settled.first() {
+        let text: Vec<String> = settled
+            .iter()
+            .map(|(s, paid)| {
+                if *paid {
+                    format!("{} paid out", amount(s))
+                } else {
+                    format!("{} expire", amount(s))
+                }
+            })
+            .collect();
+        return Some(MonthDeadline {
+            head: date(first.date),
+            text: text.join(", "),
+            warn: true,
+        });
+    }
+    if m.month == 12 {
+        let y = HolidayYear(m.year - 1);
+        if rules.earning_start(y).is_some() {
+            return Some(MonthDeadline {
+                head: date(y.use_by()),
+                text: format!("last day for {y} · nothing expires"),
+                warn: false,
+            });
+        }
+    }
+    let fy = rules.feriefridage_year(m.first_day());
+    let by = rules.feriefridage_last(fy);
+    if m.contains(by) && rules.feriefridage_allowance(fy) > 0 {
+        return Some(MonthDeadline {
+            head: date(by),
+            text: format!("last day for the feriefridage of {fy} · nothing expires"),
+            warn: false,
+        });
+    }
+    None
 }
 
 /// The warnings under the chart: every loss and payout the status line does
@@ -382,13 +671,25 @@ impl Registration {
 
 pub fn registrations(plan: &Plan, registered: &[RegisteredPeriod]) -> Vec<Registration> {
     let soon = plan.today + Duration::days(vw_danlon::vacation::REGISTER_WITHIN_DAYS);
+    registrations_between(plan, registered, plan.today + Duration::days(1), soon)
+}
+
+/// The planned periods from the calendar (not repeats) that start after
+/// today and fall (partly) between `first` and `last`, with their ticks.
+pub fn registrations_between(
+    plan: &Plan,
+    registered: &[RegisteredPeriod],
+    first: NaiveDate,
+    last: NaiveDate,
+) -> Vec<Registration> {
     plan.overview
         .periods
         .iter()
         .filter(|p| {
             p.working_days > 0
                 && p.first > plan.today
-                && p.first <= soon
+                && p.last >= first
+                && p.first <= last
                 && !plan.repeat_days.contains(&p.first)
         })
         .map(|p| Registration {
@@ -644,16 +945,6 @@ pub fn draft_text(draft: &Draft) -> String {
     out.join("\n")
 }
 
-/// The calendar year the Vacation calendar shows for a holiday year: this
-/// year while the holiday year holds today, else the year it starts in.
-pub fn calendar_year(shown: vw_danlon::vacation::HolidayYear, today: NaiveDate) -> i32 {
-    if vw_danlon::vacation::HolidayYear::containing(today) == shown {
-        today.year()
-    } else {
-        shown.0
-    }
-}
-
 /// Monday-first weekday initials for the calendar head.
 pub const WEEKDAYS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
 
@@ -661,7 +952,7 @@ pub const WEEKDAYS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
 mod tests {
     use super::*;
     use flow_next_charts::DataPoint;
-    use vw_danlon::vacation::{self, HolidayYear};
+    use vw_danlon::vacation;
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
@@ -697,7 +988,7 @@ mod tests {
             today,
             &Draft::default(),
         );
-        let ch = chart(&p, &vacation::Rules::from_config(&c));
+        let ch = chart(&p, &vacation::Rules::from_config(&c), None);
         let ds = &ch.config.data.datasets;
         assert_eq!(ds.len(), 3);
         assert_eq!(ch.config.data.labels[0], "Oct 26");
@@ -709,13 +1000,25 @@ mod tests {
         assert_eq!(ds[2].data.len(), 24);
         // Deadlines after every December (solid) and April (dashed), on the
         // month's end: half a category past it.
-        let lines = &ch.config.options.plugins.as_ref().unwrap().annotation.as_ref().unwrap().annotations;
+        let lines = &ch
+            .config
+            .options
+            .plugins
+            .as_ref()
+            .unwrap()
+            .annotation
+            .as_ref()
+            .unwrap()
+            .annotations;
         let dashed: Vec<bool> = lines.iter().map(|l| !l.border_dash.is_empty()).collect();
         assert_eq!(dashed, [false, true, false, true]);
         assert_eq!(lines[0].id, "dec-2026");
         assert_eq!(lines[0].value, Some(2.5));
         // 3,32 of 2025/26's 8,32 are left on 31 Dec 2026, all lost.
-        assert_eq!(lines[0].label.as_ref().map(|l| l.content.as_str()), Some("−3,32"));
+        assert_eq!(
+            lines[0].label.as_ref().map(|l| l.content.as_str()),
+            Some("−3,32")
+        );
         assert!(lines[1].label.is_none());
         assert!(
             ch.label.contains("3,32 days of 2025/26 lost 31 Dec 2026"),
@@ -738,9 +1041,87 @@ mod tests {
         let mut cal = leave("Juleferie", "2026-12-14", "2026-12-18");
         cal.extend(leave("Sommer", "2027-07-05", "2027-07-23"));
         let p = vacation::plan(&c, &cal, d("2026-10-31"), &Draft::default());
-        let ch = chart(&p, &vacation::Rules::from_config(&c));
+        let ch = chart(&p, &vacation::Rules::from_config(&c), None);
         let svg = ch.scene().unwrap().to_svg(&charts::ChartTheme::fallback());
         std::fs::write(std::env::var("VW_CHART_SVG").unwrap(), svg).unwrap();
+    }
+
+    #[test]
+    fn month_and_year_cards_count_the_plan_and_the_calendar() {
+        let c = cfg("employment_start = 2026-05-01\nferiefridage = 0");
+        let rules = vacation::Rules::from_config(&c);
+        let cal = leave("Juleferie", "2026-12-14", "2026-12-18");
+        let p = vacation::plan(&c, &cal, d("2026-10-31"), &Draft::default());
+        let m = |y, mo| Month { year: y, month: mo };
+        let values = |k: &[Kpi]| k.iter().map(|k| k.value.clone()).collect::<Vec<_>>();
+        // December: 5 days used, 2,08 earned, 3,32 of 2025/26 expire.
+        let dec = month_kpis(&p, &rules, &cal, m(2026, 12));
+        assert_eq!(dec[0].label, "Balance 1 Dec");
+        assert_eq!(dec[1].value, "5 days");
+        assert_eq!((dec[2].value.as_str(), dec[2].tone), ("+2,08", "good"));
+        assert_eq!(dec[3].label, "Balance 31 Dec");
+        assert_eq!(
+            (dec[3].sub.as_str(), dec[3].tone),
+            ("after 3,32 expire", "bad")
+        );
+        // Each month starts where the last one ended.
+        let nov = month_kpis(&p, &rules, &cal, m(2026, 11));
+        assert_eq!(nov[3].value, dec[0].value);
+        // Today's month starts from the calendar's balance on 30 September.
+        let oct = month_kpis(&p, &rules, &cal, m(2026, 10));
+        assert_ne!(oct[0].value, "—");
+        assert_eq!(oct[1].value, "0 days");
+        // Past the 24 months: no balance.
+        let far = month_kpis(&p, &rules, &cal, m(2028, 11));
+        assert_eq!(values(&far)[3], "—");
+        assert_eq!(far[3].sub, "outside the plan");
+        // The year: nothing taken yet, 5 planned, 3,32 expire on 31 Dec.
+        let y = year_kpis(&p, &rules, &cal, 2026);
+        assert_eq!(values(&y)[..3], ["0 days", "5 days", "−3,32"]);
+        assert_eq!((y[2].sub.as_str(), y[2].tone), ("of 2025/26", "bad"));
+        assert_eq!(y[3].value, dec[3].value);
+    }
+
+    #[test]
+    fn a_month_names_its_deadline_and_the_chart_shades_it() {
+        let c = cfg("employment_start = 2026-05-01\nferiefridage = 0");
+        let rules = vacation::Rules::from_config(&c);
+        let cal = leave("Juleferie", "2026-12-14", "2026-12-18");
+        let p = vacation::plan(&c, &cal, d("2026-10-31"), &Draft::default());
+        let m = |y, mo| Month { year: y, month: mo };
+        let dec = month_deadline(&p, &rules, m(2026, 12)).unwrap();
+        assert!(dec.warn);
+        assert_eq!(dec.head, "31 Dec 2026");
+        assert_eq!(dec.text, "3,32 days of 2025/26 expire");
+        // No feriefridage, no April note; a month gone by has none.
+        assert_eq!(month_deadline(&p, &rules, m(2027, 4)), None);
+        assert_eq!(month_deadline(&p, &rules, m(2026, 9)), None);
+        // The shown month is shaded behind its bars (October is index 0).
+        let ch = chart(&p, &rules, Some(m(2026, 12)));
+        let annotations = &ch
+            .config
+            .options
+            .plugins
+            .as_ref()
+            .unwrap()
+            .annotation
+            .as_ref()
+            .unwrap()
+            .annotations;
+        let shade = annotations.iter().find(|a| a.id == "shown").unwrap();
+        assert_eq!((shade.x_min, shade.x_max), (Some(1.5), Some(2.5)));
+        let none = chart(&p, &rules, Some(m(2030, 1)));
+        let annotations = &none
+            .config
+            .options
+            .plugins
+            .as_ref()
+            .unwrap()
+            .annotation
+            .as_ref()
+            .unwrap()
+            .annotations;
+        assert!(annotations.iter().all(|a| a.id != "shown"));
     }
 
     #[test]
@@ -851,13 +1232,6 @@ mod tests {
     }
 
     #[test]
-    fn the_calendar_year_follows_today_in_the_current_holiday_year() {
-        assert_eq!(calendar_year(HolidayYear(2026), d("2026-10-31")), 2026);
-        assert_eq!(calendar_year(HolidayYear(2026), d("2027-03-01")), 2027);
-        assert_eq!(calendar_year(HolidayYear(2027), d("2026-10-31")), 2027);
-    }
-
-    #[test]
     fn danlon_balances_parse_and_compare() {
         assert_eq!(parse_days("8,50"), Some(850));
         assert_eq!(parse_days(" 8.5 "), Some(850));
@@ -895,4 +1269,3 @@ mod tests {
         assert_eq!(repeats_note(&[]), None);
     }
 }
-

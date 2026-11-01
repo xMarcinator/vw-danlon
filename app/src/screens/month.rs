@@ -120,7 +120,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         let p = period();
         match p.view {
             View::Week => week_months(p.monday()).1,
-            View::Day | View::Month => None,
+            View::Day | View::Month | View::Year => None,
         }
     });
     let mut version = use_signal(|| 0u32);
@@ -222,7 +222,7 @@ pub fn MonthScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         let p = *period.peek();
         let target = match p.view {
             View::Day => p.anchor,
-            View::Week | View::Month => super::now(&cfg).date_naive(),
+            View::Week | View::Month | View::Year => super::now(&cfg).date_naive(),
         };
         let second = month2.peek().is_some_and(|m| m.contains(target));
         let result = if second {

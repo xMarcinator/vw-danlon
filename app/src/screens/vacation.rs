@@ -1,22 +1,23 @@
-//! The Vacation screen: the status line (is anything lost or paid out, and
-//! the one next step), the next 24 months as a chart, when each holiday
-//! year and the feriefridage expire, the periods to register, the holiday
-//! year's periods and a year calendar to try changes in before they go in
-//! the work calendar. On a phone the dock switches Overview · Calendar; wide,
-//! the calendar sits left of the overview. A closed holiday year is shown
-//! as it stood on its use-by date, with its periods only.
-
-use chrono::NaiveDate;
+//! The Vacation screen, with Hours' period selector: Month · Year (a
+//! calendar year). Both open with number cards and the status line. Year
+//! shows the 24-month chart, the year's calendar (a month's name opens
+//! it), when each holiday year expires, the periods to register and the
+//! year's holidays. Month shows its deadline, the chart with the month
+//! shaded, one big calendar to try changes in, and the month's vacation
+//! with its registration ticks. A year before this one is shown as it stood
+//! on 31 December, with its periods only.
+use chrono::{Datelike, NaiveDate};
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 use vw_danlon::config::Config;
 use vw_danlon::service::{self, VacationView};
 
 use vw_danlon::month::LeaveKind;
+use vw_danlon::month::Month;
 use vw_danlon::state::{DanlonBalance, Registered, RegisteredPeriod};
 use vw_danlon::vacation::{self, Days, Draft, HolidayYear, Period, PeriodStatus, Rules};
 
-use super::period::{Bar, PagePeriods, dock, holiday_year_title};
+use super::period::{self as pages, Bar, MONTH_YEAR, PagePeriods, View, dock};
 use super::vacation_plan::{self as vp, CellKind};
 use crate::setup::Setup;
 
@@ -24,15 +25,16 @@ fn date(d: NaiveDate) -> String {
     d.format("%-d %b %Y").to_string()
 }
 
-/// The day a holiday year is seen from: today, or the use-by date of a
-/// year that is over.
-fn seen_on(year: HolidayYear, today: NaiveDate) -> NaiveDate {
-    today.min(year.use_by())
+/// The day a period is seen from: today, or 31 December of a year that is
+/// over.
+fn seen_on(shown: pages::Period, today: NaiveDate) -> NaiveDate {
+    let year_end = NaiveDate::from_ymd_opt(shown.anchor.year(), 12, 31).expect("31 Dec exists");
+    today.min(year_end)
 }
 
-/// Whether the period falls (partly) in the holiday year, 1 Sep – 31 Aug.
-fn in_year(p: &Period, year: HolidayYear) -> bool {
-    p.first <= year.last_day() && p.last >= year.first_day()
+/// Whether the period falls (partly) between `first` and `last`.
+fn overlaps(p: &Period, first: NaiveDate, last: NaiveDate) -> bool {
+    p.first <= last && p.last >= first
 }
 
 /// The overview as on `day`, fetched off the UI thread.
@@ -198,17 +200,172 @@ fn chart_view(c: &vp::Chart) -> Element {
     }
 }
 
+/// One month's days, Monday first with week numbers; a weekday that can be
+/// tried taps into the draft. `class` sizes it (the year's small months or
+/// Month's big one).
+fn month_days(
+    m: vp::CalMonth,
+    mut draft: Signal<Draft>,
+    mut copied: Signal<Option<Result<String, String>>>,
+    class: &'static str,
+) -> Element {
+    rsx! {
+        div { class: "vac-days {class}",
+            span {}
+            for w in vp::WEEKDAYS {
+                span { class: "wd", "{w}" }
+            }
+            for (wk , cells) in m.weeks {
+                span { class: "wd", "{wk}" }
+                for c in cells {
+                    match c {
+                        None => rsx! { span {} },
+                        Some(c) => {
+                            let class = format!(
+                                "{}{}{}",
+                                c.kind.class(),
+                                if c.past { " past" } else { "" },
+                                if c.today { " today" } else { "" },
+                            );
+                            let day = c.date.format("%-d").to_string();
+                            if c.tappable {
+                                let cell = c.clone();
+                                rsx! {
+                                    button {
+                                        r#type: "button",
+                                        class: "{class}",
+                                        "aria-label": "{c.label}",
+                                        "aria-pressed": if matches!(c.kind, CellKind::Add | CellKind::Remove) { "true" } else { "false" },
+                                        onclick: move |_| {
+                                            draft.with_mut(|d| vp::toggle(d, &cell));
+                                            copied.set(None);
+                                        },
+                                        "{day}"
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    span { class: "{class}", "aria-label": "{c.label}", "{day}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A month of the phone's year: small days to look at, no taps (the
+/// month's name opens it to try changes).
+fn mini_days(m: &vp::CalMonth) -> Element {
+    rsx! {
+        div { class: "vac-mini-days", "aria-hidden": "true",
+            for (_ , cells) in m.weeks.iter() {
+                for c in cells.iter() {
+                    match c {
+                        None => rsx! { span {} },
+                        Some(c) => {
+                            let class = format!(
+                                "{}{}{}",
+                                c.kind.class(),
+                                if c.past { " past" } else { "" },
+                                if c.today { " today" } else { "" },
+                            );
+                            rsx! { span { class: "{class}", {c.date.format("%-d").to_string()} } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Danløn · Calendar · Teams ticks of a period to register.
+fn tick_buttons(
+    g: vp::Registration,
+    registered: Vec<RegisteredPeriod>,
+    cfg: Config,
+    mut ticked: Signal<Option<Vec<RegisteredPeriod>>>,
+    mut problem: Signal<Option<String>>,
+) -> Element {
+    rsx! {
+        span { class: "vac-ticks",
+            for (i , label) in [format!("Danløn {} h", g.hours()), "Calendar".to_string(), "Teams".to_string()]
+                .into_iter()
+                .enumerate()
+            {
+                {
+                    let on = [g.ticks.danlon, g.ticks.calendar, g.ticks.teams][i];
+                    let g = g.clone();
+                    let list = registered.clone();
+                    let cfg = cfg.clone();
+                    rsx! {
+                        button {
+                            r#type: "button",
+                            class: if on { "vac-tick on" } else { "vac-tick" },
+                            "aria-pressed": if on { "true" } else { "false" },
+                            onclick: move |_| {
+                                let mut t: Registered = g.ticks;
+                                match i {
+                                    0 => t.danlon = !t.danlon,
+                                    1 => t.calendar = !t.calendar,
+                                    _ => t.teams = !t.teams,
+                                }
+                                match service::set_registered(&cfg, &g.title, g.first, t) {
+                                    Ok(()) => {
+                                        ticked.set(Some(vp::with_ticks(&list, &g.title, g.first, t)));
+                                        problem.set(None);
+                                    }
+                                    Err(e) => problem.set(Some(format!("The tick can't be saved: {e:#}"))),
+                                }
+                            },
+                            if on { "✓ {label}" } else { "○ {label}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A period of the list: its dates, what is left after it and its chips;
+/// `ticks` when it still has to be registered.
+fn period_row(p: &Period, repeat: bool, rules: &Rules, ticks: Option<Element>) -> Element {
+    rsx! {
+        li { class: "period",
+            span { class: "period-text",
+                b { "{p.title}" }
+                span { class: "sub", "{period_when(p)}" }
+            }
+            if let Some(b) = balance_after(p, rules) {
+                span { class: "period-balance",
+                    "left after"
+                    br {}
+                    b { "{b}" }
+                }
+            }
+            span { class: "period-chips",
+                for (text , class) in period_chips(p, repeat) {
+                    span { class: "{class}", "{text}" }
+                }
+            }
+            if let Some(t) = ticks {
+                div { class: "period-ticks", {t} }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn VacationScreen(setup: Signal<Setup>) -> Element {
-    // The holiday year shown, kept while the app runs.
-    let mut year = use_context::<PagePeriods>().vacation;
+    // The month or calendar year shown, kept while the app runs.
+    let mut shown_period = use_context::<PagePeriods>().vacation;
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
-    // The phone's view: 0 Overview, 1 Calendar.
-    let mut tab = use_signal(|| 0usize);
     let draft = use_signal(Draft::default);
     let copied = use_signal(|| None::<Result<String, String>>);
     // Ticks saved since the overview was loaded.
-    let mut ticked = use_signal(|| None::<Vec<RegisteredPeriod>>);
+    let ticked = use_signal(|| None::<Vec<RegisteredPeriod>>);
     let mut problem = use_signal(|| None::<String>);
     // Danløn's balances saved since loading, the holiday year being typed
     // in, and its fields.
@@ -218,7 +375,7 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
     let mut dl_on = use_signal(String::new);
     let day = use_memo(move || {
         let today = super::month::today_of(&setup.read());
-        seen_on(year(), today)
+        seen_on(shown_period(), today)
     });
     let loaded = use_resource(move || {
         let _ = cal_sync.read().version;
@@ -234,21 +391,13 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
     let Some(cfg) = setup.read().config.clone() else {
         return rsx! {};
     };
-    let shown = year();
+    let shown = shown_period();
     let today = super::now(&cfg).date_naive();
-    let this_year = HolidayYear::containing(today);
-    let bar = Bar::years(
-        holiday_year_title(shown, today),
-        "holiday year",
-        "Whole holiday years",
-        shown == this_year,
-        Callback::new(move |by: i32| year.set(HolidayYear(shown.0 + by))),
-        Callback::new(move |_| year.set(this_year)),
-    )
-    .with_tabs(
-        &["Overview", "Calendar"],
-        tab(),
-        Callback::new(move |i: usize| tab.set(i)),
+    let bar = Bar::picker(
+        shown,
+        today,
+        &MONTH_YEAR,
+        Callback::new(move |p: pages::Period| shown_period.set(p)),
     );
     let head = bar.top(rsx! {});
     let docked = |actions: Element| dock(&bar, actions);
@@ -273,10 +422,14 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
             };
         }
     };
-    // The plan runs from today; a closed holiday year shows its periods only.
+    // The plan runs from today; a year that is over shows its periods only.
     let as_of_today = day() == today;
+    let is_month = shown.view == View::Month;
+    let month: Month = shown.month();
+    let year = shown.anchor.year();
+    let (first, last) = shown.days();
     let drafted = draft.read().clone();
-    let plan = if drafted.is_empty() {
+    let plan = if drafted.is_empty() || !as_of_today {
         v.plan.clone()
     } else {
         vacation::plan(&cfg, &v.leave, today, &drafted)
@@ -290,10 +443,19 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
     let status = vacation::status(&plan, &done);
     let danlon: BTreeMap<i32, DanlonBalance> =
         balances().unwrap_or_else(|| v.danlon_balances.clone());
-    let chart = vp::chart(&plan, &v.rules);
+    let kpis = if is_month {
+        vp::month_kpis(&plan, &v.rules, &v.leave, month)
+    } else {
+        vp::year_kpis(&plan, &v.rules, &v.leave, year)
+    };
+    let deadline = is_month
+        .then(|| vp::month_deadline(&plan, &v.rules, month))
+        .flatten();
+    let chart = vp::chart(&plan, &v.rules, is_month.then_some(month));
     let warnings = vp::warnings(&plan, &status);
     let pools = vp::pools(&plan, &v.rules);
     let regs = vp::registrations(&plan, &registered);
+    let month_regs = vp::registrations_between(&plan, &registered, first, last);
     let source = if as_of_today {
         &plan.overview
     } else {
@@ -302,7 +464,7 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
     let periods: Vec<(Period, bool)> = source
         .periods
         .iter()
-        .filter(|p| in_year(p, shown))
+        .filter(|p| overlaps(p, first, last))
         .map(|p| {
             (
                 p.clone(),
@@ -312,23 +474,344 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
         .collect();
     let repeats = vacation::repeat_days(&cfg, &v.leave, today, vacation::horizon(today));
     let planned = vp::planned(&v.leave, &repeats);
-    let cal_year = vp::calendar_year(shown, today);
-    let months = vp::year_calendar(&cfg, cal_year, today, &planned, &drafted);
+    let months = vp::year_calendar(&cfg, year, today, &planned, &drafted);
     let repeats_note = vp::repeats_note(&cfg.vacation.repeats);
     let keywords = quoted(&cfg.vacation.keywords);
     let fridag = quoted(&cfg.vacation.feriefridag_keywords);
-    let view = if tab() == 1 { "calendar" } else { "overview" };
     let status_class = if status.warn() {
         "vac-status warn"
     } else {
         "vac-status"
+    };
+    let shown_name = shown.name();
+    let keys = rsx! {
+        div { class: "vac-keys",
+            span { class: "chip key-ferie", "Vacation" }
+            span { class: "chip key-repeat", "Repeats" }
+            span { class: "chip client", "Feriefridag" }
+            span { class: "chip info", "Holiday" }
+            span { class: "chip warn", "Acies day off" }
+            span { class: "chip key-we", "Weekend" }
+        }
+    };
+
+    let chart_panel = rsx! {
+        if as_of_today {
+            section { class: "panel vac-a-chart", "aria-labelledby": "v-chart",
+                div { class: "panel-head",
+                    h2 { id: "v-chart", "Next 24 months" }
+                    span { class: "note",
+                        if is_month && plan.months.iter().any(|m| m.month == month) {
+                            "{month.first_day().format(\"%b %Y\")} shaded · days"
+                        } else {
+                            "days"
+                        }
+                    }
+                }
+                div { class: "vac-legend",
+                    span { span { class: "key k-vac", "aria-hidden": "true" } "Vacation used" }
+                    span { span { class: "key k-fri", "aria-hidden": "true" } "Feriefridag" }
+                    span { span { class: "key k-line", "aria-hidden": "true" } "Balance" }
+                    span { span { class: "key k-deadline", "aria-hidden": "true" } "Deadline" }
+                }
+                div { class: "vac-chart-wrap", {chart_view(&chart)} }
+                if !warnings.is_empty() {
+                    ul { class: "vac-warnings",
+                        for w in warnings {
+                            li { "{w}" }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let pools_panel = rsx! {
+        if as_of_today {
+            section { class: "panel vac-pools vac-a-side", "aria-label": "When each holiday year expires",
+                for r in pools {
+                    div { class: "vac-pool",
+                        b { "{r.name}" }
+                        b { class: if r.lost.is_some() { "bad" } else { "" },
+                            {r.lost.clone().unwrap_or_else(|| "0 lost".into())}
+                        }
+                        span { class: "sub", "{r.sub}" }
+                        span { class: "sub right", {r.paid.clone().unwrap_or_default()} }
+                        if let Some(y) = r.year {
+                            {
+                                let saved = danlon.get(&y.0).copied();
+                                let open = editing() == Some(y);
+                                let start = move |_| {
+                                    dl_days.set(saved.map(|b| Days(b.days).to_string()).unwrap_or_default());
+                                    dl_on.set(saved.map_or(today, |b| b.read_on).to_string());
+                                    editing.set(Some(y));
+                                };
+                                if open {
+                                    let cfg = cfg.clone();
+                                    let cfg2 = cfg.clone();
+                                    let all = danlon.clone();
+                                    let all2 = danlon.clone();
+                                    rsx! {
+                                        div { class: "vac-dl-form", role: "group", "aria-label": "Danløn's balance for {y}",
+                                            label { class: "label",
+                                                "Days left in Danløn"
+                                                input {
+                                                    r#type: "text",
+                                                    inputmode: "decimal",
+                                                    value: "{dl_days}",
+                                                    oninput: move |e| dl_days.set(e.value()),
+                                                }
+                                            }
+                                            label { class: "label",
+                                                "Read on"
+                                                input {
+                                                    r#type: "date",
+                                                    value: "{dl_on}",
+                                                    oninput: move |e| dl_on.set(e.value()),
+                                                }
+                                            }
+                                            span { class: "note vac-dl-wide",
+                                                "Typed in from the Danløn app. The app's own count still drives the plan."
+                                            }
+                                            div { class: "vac-dl-actions vac-dl-wide",
+                                                if saved.is_some() {
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "link-btn bad",
+                                                        onclick: move |_| {
+                                                            match service::set_danlon_balance(&cfg2, y, None) {
+                                                                Ok(()) => {
+                                                                    let mut m = all2.clone();
+                                                                    m.remove(&y.0);
+                                                                    balances.set(Some(m));
+                                                                    editing.set(None);
+                                                                    problem.set(None);
+                                                                }
+                                                                Err(e) => problem.set(Some(format!("Danløn's balance can't be removed: {e:#}"))),
+                                                            }
+                                                        },
+                                                        "Remove"
+                                                    }
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "small-btn",
+                                                    onclick: move |_| editing.set(None),
+                                                    "Cancel"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "small-btn primary-sm",
+                                                    onclick: move |_| {
+                                                        let Some(days) = vp::parse_days(&dl_days()) else {
+                                                            problem.set(Some("Type the days as in Danløn, e.g. 8,50.".into()));
+                                                            return;
+                                                        };
+                                                        let Ok(read_on) = dl_on().parse::<NaiveDate>() else {
+                                                            problem.set(Some("Pick the date you read the balance.".into()));
+                                                            return;
+                                                        };
+                                                        let b = DanlonBalance { read_on, days };
+                                                        match service::set_danlon_balance(&cfg, y, Some(b)) {
+                                                            Ok(()) => {
+                                                                let mut m = all.clone();
+                                                                m.insert(y.0, b);
+                                                                balances.set(Some(m));
+                                                                editing.set(None);
+                                                                problem.set(None);
+                                                            }
+                                                            Err(e) => problem.set(Some(format!("Danløn's balance can't be saved: {e:#}"))),
+                                                        }
+                                                    },
+                                                    "Save"
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else if let Some(b) = saved {
+                                    let app = vacation::balance_on(&v.rules, &v.leave, y, b.read_on);
+                                    let (text, diff, apart) = vp::danlon_comparison(Days(b.days), app, b.read_on);
+                                    rsx! {
+                                        div { class: "vac-dl",
+                                            span { class: "vac-dl-text", "{text}" }
+                                            span { class: if apart { "vac-dl-diff apart" } else { "vac-dl-diff" }, "{diff}" }
+                                            button { r#type: "button", class: "vac-link", onclick: start, "Change" }
+                                        }
+                                    }
+                                } else {
+                                    rsx! {
+                                        button { r#type: "button", class: "vac-link vac-dl-wide", onclick: start, "Enter Danløn's balance" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let note = rsx! {
+        div { class: "vac-note vac-a-side", role: "note",
+            if let Some(n) = repeats_note {
+                span { "{n}" }
+            }
+            span {
+                "Vacation is an all-day {keywords} event in the calendar ({fridag} for a feriefridag). "
+                "Earned 1 Sep – 31 Aug, usable until 31 Dec the year after; feriefridage are used first."
+            }
+        }
+    };
+
+    let body = if is_month {
+        let m = months
+            .into_iter()
+            .nth(month.month as usize - 1)
+            .expect("a year has twelve months");
+        rsx! {
+            div { class: "vac-layout",
+                if let Some(dl) = deadline {
+                    div { class: if dl.warn { "vac-deadline warn vac-a-side" } else { "vac-deadline vac-a-side" }, role: "note",
+                        span { "aria-hidden": "true", class: "vac-deadline-mark", "!" }
+                        span {
+                            b { "{dl.head}" }
+                            " · {dl.text}"
+                        }
+                    }
+                }
+                {chart_panel}
+                section { class: "panel vac-a-cal vac-mcal", "aria-label": "Calendar {shown_name}",
+                    div { class: "vac-cal-head",
+                        {keys}
+                        span { class: "note", "Tap a weekday to try it in the draft" }
+                    }
+                    {month_days(m, draft, copied, "big")}
+                }
+                section { class: "panel vac-a-side", "aria-labelledby": "v-mlist",
+                    div { class: "panel-head",
+                        h2 { id: "v-mlist", "Vacation this month" }
+                    }
+                    if periods.is_empty() {
+                        p { class: "empty", "No vacation in {shown_name}." }
+                    }
+                    ul { class: "plain-list",
+                        for (p , repeat) in periods {
+                            {
+                                let ticks = month_regs
+                                    .iter()
+                                    .find(|g| g.title == p.title && g.first == p.first)
+                                    .filter(|g| !g.ticks.all())
+                                    .map(|g| tick_buttons(g.clone(), registered.clone(), cfg.clone(), ticked, problem));
+                                period_row(&p, repeat, &v.rules, ticks)
+                            }
+                        }
+                    }
+                }
+                {pools_panel}
+                {note}
+            }
+        }
+    } else {
+        rsx! {
+            div { class: "vac-layout",
+                {chart_panel}
+                section { class: "vac-a-cal vac-cal", "aria-label": "Calendar {year}",
+                    {keys}
+                    div { class: "vac-months wide-only",
+                        for (i , m) in months.iter().cloned().enumerate() {
+                            {
+                                let name = m.name.clone();
+                                rsx! {
+                            section { class: "vac-month", "aria-label": "{name} {year}",
+                                button {
+                                    r#type: "button",
+                                    class: "vac-month-open",
+                                    "aria-label": "Open {name} {year}",
+                                    onclick: move |_| shown_period.set(pages::Period {
+                                        view: View::Month,
+                                        anchor: NaiveDate::from_ymd_opt(year, i as u32 + 1, 1).expect("a month's first day"),
+                                    }),
+                                    "{name}"
+                                    crate::Icon { d: "m9 6 6 6-6 6", size: 14 }
+                                }
+                                {month_days(m, draft, copied, "")}
+                            }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "vac-minis narrow-only",
+                        for (i , m) in months.iter().enumerate() {
+                            div { class: "vac-mini",
+                                button {
+                                    r#type: "button",
+                                    class: "vac-month-open",
+                                    "aria-label": "Open {m.name} {year}",
+                                    onclick: move |_| shown_period.set(pages::Period {
+                                        view: View::Month,
+                                        anchor: NaiveDate::from_ymd_opt(year, i as u32 + 1, 1).expect("a month's first day"),
+                                    }),
+                                    {m.name.chars().take(3).collect::<String>()}
+                                    crate::Icon { d: "m9 6 6 6-6 6", size: 14 }
+                                }
+                                {mini_days(m)}
+                            }
+                        }
+                    }
+                }
+                {pools_panel}
+                if as_of_today && !regs.is_empty() {
+                    section { class: "panel vac-a-side", "aria-labelledby": "v-reg",
+                        div { class: "panel-head",
+                            h2 { id: "v-reg", "Not registered yet" }
+                            span { class: "note", "next 60 days" }
+                        }
+                        ul { class: "plain-list",
+                            for g in regs {
+                                li { class: "vac-reg",
+                                    span { class: "vac-reg-head",
+                                        b { "{g.title}" }
+                                        span { class: "sub",
+                                            if g.working_days == 1 { "1 day" } else { "{g.working_days} days" }
+                                        }
+                                    }
+                                    span { class: "sub",
+                                        if g.first == g.last {
+                                            "{date(g.first)}"
+                                        } else {
+                                            "{date(g.first)} – {date(g.last)}"
+                                        }
+                                    }
+                                    {tick_buttons(g.clone(), registered.clone(), cfg.clone(), ticked, problem)}
+                                }
+                            }
+                        }
+                    }
+                }
+                section { class: "panel vac-a-side", "aria-labelledby": "v-list",
+                    div { class: "panel-head",
+                        h2 { id: "v-list", "Holidays" }
+                        span { class: "note", "{year} · oldest days are used first" }
+                    }
+                    if periods.is_empty() {
+                        p { class: "empty", "No vacation in {year} in the calendar." }
+                    }
+                    ul { class: "plain-list",
+                        for (p , repeat) in periods {
+                            {period_row(&p, repeat, &v.rules, None)}
+                        }
+                    }
+                }
+                {note}
+            }
+        }
     };
 
     rsx! {
         {head}
         span { class: "sub", "{rules_line(&v.rules)}" }
         if !as_of_today {
-            span { class: "note", "As on {date(day())}, when the {shown} days could last be used." }
+            span { class: "note", "As on {date(day())}, the end of {year}." }
         }
         if let Some(w) = &v.calendar_warning {
             div { class: "alert", role: "status", "{w}" }
@@ -345,326 +828,19 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
                 }
             }
         }
-        div { class: "vac-grid", "data-view": "{view}",
-            section { class: "vac-cal", "aria-label": "Calendar {cal_year}",
-                div { class: "vac-cal-head",
-                    h2 { "{cal_year}" }
-                    span { class: "note", "Tap a weekday to try it" }
-                }
-                div { class: "vac-keys",
-                    span { class: "chip key-ferie", "Vacation" }
-                    span { class: "chip key-repeat", "Repeats" }
-                    span { class: "chip client", "Feriefridag" }
-                    span { class: "chip info", "Holiday" }
-                    span { class: "chip warn", "Acies day off" }
-                    span { class: "chip key-we", "Weekend" }
-                }
-                {draft_bar(draft, copied, "wide-only")}
-                div { class: "vac-months",
-                    for m in months {
-                        section { class: "vac-month", "aria-label": "{m.name} {cal_year}",
-                            h3 { "{m.name}" }
-                            div { class: "vac-days",
-                                span {}
-                                for w in vp::WEEKDAYS {
-                                    span { class: "wd", "{w}" }
-                                }
-                                for (wk , cells) in m.weeks {
-                                    span { class: "wd", "{wk}" }
-                                    for c in cells {
-                                        match c {
-                                            None => rsx! { span {} },
-                                            Some(c) => {
-                                                let class = format!(
-                                                    "{}{}{}",
-                                                    c.kind.class(),
-                                                    if c.past { " past" } else { "" },
-                                                    if c.today { " today" } else { "" },
-                                                );
-                                                let day = c.date.format("%-d").to_string();
-                                                if c.tappable {
-                                                    let cell = c.clone();
-                                                    let mut draft = draft;
-                                                    let mut copied = copied;
-                                                    rsx! {
-                                                        button {
-                                                            r#type: "button",
-                                                            class: "{class}",
-                                                            "aria-label": "{c.label}",
-                                                            "aria-pressed": if matches!(c.kind, CellKind::Add | CellKind::Remove) { "true" } else { "false" },
-                                                            onclick: move |_| {
-                                                                draft.with_mut(|d| vp::toggle(d, &cell));
-                                                                copied.set(None);
-                                                            },
-                                                            "{day}"
-                                                        }
-                                                    }
-                                                } else {
-                                                    rsx! {
-                                                        span { class: "{class}", "aria-label": "{c.label}", "{day}" }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            div { class: "vac-over",
-                if as_of_today {
-                    section { class: "panel", "aria-labelledby": "v-chart",
-                        div { class: "panel-head",
-                            h2 { id: "v-chart", "Next 24 months" }
-                            span { class: "note", "days" }
-                        }
-                        div { class: "vac-legend",
-                            span { span { class: "key k-vac", "aria-hidden": "true" } "Vacation used" }
-                            span { span { class: "key k-fri", "aria-hidden": "true" } "Feriefridag" }
-                            span { span { class: "key k-line", "aria-hidden": "true" } "Balance" }
-                            span { span { class: "key k-deadline", "aria-hidden": "true" } "Deadline" }
-                        }
-                        div { class: "vac-chart-wrap", {chart_view(&chart)} }
-                        if !warnings.is_empty() {
-                            ul { class: "vac-warnings",
-                                for w in warnings {
-                                    li { "{w}" }
-                                }
-                            }
-                        }
-                    }
-                    section { class: "panel vac-pools", "aria-label": "When each holiday year expires",
-                        for r in pools {
-                            div { class: "vac-pool",
-                                b { "{r.name}" }
-                                b { class: if r.lost.is_some() { "bad" } else { "" },
-                                    {r.lost.clone().unwrap_or_else(|| "0 lost".into())}
-                                }
-                                span { class: "sub", "{r.sub}" }
-                                span { class: "sub right", {r.paid.clone().unwrap_or_default()} }
-                                if let Some(y) = r.year {
-                                    {
-                                        let saved = danlon.get(&y.0).copied();
-                                        let open = editing() == Some(y);
-                                        let start = move |_| {
-                                            dl_days.set(saved.map(|b| Days(b.days).to_string()).unwrap_or_default());
-                                            dl_on.set(saved.map_or(today, |b| b.read_on).to_string());
-                                            editing.set(Some(y));
-                                        };
-                                        if open {
-                                            let cfg = cfg.clone();
-                                            let cfg2 = cfg.clone();
-                                            let all = danlon.clone();
-                                            let all2 = danlon.clone();
-                                            rsx! {
-                                                div { class: "vac-dl-form", role: "group", "aria-label": "Danløn's balance for {y}",
-                                                    label { class: "label",
-                                                        "Days left in Danløn"
-                                                        input {
-                                                            r#type: "text",
-                                                            inputmode: "decimal",
-                                                            value: "{dl_days}",
-                                                            oninput: move |e| dl_days.set(e.value()),
-                                                        }
-                                                    }
-                                                    label { class: "label",
-                                                        "Read on"
-                                                        input {
-                                                            r#type: "date",
-                                                            value: "{dl_on}",
-                                                            oninput: move |e| dl_on.set(e.value()),
-                                                        }
-                                                    }
-                                                    span { class: "note vac-dl-wide",
-                                                        "Typed in from the Danløn app. The app's own count still drives the plan."
-                                                    }
-                                                    div { class: "vac-dl-actions vac-dl-wide",
-                                                        if saved.is_some() {
-                                                            button {
-                                                                r#type: "button",
-                                                                class: "link-btn bad",
-                                                                onclick: move |_| {
-                                                                    match service::set_danlon_balance(&cfg2, y, None) {
-                                                                        Ok(()) => {
-                                                                            let mut m = all2.clone();
-                                                                            m.remove(&y.0);
-                                                                            balances.set(Some(m));
-                                                                            editing.set(None);
-                                                                            problem.set(None);
-                                                                        }
-                                                                        Err(e) => problem.set(Some(format!("Danløn's balance can't be removed: {e:#}"))),
-                                                                    }
-                                                                },
-                                                                "Remove"
-                                                            }
-                                                        }
-                                                        button {
-                                                            r#type: "button",
-                                                            class: "small-btn",
-                                                            onclick: move |_| editing.set(None),
-                                                            "Cancel"
-                                                        }
-                                                        button {
-                                                            r#type: "button",
-                                                            class: "small-btn primary-sm",
-                                                            onclick: move |_| {
-                                                                let Some(days) = vp::parse_days(&dl_days()) else {
-                                                                    problem.set(Some("Type the days as in Danløn, e.g. 8,50.".into()));
-                                                                    return;
-                                                                };
-                                                                let Ok(read_on) = dl_on().parse::<NaiveDate>() else {
-                                                                    problem.set(Some("Pick the date you read the balance.".into()));
-                                                                    return;
-                                                                };
-                                                                let b = DanlonBalance { read_on, days };
-                                                                match service::set_danlon_balance(&cfg, y, Some(b)) {
-                                                                    Ok(()) => {
-                                                                        let mut m = all.clone();
-                                                                        m.insert(y.0, b);
-                                                                        balances.set(Some(m));
-                                                                        editing.set(None);
-                                                                        problem.set(None);
-                                                                    }
-                                                                    Err(e) => problem.set(Some(format!("Danløn's balance can't be saved: {e:#}"))),
-                                                                }
-                                                            },
-                                                            "Save"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else if let Some(b) = saved {
-                                            let app = vacation::balance_on(&v.rules, &v.leave, y, b.read_on);
-                                            let (text, diff, apart) = vp::danlon_comparison(Days(b.days), app, b.read_on);
-                                            rsx! {
-                                                div { class: "vac-dl",
-                                                    span { class: "vac-dl-text", "{text}" }
-                                                    span { class: if apart { "vac-dl-diff apart" } else { "vac-dl-diff" }, "{diff}" }
-                                                    button { r#type: "button", class: "vac-link", onclick: start, "Change" }
-                                                }
-                                            }
-                                        } else {
-                                            rsx! {
-                                                button { r#type: "button", class: "vac-link vac-dl-wide", onclick: start, "Enter Danløn's balance" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if !regs.is_empty() {
-                        section { class: "panel", "aria-labelledby": "v-reg",
-                            div { class: "panel-head",
-                                h2 { id: "v-reg", "Not registered yet" }
-                                span { class: "note", "next 60 days" }
-                            }
-                            ul { class: "plain-list",
-                                for g in regs {
-                                    li { class: "vac-reg",
-                                        span { class: "vac-reg-head",
-                                            b { "{g.title}" }
-                                            span { class: "sub",
-                                                if g.working_days == 1 { "1 day" } else { "{g.working_days} days" }
-                                            }
-                                        }
-                                        span { class: "sub",
-                                            if g.first == g.last {
-                                                "{date(g.first)}"
-                                            } else {
-                                                "{date(g.first)} – {date(g.last)}"
-                                            }
-                                        }
-                                        span { class: "vac-ticks",
-                                            for (i , label) in [
-                                                format!("Danløn {} h", g.hours()),
-                                                "Calendar".to_string(),
-                                                "Teams".to_string(),
-                                            ]
-                                                .into_iter()
-                                                .enumerate()
-                                            {
-                                                {
-                                                    let on = [g.ticks.danlon, g.ticks.calendar, g.ticks.teams][i];
-                                                    let g = g.clone();
-                                                    let list = registered.clone();
-                                                    let cfg = cfg.clone();
-                                                    rsx! {
-                                                        button {
-                                                            r#type: "button",
-                                                            class: if on { "vac-tick on" } else { "vac-tick" },
-                                                            "aria-pressed": if on { "true" } else { "false" },
-                                                            onclick: move |_| {
-                                                                let mut t: Registered = g.ticks;
-                                                                match i {
-                                                                    0 => t.danlon = !t.danlon,
-                                                                    1 => t.calendar = !t.calendar,
-                                                                    _ => t.teams = !t.teams,
-                                                                }
-                                                                match service::set_registered(&cfg, &g.title, g.first, t) {
-                                                                    Ok(()) => {
-                                                                        ticked.set(Some(vp::with_ticks(&list, &g.title, g.first, t)));
-                                                                        problem.set(None);
-                                                                    }
-                                                                    Err(e) => problem.set(Some(format!("The tick can't be saved: {e:#}"))),
-                                                                }
-                                                            },
-                                                            if on { "✓ {label}" } else { "○ {label}" }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                section { class: "panel", "aria-labelledby": "v-list",
-                    div { class: "panel-head",
-                        h2 { id: "v-list", "Holidays" }
-                        span { class: "note", "{shown} · oldest days are used first" }
-                    }
-                    if periods.is_empty() {
-                        p { class: "empty", "No vacation in {shown} in the calendar." }
-                    }
-                    ul { class: "plain-list",
-                        for (p , repeat) in periods {
-                            li { class: "period",
-                                span { class: "period-text",
-                                    b { "{p.title}" }
-                                    span { class: "sub", "{period_when(&p)}" }
-                                }
-                                if let Some(b) = balance_after(&p, &v.rules) {
-                                    span { class: "period-balance",
-                                        "left after"
-                                        br {}
-                                        b { "{b}" }
-                                    }
-                                }
-                                span { class: "period-chips",
-                                    for (text , class) in period_chips(&p, repeat) {
-                                        span { class: "{class}", "{text}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                div { class: "vac-note", role: "note",
-                    if let Some(n) = repeats_note {
-                        span { "{n}" }
-                    }
-                    span {
-                        "Vacation is an all-day {keywords} event in the calendar ({fridag} for a feriefridag). "
-                        "Earned 1 Sep – 31 Aug, usable until 31 Dec the year after; feriefridage are used first."
+        div { class: "kpis vac-kpis",
+            for k in kpis {
+                section { class: "kpi",
+                    h2 { "{k.label}" }
+                    span { class: "kpi-value {k.tone}", "{k.value}" }
+                    if !k.sub.is_empty() {
+                        span { class: "kpi-sub", "{k.sub}" }
                     }
                 }
             }
         }
+        {draft_bar(draft, copied, "wide-only")}
+        {body}
         {docked(draft_bar(draft, copied, "narrow-only"))}
     }
 }
@@ -673,18 +849,24 @@ pub fn VacationScreen(setup: Signal<Setup>) -> Element {
 mod tests {
     use super::*;
     use vw_danlon::month::LeaveKind;
-    use vw_danlon::vacation::{Draw, HolidayYear};
+    use vw_danlon::vacation::Draw;
 
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
     }
 
     #[test]
-    fn a_holiday_year_is_seen_on_today_or_its_use_by_date() {
+    fn a_year_is_seen_on_today_or_its_last_day() {
         let today = d("2026-11-26");
-        assert_eq!(seen_on(HolidayYear(2026), today), today);
-        assert_eq!(seen_on(HolidayYear(2025), today), today);
-        assert_eq!(seen_on(HolidayYear(2024), today), d("2025-12-31"));
+        let this = pages::Period::new(today).pick(View::Year, today);
+        assert_eq!(seen_on(this, today), today);
+        assert_eq!(seen_on(this.step(1), today), today);
+        assert_eq!(seen_on(this.step(-1), today), d("2025-12-31"));
+        // A month is seen like its year.
+        assert_eq!(
+            seen_on(pages::Period::new(today).step(-12), today),
+            d("2025-12-31")
+        );
         let p = |first: &str, last: &str| Period {
             kind: LeaveKind::Ferie,
             title: "Ferie".into(),
@@ -697,11 +879,13 @@ mod tests {
             before_employment: Days(0),
             feriefridage_left: None,
         };
-        assert!(in_year(&p("2026-09-01", "2026-09-01"), HolidayYear(2026)));
-        assert!(!in_year(&p("2026-08-31", "2026-08-31"), HolidayYear(2026)));
-        // Across 1 September: in both years.
-        let across = p("2027-08-30", "2027-09-03");
-        assert!(in_year(&across, HolidayYear(2026)) && in_year(&across, HolidayYear(2027)));
+        let (jan, dec) = (d("2027-01-01"), d("2027-12-31"));
+        assert!(overlaps(&p("2027-01-01", "2027-01-01"), jan, dec));
+        assert!(!overlaps(&p("2026-12-31", "2026-12-31"), jan, dec));
+        // Across New Year: in both years.
+        let across = p("2026-12-19", "2027-01-03");
+        assert!(overlaps(&across, jan, dec));
+        assert!(overlaps(&across, d("2026-01-01"), d("2026-12-31")));
     }
 
     #[test]
