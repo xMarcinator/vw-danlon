@@ -479,8 +479,13 @@ fn parse_trips(data: &Value, tz: Tz) -> Result<Vec<ExportTrip>> {
         if end < start {
             bail!("trip from Connected Cars ends before it starts: {start} → {end}");
         }
+        // The odometer difference, unless it did not move while the trip's
+        // own mileage did (the end reading not updated yet, or whole km):
+        // that is a real drive, not a 0 km one the store would skip.
         let distance_km = match (r.start_odometer, r.end_odometer) {
-            (Some(s), Some(e)) if e >= s => Some(e - s),
+            (Some(s), Some(e)) if e > s => Some(e - s),
+            (Some(s), Some(e)) if e == s && r.mileage.is_some_and(|m| m > 0.0) => r.mileage,
+            (Some(s), Some(e)) if e == s => Some(0.0),
             _ => r.mileage,
         };
         trips.push(ExportTrip {
@@ -700,6 +705,28 @@ mod tests {
         );
         assert_eq!(trips[0].start_odometer, None);
         assert_eq!(without_position(&trips), 0);
+    }
+
+    #[test]
+    fn odometer_that_did_not_move_falls_back_to_mileage() {
+        // A real 9,1 km drive reported with the same odometer at start and
+        // end (not yet updated, or whole km) must not become a 0 km trip,
+        // which the trip store skips.
+        let body = r#"{"data":{"vehicle":{"trips":{"items":[
+            {"startTime":"2026-11-09T07:51:00Z","endTime":"2026-11-09T08:04:36Z",
+             "startAddressString":"A","endAddressString":"B",
+             "startOdometer":23456.0,"endOdometer":23456.0,"mileage":9.1},
+            {"startTime":"2026-11-09T12:00:00Z","endTime":"2026-11-09T12:01:00Z",
+             "startAddressString":"A","endAddressString":"A",
+             "startOdometer":23465.0,"endOdometer":23465.0,"mileage":0.0}
+        ]}}}}"#;
+        let trips = parse_trips(&data(body), Copenhagen).unwrap();
+        assert_eq!(trips[0].trip.distance_km, Some(9.1));
+        assert_eq!(
+            trips[1].trip.distance_km,
+            Some(0.0),
+            "engine only switched on stays 0 km"
+        );
     }
 
     #[test]
