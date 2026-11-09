@@ -827,8 +827,8 @@ mod tests {
     fn zero_km_trips_are_skipped_on_import_and_sync() {
         let dir = temp_dir("store-zero");
         let store = dir.join(db::FILE_NAME);
-        // Distance 0 without an odometer, and the export's odometer
-        // difference 0 (start 1000.0, end 1000.0).
+        // Distance 0 without an odometer, and an export row of 0 km (its
+        // odometer did not move either).
         let csv = "start,end,distance_km,from,to\n\
                    2026-10-06 07:45,2026-10-06 09:05,98.0,Hjem,Kunde A\n\
                    2026-10-06 12:00,2026-10-06 12:01,0,Kunde A,Kunde A\n";
@@ -844,6 +844,7 @@ mod tests {
         assert_eq!(merged.zero_km_text(), ", 1 skipped (0 km)");
         let export = dir.join("export.xlsx");
         let mut rows = ROWS;
+        rows[2].6 = 0.0;
         rows[2].8 = rows[2].7;
         write_export(&export, &HEADER, &rows);
         let (merged, _) = import(&store, &export, TZ).unwrap();

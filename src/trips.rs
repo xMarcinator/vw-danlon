@@ -236,10 +236,14 @@ fn export_trips<RS: Read + Seek>(
                 );
             }
             let start_odometer = number_of(cell(col(ODO_START)));
-            let distance_km = match (start_odometer, number_of(cell(col(ODO_END)))) {
-                (Some(s), Some(e)) if e >= s => Some(e - s),
-                _ => number_of(cell(col(DISTANCE))),
-            };
+            // Afstand, as the app shows it; the odometer difference only
+            // without one.
+            let distance_km = number_of(cell(col(DISTANCE))).or(
+                match (start_odometer, number_of(cell(col(ODO_END)))) {
+                    (Some(s), Some(e)) if e >= s => Some(e - s),
+                    _ => None,
+                },
+            );
             let pos = |c: Option<usize>| c.and_then(|c| position(&text(c)));
             Ok(ExportTrip {
                 trip: Trip {
@@ -476,9 +480,9 @@ pub(crate) mod tests {
             })
         );
         assert_eq!(trips[0].start_odometer, Some(1000.0));
-        // km from the odometer, else Afstand.
+        // km from Afstand, not the odometer (41 and 3 km there).
         let km: Vec<_> = trips.iter().map(|t| t.trip.distance_km).collect();
-        assert_eq!(km, [Some(41.0), Some(42.0), Some(3.0)]);
+        assert_eq!(km, [Some(40.0), Some(42.0), Some(2.0)]);
         assert_eq!(trips[1].trip.start_pos, None);
 
         // `-t export.xlsx` reads the same trips.

@@ -479,15 +479,13 @@ fn parse_trips(data: &Value, tz: Tz) -> Result<Vec<ExportTrip>> {
         if end < start {
             bail!("trip from Connected Cars ends before it starts: {start} → {end}");
         }
-        // The odometer difference, unless it did not move while the trip's
-        // own mileage did (the end reading not updated yet, or whole km):
-        // that is a real drive, not a 0 km one the store would skip.
-        let distance_km = match (r.start_odometer, r.end_odometer) {
-            (Some(s), Some(e)) if e > s => Some(e - s),
-            (Some(s), Some(e)) if e == s && r.mileage.is_some_and(|m| m > 0.0) => r.mileage,
-            (Some(s), Some(e)) if e == s => Some(0.0),
-            _ => r.mileage,
-        };
+        // The trip's own distance, as Min Volkswagen shows it; the odometer
+        // difference only without one (the odometer can be whole km, or not
+        // yet updated right after a trip).
+        let distance_km = r.mileage.or(match (r.start_odometer, r.end_odometer) {
+            (Some(s), Some(e)) if e >= s => Some(e - s),
+            _ => None,
+        });
         trips.push(ExportTrip {
             trip: Trip {
                 start,
@@ -680,8 +678,8 @@ mod tests {
         assert_eq!(t.trip.to, "Kontorvej 1, 8000 Aarhus C");
         assert_eq!(
             t.trip.distance_km,
-            Some(13.5),
-            "odometer difference wins over mileage"
+            Some(13.9),
+            "the trip's own distance wins over the odometer"
         );
         assert_eq!(t.start_odometer, Some(12000.5));
         assert_eq!(
@@ -710,8 +708,8 @@ mod tests {
     #[test]
     fn odometer_that_did_not_move_falls_back_to_mileage() {
         // A real 9,1 km drive reported with the same odometer at start and
-        // end (not yet updated, or whole km) must not become a 0 km trip,
-        // which the trip store skips.
+        // end (not yet updated, or whole km) keeps its 9,1 km instead of
+        // becoming a 0 km trip, which the trip store skips.
         let body = r#"{"data":{"vehicle":{"trips":{"items":[
             {"startTime":"2026-11-09T07:51:00Z","endTime":"2026-11-09T08:04:36Z",
              "startAddressString":"A","endAddressString":"B",
