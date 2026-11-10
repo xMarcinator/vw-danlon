@@ -2,6 +2,7 @@
 //! secret store) and the private words, the addresses, the trips source,
 //! where secrets are kept, and the theme.
 
+use chrono::NaiveDate;
 use dioxus::prelude::*;
 use vw_danlon::config::{CalendarUse, Config};
 use vw_danlon::service::{self, CalendarRead, CalendarStatus, SyncOutcome};
@@ -290,6 +291,18 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut account_status = use_signal(|| None::<Result<String, String>>);
     let mut busy = use_signal(|| false);
     let mut trip_sync = use_context::<Signal<crate::screens::TripSync>>();
+    // The days Sync these days fetches again: yesterday through today.
+    let today = setup
+        .peek()
+        .config
+        .as_ref()
+        .map(|c| crate::screens::now(c).date_naive());
+    let mut sync_from = use_signal(|| {
+        today
+            .map(|d| (d - chrono::Duration::days(1)).to_string())
+            .unwrap_or_default()
+    });
+    let mut sync_to = use_signal(|| today.map(|d| d.to_string()).unwrap_or_default());
     let mut email = use_signal(|| match &setup.peek().account {
         AccountStatus::NoToken { email } => email.clone(),
         _ => setup
@@ -489,7 +502,8 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             busy.set(false);
         });
     };
-    let sync_now = move |_| {
+    // Since the newest stored trip, or the days picked below Sync now.
+    let mut run_sync = move |days: Option<(NaiveDate, NaiveDate)>| {
         if trip_sync.peek().syncing {
             return;
         }
@@ -497,9 +511,9 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         trip_sync.write().syncing = true;
         account_status.set(Some(Ok("Syncing…".into())));
         spawn(async move {
-            let result = in_background(setup, |cfg, store| {
+            let result = in_background(setup, move |cfg, store| {
                 let today = crate::screens::now(cfg).date_naive();
-                setup::sync_account(cfg, store, today)
+                setup::sync_account_days(cfg, store, days, today)
             })
             .await;
             trip_sync.write().syncing = false;
@@ -507,6 +521,14 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
             account_status.set(Some(result.map(|s| synced_text(&s))));
             busy.set(false);
         });
+    };
+    let sync_now = move |_| run_sync(None);
+    let sync_days = move |_| {
+        let day = |s: String| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok();
+        match (day(sync_from()), day(sync_to())) {
+            (Some(from), Some(to)) => run_sync(Some((from, to))),
+            _ => account_status.set(Some(Err("Pick both days to sync".into()))),
+        }
     };
     let connect = move |_| {
         let (address, secret) = (email(), password());
@@ -979,6 +1001,37 @@ pub fn Settings(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                             if trip_sync.read().syncing { "Syncing…" } else { "Sync now" }
                         }
                         button { class: "small-btn", disabled: busy(), onclick: disconnect, "Disconnect" }
+                    }
+                }
+                if connected {
+                    div { class: "sync-days", role: "group", "aria-label": "Sync chosen days",
+                        label { class: "label",
+                            "From"
+                            input {
+                                r#type: "date",
+                                value: "{sync_from}",
+                                max: "{sync_to}",
+                                oninput: move |e| sync_from.set(e.value()),
+                            }
+                        }
+                        label { class: "label",
+                            "Through"
+                            input {
+                                r#type: "date",
+                                value: "{sync_to}",
+                                min: "{sync_from}",
+                                oninput: move |e| sync_to.set(e.value()),
+                            }
+                        }
+                        button {
+                            class: "small-btn",
+                            disabled: busy() || trip_sync.read().syncing,
+                            onclick: sync_days,
+                            "Sync these days"
+                        }
+                        span { class: "note",
+                            "Fetches the days again, e.g. a trip the car reported late. Trips already stored are kept once."
+                        }
                     }
                 }
                 if !connected && has_config {

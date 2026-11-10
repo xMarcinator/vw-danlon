@@ -842,8 +842,27 @@ pub fn sync_account(
     store: &dyn SecretStore,
     today: NaiveDate,
 ) -> Result<SyncOutcome> {
+    sync_account_days(cfg, store, None, today)
+}
+
+/// Fetches the trips on `days` (first, last) from the account, else since
+/// the newest stored one: a trip the car reported late is found again.
+pub fn sync_account_days(
+    cfg: &Config,
+    store: &dyn SecretStore,
+    days: Option<(NaiveDate, NaiveDate)>,
+    today: NaiveDate,
+) -> Result<SyncOutcome> {
     let (state, token) = account_token(cfg, store)?;
-    service::sync_trips_with(cfg, &AccountAccess::new(cfg, &state), &token, None, today)
+    let (from, to) = days.unzip();
+    service::sync_trips_with(
+        cfg,
+        &AccountAccess::new(cfg, &state),
+        &token,
+        from,
+        to,
+        today,
+    )
 }
 
 /// The cars on the connected account, to pick one in Settings; not kept.

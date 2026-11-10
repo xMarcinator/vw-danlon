@@ -217,6 +217,9 @@ enum TripsAction {
         /// else 1 January).
         #[arg(long)]
         from: Option<String>,
+        /// Last day as YYYY-MM-DD (default: today).
+        #[arg(long)]
+        to: Option<String>,
     },
 }
 
@@ -457,7 +460,7 @@ fn main() -> Result<()> {
         Command::Account { action } => account(&cfg, action)?,
         Command::Trips { action } => match action {
             TripsAction::Import { file } => import_trips(&cfg, &file)?,
-            TripsAction::Sync { from } => sync_trips(&cfg, from.as_deref())?,
+            TripsAction::Sync { from, to } => sync_trips(&cfg, from.as_deref(), to.as_deref())?,
         },
         Command::Vacation => print_vacation(&cfg, mode)?,
         Command::Backup {
@@ -521,9 +524,9 @@ fn import_trips(cfg: &Config, file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sync_trips(cfg: &Config, from: Option<&str>) -> Result<()> {
+fn sync_trips(cfg: &Config, from: Option<&str>, to: Option<&str>) -> Result<()> {
     let today = chrono::Utc::now().with_timezone(&cfg.timezone).date_naive();
-    let s = service::sync_trips(cfg, from, today)?;
+    let s = service::sync_trips(cfg, from, to, today)?;
     println!(
         "{} added, {} already present{}",
         s.synced.merged.added,

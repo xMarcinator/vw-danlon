@@ -1806,12 +1806,42 @@ pub struct SyncOutcome {
 }
 
 /// Fetches trips from the account month by month into the trip store,
-/// from `from` (default: where the store ends) through `today`.
-pub fn sync_trips(cfg: &Config, from: Option<&str>, today: NaiveDate) -> Result<SyncOutcome> {
+/// from `from` (default: where the store ends) through `to` (default:
+/// `today`).
+pub fn sync_trips(
+    cfg: &Config,
+    from: Option<&str>,
+    to: Option<&str>,
+    today: NaiveDate,
+) -> Result<SyncOutcome> {
+    let from = from.map(state::parse_date).transpose()?;
+    let to = to.map(state::parse_date).transpose()?;
     let state = State::load(&cfg.database)?;
     let access = AccountAccess::new(cfg, &state);
     let token = access.token()?;
-    sync_trips_with(cfg, &access, &token, from, today)
+    sync_trips_with(cfg, &access, &token, from, to, today)
+}
+
+/// The days a sync fetches: `from` (default: where the store ends)
+/// through `to` (default: `today`). Days after today have no trips yet.
+pub fn sync_days(
+    cfg: &Config,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    today: NaiveDate,
+) -> Result<(NaiveDate, NaiveDate)> {
+    let to = to.unwrap_or(today);
+    if to > today {
+        anyhow::bail!("{to} is after today");
+    }
+    let from = match from {
+        Some(f) => f,
+        None => trip_store::sync_start(&cfg.database, cfg.timezone, today)?.min(to),
+    };
+    if from > to {
+        anyhow::bail!("{from} is after {to}");
+    }
+    Ok((from, to))
 }
 
 /// [`sync_trips`] with a device token the caller keeps (the app's secret
@@ -1820,23 +1850,18 @@ pub fn sync_trips_with(
     cfg: &Config,
     access: &AccountAccess,
     token: &str,
-    from: Option<&str>,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
     today: NaiveDate,
 ) -> Result<SyncOutcome> {
-    let from = match from {
-        Some(f) => state::parse_date(f)?,
-        None => trip_store::sync_start(&cfg.database, cfg.timezone, today)?,
-    };
-    if from > today {
-        anyhow::bail!("--from {from} is after today");
-    }
+    let (from, to) = sync_days(cfg, from, to, today)?;
     let mut sleep = std::thread::sleep;
     let session = connected_cars::retry_429(&mut sleep, || {
         connected_cars::Session::login(access.namespace, token)
     })?;
     let vehicles = connected_cars::retry_429(&mut sleep, || session.vehicles())?;
     let vehicle = connected_cars::pick_vehicle(&vehicles, access.vehicle)?;
-    let synced = trip_store::sync(&cfg.database, from, today, cfg.timezone, |first, last| {
+    let synced = trip_store::sync(&cfg.database, from, to, cfg.timezone, |first, last| {
         connected_cars::retry_429(&mut sleep, || {
             session.trips_on_days(&vehicle.id, first, last, cfg.timezone)
         })
@@ -1850,11 +1875,7 @@ pub fn sync_trips_with(
             })
             .last_sync = Some(chrono::Utc::now().fixed_offset());
     })?;
-    Ok(SyncOutcome {
-        synced,
-        from,
-        to: today,
-    })
+    Ok(SyncOutcome { synced, from, to })
 }
 
 /// The account's vehicles, to pick the one to sync.
@@ -2159,6 +2180,35 @@ mod tests {
             timed("Læge", "2026-11-03 13:00", "2026-11-03 14:00"),
         ];
         (dir, cfg, cal)
+    }
+
+    #[test]
+    fn a_sync_fetches_the_days_picked_never_after_today() {
+        let (_dir, cfg, _) = private_setup("sync-days", "");
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let today = d("2026-11-10");
+        // An empty store syncs from 1 January.
+        assert_eq!(
+            sync_days(&cfg, None, None, today).unwrap(),
+            (d("2026-01-01"), today)
+        );
+        assert_eq!(
+            sync_days(&cfg, Some(d("2026-11-09")), Some(today), today).unwrap(),
+            (d("2026-11-09"), today)
+        );
+        assert_eq!(
+            sync_days(&cfg, None, Some(d("2025-12-30")), today).unwrap(),
+            (d("2025-12-30"), d("2025-12-30"))
+        );
+        let err = |from, to| sync_days(&cfg, from, to, today).unwrap_err().to_string();
+        assert_eq!(
+            err(None, Some(d("2026-11-11"))),
+            "2026-11-11 is after today"
+        );
+        assert_eq!(
+            err(Some(d("2026-11-10")), Some(d("2026-11-09"))),
+            "2026-11-10 is after 2026-11-09"
+        );
     }
 
     /// A work calendar and two extra calendars as files: Personal (Private)

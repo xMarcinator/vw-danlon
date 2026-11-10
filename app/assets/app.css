@@ -347,7 +347,8 @@ body {
 
   .card input[type="text"],
   .card input[type="url"],
-  .card input[type="password"] {
+  .card input[type="password"],
+  .sync-days input[type="date"] {
     font-size: 16px;
     height: 48px;
   }
@@ -425,6 +426,37 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+/* Sync these days: two dates and the button; the note on its own line. */
+.sync-days {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 10px;
+}
+
+.sync-days .label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 140px;
+}
+
+.sync-days input[type="date"] {
+  font: inherit;
+  font-size: 13px;
+  height: 38px;
+  padding: 0 8px;
+  border: 1px solid var(--ctl);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--text);
+  min-width: 0;
+}
+
+.sync-days .note {
+  flex-basis: 100%;
 }
 
 .note {

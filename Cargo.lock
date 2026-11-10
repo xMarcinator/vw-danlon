@@ -5889,7 +5889,7 @@ dependencies = [
 
 [[package]]
 name = "vw-danlon-app"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "android-native-keyring-store",
  "anyhow",
