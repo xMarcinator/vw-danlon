@@ -2537,6 +2537,11 @@ table.logbook tr.total td {
   color: var(--acc-text);
 }
 
+.dl-kind.fv {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
 .dl-time {
   font-family: "IBM Plex Mono", monospace;
   font-size: 17px;
@@ -4344,4 +4349,111 @@ button.cal-day:focus-visible {
   gap: 8px;
   justify-content: flex-end;
   align-items: center;
+}
+
+/* Sick days: the dock's status bar, the Stop work menu's Went home sick,
+   Sick today and the work pill. */
+.sick-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 6px 6px 6px 14px;
+  box-sizing: border-box;
+  border-radius: 14px;
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.sick-bar .grow {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sick-bar .small {
+  color: var(--text);
+}
+
+.dock-work .pt-btn.stop-work {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dock-menu-item.sick {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 56px;
+  color: var(--bad);
+}
+
+.dock-menu-item + .dock-menu-item {
+  border-top: 1px solid var(--row);
+}
+
+.menu-item.sick,
+.pill-btn.sick,
+.small-btn.sick {
+  color: var(--bad);
+}
+
+.work-pill.sick {
+  border-color: var(--bad);
+}
+
+.work-pill.sick .dot {
+  background: var(--bad);
+}
+
+.day-sick {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.alert.sick {
+  background: var(--bad-bg);
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.alert.sick .grow {
+  color: var(--text);
+}
+
+.sick-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 6;
+  width: min(320px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--surf);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
+.sick-menu .menu-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 4px 0 14px;
+  border-top: 1px solid var(--row);
+}
+
+.sick-menu .menu-edit label {
+  flex-grow: 1;
+}
+
+.sick-menu .note {
+  padding: 6px 14px 8px;
 }

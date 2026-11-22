@@ -20,7 +20,7 @@ use crate::mileage::{self, MileageMonth, Status};
 use crate::month::{self, EntryKind, Month, MonthReport, Span, TimedEntry, Today};
 use crate::state::{
     self, Appointment, DanlonBalance, EventChoice, IntervalKind, PlannedWindow, PrivateInterval,
-    Registered, RegisteredPeriod, RunningTimer, State,
+    Registered, RegisteredPeriod, RunningTimer, Sick, State,
 };
 use crate::trip_store::{self, Synced};
 use crate::trips::{self, ExportTrip, Trip};
@@ -769,6 +769,10 @@ pub enum WorkAction {
     LeaveWork,
     /// Stop the private timer, or the appointment started automatically.
     StopPrivate,
+    /// Not at work yet on a working day: report sick for the whole day.
+    SickToday,
+    /// At work or working from home: went home sick now (see [`set_sick`]).
+    WentHomeSick,
 }
 
 /// Today at some moment, for the work card.
@@ -785,6 +789,9 @@ pub struct WorkToday {
     /// from today through [`PRIVATE_DAYS_AHEAD`] days later.
     pub next_private: Option<PrivateItem>,
     pub actions: Vec<WorkAction>,
+    /// Reported sick today (see [`month::Day::sick`]), and the Sygdom hours.
+    pub sick: Option<Sick>,
+    pub sick_hours: f64,
 }
 
 impl WorkToday {
@@ -882,11 +889,22 @@ pub fn work_today(
             .into_iter()
             .chain([WorkAction::PrivateWithoutEvent])
     };
+    // Sick: only on a working day, and once.
+    let can_be_sick = day.sick.is_none() && (day.norm_hours > 0.0);
+    let sick_action = |a: WorkAction| can_be_sick.then_some(a);
     let actions = match &state_now {
-        WorkState::NotWorking { .. } => vec![WorkAction::StartWork],
-        WorkState::AtWork { .. } => private_actions().chain([WorkAction::LeaveWork]).collect(),
+        WorkState::NotWorking { .. } if day.sick.is_some() => Vec::new(),
+        WorkState::NotWorking { .. } => [WorkAction::StartWork]
+            .into_iter()
+            .chain(sick_action(WorkAction::SickToday))
+            .collect(),
+        WorkState::AtWork { .. } => private_actions()
+            .chain([WorkAction::LeaveWork])
+            .chain(sick_action(WorkAction::WentHomeSick))
+            .collect(),
         WorkState::Home { .. } => private_actions()
             .chain(state.home.running.is_some().then_some(WorkAction::StopWork))
+            .chain(sick_action(WorkAction::WentHomeSick))
             .collect(),
         WorkState::Private { .. } => vec![WorkAction::StopPrivate],
     };
@@ -897,6 +915,8 @@ pub fn work_today(
         planned: day.planned,
         next_private,
         actions,
+        sick: day.sick,
+        sick_hours: day.sick_hours,
     }
 }
 
@@ -912,6 +932,29 @@ pub fn set_left_work(cfg: &Config, date: NaiveDate, at: Option<NaiveDateTime>) -
             s.left_work.remove(&date);
         }
     })
+}
+
+/// Reports `date` sick: the whole day (`from` none) or from the time you
+/// went home sick. Its norm ends then and the planned hours left are
+/// Sygdom in the Danløn checklist. Going home sick today stops the
+/// home-working timer then. None in `sick` takes it back.
+pub fn set_sick(cfg: &Config, date: NaiveDate, sick: Option<Sick>) -> Result<()> {
+    State::update(&cfg.database, |s| match sick {
+        Some(sick) => {
+            if let (Some(from), Some(r)) = (sick.from, &s.home.running)
+                && r.start.date() == date
+                && r.start.time() < from
+            {
+                s.home.stop(date.and_time(from))?;
+            }
+            s.sick.insert(date, sick);
+            Ok(())
+        }
+        None => {
+            s.sick.remove(&date);
+            Ok(())
+        }
+    })?
 }
 
 fn occurrence_date(o: &Occurrence) -> NaiveDate {
@@ -2183,6 +2226,25 @@ mod tests {
     }
 
     #[test]
+    fn going_home_sick_stops_the_home_timer_and_can_be_taken_back() {
+        let (_dir, cfg, _) = private_setup("svc-sick", "");
+        let day = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        State::update(&cfg.database, |s| {
+            s.home.start(at("2026-11-19 08:00"), None, None).map(|_| ())
+        })
+        .unwrap()
+        .unwrap();
+        let from = at("2026-11-19 13:10").time();
+        set_sick(&cfg, day, Some(Sick { from: Some(from) })).unwrap();
+        let s = State::load(&cfg.database).unwrap();
+        assert!(s.home.running.is_none());
+        assert_eq!(s.home.intervals[0].end, at("2026-11-19 13:10"));
+        assert_eq!(s.sick[&day].from, Some(from));
+        set_sick(&cfg, day, None).unwrap();
+        assert!(State::load(&cfg.database).unwrap().sick.is_empty());
+    }
+
+    #[test]
     fn a_sync_fetches_the_days_picked_never_after_today() {
         let (_dir, cfg, _) = private_setup("sync-days", "");
         let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
@@ -2913,7 +2975,7 @@ mod tests {
                 late_by: Some(Duration::minutes(40))
             }
         );
-        assert_eq!(t.actions, [WorkAction::StartWork]);
+        assert_eq!(t.actions, [WorkAction::StartWork, WorkAction::SickToday]);
         assert_eq!((t.expected, t.worked), (40.0 / 60.0, 0.0));
         assert_eq!(t.next_private.as_ref().unwrap().label, "Læge");
         // Before the planned start: not late.
@@ -2939,9 +3001,25 @@ mod tests {
             [
                 WorkAction::PrivateForAppointment,
                 WorkAction::PrivateWithoutEvent,
-                WorkAction::LeaveWork
+                WorkAction::LeaveWork,
+                WorkAction::WentHomeSick
             ]
         );
+
+        // Went home sick at 10:40: the period ends then, the norm too, and
+        // the rest of the planned day (less lunch) is Sygdom.
+        let mut sick = State::default();
+        sick.sick.insert(
+            at("2026-10-20 10:40").date(),
+            Sick {
+                from: Some(at("2026-10-20 10:40").time()),
+            },
+        );
+        let t = w(&sick, std::slice::from_ref(&arrive), "2026-10-20 11:00");
+        assert_eq!(t.state, WorkState::NotWorking { late_by: None });
+        assert_eq!((min(t.worked), min(t.expected)), (90, 160));
+        assert_eq!(t.sick_hours, 4.83);
+        assert!(t.actions.is_empty());
 
         // Left work at 10:40 without a trip: the period ends then and the
         // day is not working any more; a later departure trip still wins.
@@ -2990,7 +3068,8 @@ mod tests {
             [
                 WorkAction::PrivateForAppointment,
                 WorkAction::PrivateWithoutEvent,
-                WorkAction::StopWork
+                WorkAction::StopWork,
+                WorkAction::WentHomeSick
             ]
         );
 

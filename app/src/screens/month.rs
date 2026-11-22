@@ -1008,8 +1008,35 @@ fn WorkCard(
 #[component]
 fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, bool>) -> Element {
     let mut menu = use_signal(|| false);
+    let mut stop_menu = use_signal(|| false);
     let mut at = use_signal(String::new);
     let has = |a: WorkAction| work.actions.contains(&a);
+    // Reported sick today: what it means, and Not sick to take it back.
+    if let Some(sick) = work
+        .sick
+        .filter(|_| matches!(work.state, WorkState::NotWorking { .. }))
+    {
+        let today = now.date();
+        return rsx! {
+            div { class: "dock-actions",
+                div { class: "sick-bar", role: "status",
+                    span { class: "grow",
+                        b { "{sick_title(sick)}" }
+                        span { class: "small", "Sygdom {sick_text(work.sick_hours)} to enter in Danløn" }
+                    }
+                    button {
+                        class: "small-btn",
+                        onclick: move |_| {
+                            on_action.call(Action::NotSick(today));
+                        },
+                        "Not sick"
+                    }
+                }
+            }
+        };
+    }
+    let sick_today = has(WorkAction::SickToday);
+    let went_home_sick = has(WorkAction::WentHomeSick);
     let working = matches!(
         work.state,
         WorkState::AtWork { .. } | WorkState::Home { .. }
@@ -1051,9 +1078,44 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
         None => main.clone(),
     };
     let open = menu() && caret_label.is_some();
-    let mut close = move || menu.set(false);
+    let stop_open = stop_menu() && stop.is_some() && went_home_sick;
+    let mut close = move || {
+        menu.set(false);
+        stop_menu.set(false);
+    };
+    let stop_now = stop.clone();
     rsx! {
         div { class: "dock-actions",
+            if stop_open {
+                div { class: "menu-backdrop", onclick: move |_| close() }
+                div {
+                    id: "stop-menu",
+                    class: "dock-menu",
+                    role: "menu",
+                    "aria-label": "Stop work choices",
+                    if let Some(action) = stop_now {
+                        button {
+                            class: "dock-menu-item",
+                            role: "menuitem",
+                            onclick: move |_| {
+                                close();
+                                on_action.call(action.clone());
+                            },
+                            "Stop work now · {hm(now)}"
+                        }
+                    }
+                    button {
+                        class: "dock-menu-item sick",
+                        role: "menuitem",
+                        onclick: move |_| {
+                            close();
+                            on_action.call(Action::WentHomeSick);
+                        },
+                        span { "Went home sick · {hm(now)}" }
+                        span { class: "small muted", "Stops work; the rest of the planned day is Sygdom" }
+                    }
+                }
+            }
             if open {
                 div { class: "menu-backdrop", onclick: move |_| close() }
                 div {
@@ -1131,16 +1193,50 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                 if let Some(action) = stop {
                     button {
                         class: "pt-btn stop-work",
+                        "aria-haspopup": if went_home_sick { "menu" },
+                        "aria-expanded": if went_home_sick { if stop_open { "true" } else { "false" } },
                         onclick: move |_| {
-                            close();
-                            on_action.call(action.clone());
+                            if went_home_sick {
+                                menu.set(false);
+                                stop_menu.set(!stop_open);
+                            } else {
+                                close();
+                                on_action.call(action.clone());
+                            }
                         },
                         "Stop work"
+                        if went_home_sick {
+                            Icon { d: "m6 15 6-6 6 6", size: 14 }
+                        }
+                    }
+                }
+                if sick_today {
+                    button {
+                        class: "pt-btn stop-work",
+                        onclick: move |_| {
+                            close();
+                            on_action.call(Action::Sick { date: now.date(), from: None });
+                        },
+                        "Sick today"
                     }
                 }
             }
         }
     }
+}
+
+/// "Sick today", or "Went home sick at 13:10".
+pub fn sick_title(sick: vw_danlon::state::Sick) -> String {
+    match sick.from {
+        Some(t) => format!("Went home sick at {}", t.format("%H:%M")),
+        None => "Sick today".to_string(),
+    }
+}
+
+/// Sygdom hours as the checklist shows them: "2h 50m".
+pub fn sick_text(hours: f64) -> String {
+    let m = (hours * 60.0).round() as i64;
+    format!("{}h {:02}m", m / 60, m % 60)
 }
 
 /// The work buttons for the wide header: Start work, Stop private, or the
@@ -1153,17 +1249,38 @@ fn WorkButtons(work: WorkToday, on_action: Callback<Action, bool>) -> Element {
     let mut at = use_signal(String::new);
     let has = |a: WorkAction| work.actions.contains(&a);
     match &work.state {
-        WorkState::NotWorking { .. } => rsx! {
-            if has(WorkAction::StartWork) {
-                button {
-                    class: "pill-btn",
-                    onclick: move |_| {
-                        on_action.call(Action::HomeStart);
-                    },
-                    "Start work"
+        WorkState::NotWorking { .. } => {
+            let today = chrono::Local::now().date_naive();
+            rsx! {
+                if has(WorkAction::StartWork) {
+                    button {
+                        class: "pill-btn",
+                        onclick: move |_| {
+                            on_action.call(Action::HomeStart);
+                        },
+                        "Start work"
+                    }
+                }
+                if has(WorkAction::SickToday) {
+                    button {
+                        class: "pill-btn sick",
+                        onclick: move |_| {
+                            on_action.call(Action::Sick { date: today, from: None });
+                        },
+                        "Sick today"
+                    }
+                }
+                if work.sick.is_some() {
+                    button {
+                        class: "pill-btn",
+                        onclick: move |_| {
+                            on_action.call(Action::NotSick(today));
+                        },
+                        "Not sick"
+                    }
                 }
             }
-        },
+        }
         WorkState::Private { .. } => rsx! {
             button {
                 class: "pill-btn private",
@@ -1260,6 +1377,17 @@ fn WorkButtons(work: WorkToday, on_action: Callback<Action, bool>) -> Element {
                                         "Stop work"
                                     }
                                 }
+                                if has(WorkAction::WentHomeSick) {
+                                    button {
+                                        class: "menu-item sick",
+                                        role: "menuitem",
+                                        onclick: move |_| {
+                                            close();
+                                            on_action.call(Action::WentHomeSick);
+                                        },
+                                        "Went home sick"
+                                    }
+                                }
                             }
                         }
                     }
@@ -1275,6 +1403,11 @@ fn WorkButtons(work: WorkToday, on_action: Callback<Action, bool>) -> Element {
 fn WorkPill(work: WorkToday, today: NaiveDate, on_action: Callback<Action, bool>) -> Element {
     let at = |t: DateTime<Tz>| hm(t.naive_local());
     let (class, label, rest) = match &work.state {
+        WorkState::NotWorking { .. } if work.sick.is_some() => (
+            "sick",
+            work.sick.map(sick_title).unwrap_or_default(),
+            format!(" · Sygdom {}", sick_text(work.sick_hours)),
+        ),
         WorkState::NotWorking { late_by: Some(_) } => (
             "late",
             "Not at work".to_string(),

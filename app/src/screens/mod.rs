@@ -351,6 +351,16 @@ pub enum Action {
     LeaveWork,
     /// Take back "left work" on that day.
     UndoLeaveWork(NaiveDate),
+    /// Report that day sick: the whole day, or from the time typed (went
+    /// home sick).
+    Sick {
+        date: NaiveDate,
+        from: Option<String>,
+    },
+    /// Went home sick now.
+    WentHomeSick,
+    /// Take back the sick report on that day.
+    NotSick(NaiveDate),
     /// You did not go to the private appointment on that day with this
     /// title: it counts no private time.
     Skip(NaiveDate, String),
@@ -411,7 +421,10 @@ impl Action {
             | Action::HomeStop
             | Action::HomeStartAt(_)
             | Action::LeaveWork
-            | Action::UndoLeaveWork(_) => Panel::Home,
+            | Action::UndoLeaveWork(_)
+            | Action::Sick { .. }
+            | Action::WentHomeSick
+            | Action::NotSick(_) => Panel::Home,
             _ => Panel::Private,
         }
     }
@@ -483,6 +496,38 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
         Action::UndoLeaveWork(date) => {
             service::set_left_work(cfg, *date, None)?;
             "Left work taken back".to_string()
+        }
+        Action::Sick { date, from } => {
+            let from = from
+                .as_deref()
+                .map(|t| state::parse_time(t.trim()))
+                .transpose()?;
+            service::set_sick(cfg, *date, Some(state::Sick { from }))?;
+            match from {
+                Some(t) => format!(
+                    "Went home sick at {} · the rest of the planned day is Sygdom",
+                    t.format("%H:%M")
+                ),
+                None => "Sick all day · no norm, the planned day is Sygdom".to_string(),
+            }
+        }
+        Action::WentHomeSick => {
+            let at = now.naive_local();
+            service::set_sick(
+                cfg,
+                at.date(),
+                Some(state::Sick {
+                    from: chrono::Timelike::with_second(&at.time(), 0),
+                }),
+            )?;
+            format!(
+                "Went home sick at {} · the rest of the planned day is Sygdom",
+                hm(at)
+            )
+        }
+        Action::NotSick(date) => {
+            service::set_sick(cfg, *date, None)?;
+            "Sick report taken back".to_string()
         }
         Action::Skip(date, title) => {
             let w = service::skip_private(cfg, cal, *date, Some(title), now.naive_local())?;

@@ -409,6 +409,15 @@ pub fn render(a: DayArgs) -> Element {
                 }
             }
         }
+        if d.off_reason.is_none() && (d.norm_hours > 0.0 || d.sick.is_some()) {
+            SickControl {
+                date,
+                sick: d.sick,
+                sick_hours: d.sick_hours,
+                at: d.last_end.map(|t| t.format("%H:%M").to_string()).unwrap_or_else(|| hm(now)),
+                on_action,
+            }
+        }
         {status(message_for(&message, Panel::Home))}
         {status(message_for(&message, Panel::Lunch))}
 
@@ -1267,6 +1276,103 @@ fn TripForm(
                         on_action.call(Action::AddTrip(date, form()));
                     },
                     "Add trip"
+                }
+            }
+        }
+    }
+}
+
+/// A working day's sick report: Mark sick ▾ (the whole day, or went home
+/// sick at a time) and, once reported, what it means with Change and Not
+/// sick.
+#[component]
+fn SickControl(
+    date: NaiveDate,
+    sick: Option<vw_danlon::state::Sick>,
+    sick_hours: f64,
+    at: String,
+    on_action: Callback<Action, bool>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut from = use_signal(|| at.clone());
+    let menu = rsx! {
+        if open() {
+            div { class: "menu-backdrop", onclick: move |_| open.set(false) }
+            div { class: "sick-menu", role: "menu", "aria-label": "Mark sick",
+                button {
+                    class: "menu-item",
+                    role: "menuitem",
+                    onclick: move |_| {
+                        open.set(false);
+                        on_action.call(Action::Sick { date, from: None });
+                    },
+                    "Sick all day"
+                }
+                div { class: "menu-edit",
+                    label { r#for: "sick-from", "Went home sick at" }
+                    input {
+                        id: "sick-from",
+                        r#type: "time",
+                        value: "{from}",
+                        oninput: move |e| from.set(e.value()),
+                    }
+                    button {
+                        class: "small-btn primary-sm",
+                        onclick: move |_| {
+                            if on_action.call(Action::Sick { date, from: Some(from()) }) {
+                                open.set(false);
+                            }
+                        },
+                        "Mark"
+                    }
+                }
+                span { class: "note",
+                    "Work ends then; the rest of the planned day is Sygdom in the Danløn checklist."
+                }
+            }
+        }
+    };
+    match sick {
+        None => rsx! {
+            div { class: "day-sick",
+                button {
+                    class: "small-btn sick",
+                    "aria-haspopup": "menu",
+                    "aria-expanded": if open() { "true" } else { "false" },
+                    onclick: move |_| open.set(!open()),
+                    "Mark sick"
+                    Icon { d: "m6 9 6 6 6-6", size: 13 }
+                }
+                {menu}
+            }
+        },
+        Some(s) => {
+            let (title, rest) = match s.from {
+                Some(t) => (
+                    format!("Went home sick at {}", t.format("%H:%M")),
+                    format!("Norm cut at {} · ", t.format("%H:%M")),
+                ),
+                None => ("Sick all day".to_string(), "No norm · ".to_string()),
+            };
+            let sygdom = super::month::sick_text(sick_hours);
+            rsx! {
+                div { class: "day-sick alert sick", role: "status",
+                    b { "{title}" }
+                    span { class: "grow", "{rest}Fravær · Sygdom {sygdom} to enter in Danløn" }
+                    button {
+                        class: "small-btn",
+                        "aria-haspopup": "menu",
+                        onclick: move |_| open.set(!open()),
+                        "Change"
+                    }
+                    button {
+                        class: "small-btn",
+                        onclick: move |_| {
+                            on_action.call(Action::NotSick(date));
+                        },
+                        "Not sick"
+                    }
+                    {menu}
                 }
             }
         }

@@ -26,8 +26,9 @@ pub const FILE_NAME: &str = "vw-danlon.db";
 /// ([`OVERRIDE_SCHEMA`]), version 4 calendar time and the deleted private
 /// appointments ([`CALENDAR_TIME_SCHEMA`]), version 5 when you left work
 /// without a trip ([`WORK_END_SCHEMA`]), version 6 the vacation periods'
-/// registration ticks and the balances read in Danløn ([`VACATION_SCHEMA`]).
-const VERSION: i32 = 6;
+/// registration ticks and the balances read in Danløn ([`VACATION_SCHEMA`]),
+/// version 7 the days reported sick ([`SICK_SCHEMA`]).
+const VERSION: i32 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -124,6 +125,12 @@ CREATE TABLE vacation_registered (
 CREATE TABLE danlon_balance (year INTEGER PRIMARY KEY, read_on TEXT NOT NULL, days INTEGER NOT NULL);
 ";
 
+/// What version 7 added: the days reported sick, the whole day (`from`
+/// NULL) or from the time you went home sick.
+const SICK_SCHEMA: &str = "
+CREATE TABLE sick (day TEXT PRIMARY KEY, from_time TEXT);
+";
+
 /// What version 4 added: whether a private interval is calendar time (the
 /// planned window of an appointment left untouched), and the private
 /// appointments whose time you deleted.
@@ -183,6 +190,9 @@ fn upgrade(conn: &mut Connection, path: &Path) -> Result<()> {
     }
     if version <= 5 {
         tx.execute_batch(VACATION_SCHEMA)?;
+    }
+    if version <= 6 {
+        tx.execute_batch(SICK_SCHEMA)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()
@@ -328,6 +338,7 @@ fn build(path: &Path, tmp: &Path) -> Result<Vec<PathBuf>> {
     tx.execute_batch(CALENDAR_TIME_SCHEMA)?;
     tx.execute_batch(WORK_END_SCHEMA)?;
     tx.execute_batch(VACATION_SCHEMA)?;
+    tx.execute_batch(SICK_SCHEMA)?;
     let mut moved = Vec::new();
     if let Some(t) = &trips {
         crate::trip_store::insert(&tx, &t.trips)?;
@@ -530,7 +541,7 @@ mod tests {
         conn.execute_batch(
             "DROP TABLE home_intervals; DROP TABLE home_running; DROP TABLE trip_overrides; \
              DROP TABLE private_dismissed; DROP TABLE work_end; \
-             DROP TABLE vacation_registered; DROP TABLE danlon_balance; \
+             DROP TABLE vacation_registered; DROP TABLE danlon_balance; DROP TABLE sick; \
              ALTER TABLE private_intervals DROP COLUMN calendar_time; \
              PRAGMA user_version = 1;",
         )
@@ -546,6 +557,7 @@ mod tests {
         assert!(s.dismissed.is_empty());
         assert!(s.left_work.is_empty());
         assert!(s.registered.is_empty() && s.danlon_balances.is_empty());
+        assert!(s.sick.is_empty());
         assert!(!has_column(&conn, "private_intervals", "calendar_time").unwrap());
         drop(conn);
 
@@ -563,6 +575,16 @@ mod tests {
                 "2026-10-06".parse().unwrap(),
                 "2026-10-06T14:30:00".parse().unwrap(),
             );
+            s.sick.insert(
+                "2026-10-06".parse().unwrap(),
+                crate::state::Sick {
+                    from: "14:30:00".parse().ok(),
+                },
+            );
+            s.sick.insert(
+                "2026-10-07".parse().unwrap(),
+                crate::state::Sick { from: None },
+            );
             s.home
                 .start("2026-10-06T08:00:00".parse().unwrap(), None, None)
                 .map(|_| ())
@@ -574,6 +596,8 @@ mod tests {
         assert_eq!(s.trip_overrides.get(&trip_start), Some(&true));
         assert!(s.dismissed.contains(&w));
         assert_eq!(s.left_work.len(), 1);
+        assert_eq!(s.sick.len(), 2);
+        assert_eq!(s.sick[&"2026-10-07".parse().unwrap()].from, None);
         let conn = open(&db).unwrap();
         let v: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))

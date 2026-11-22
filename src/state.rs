@@ -44,6 +44,18 @@ pub struct State {
     /// Holiday-year balances typed in from the Danløn app, by the calendar
     /// year the holiday year starts in.
     pub danlon_balances: BTreeMap<i32, DanlonBalance>,
+    /// Days reported sick: no hours and no norm for the day, or from the
+    /// time you went home sick. The planned hours lost are Sygdom in the
+    /// Danløn app.
+    pub sick: BTreeMap<NaiveDate, Sick>,
+}
+
+/// A day reported sick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sick {
+    /// When you went home sick; `None`: the whole day.
+    #[serde(default)]
+    pub from: Option<NaiveTime>,
 }
 
 /// Where a vacation period is registered.
@@ -651,7 +663,19 @@ pub(crate) fn read_rows(conn: &Connection) -> rusqlite::Result<State> {
         left_work: read_left_work(conn)?,
         registered: read_registered(conn)?,
         danlon_balances: read_danlon_balances(conn)?,
+        sick: read_sick(conn)?,
     })
+}
+
+/// The days reported sick; none in a database from before them (opened
+/// read-only, so not upgraded).
+fn read_sick(conn: &Connection) -> rusqlite::Result<BTreeMap<NaiveDate, Sick>> {
+    if !crate::db::has_table(conn, "sick")? {
+        return Ok(BTreeMap::new());
+    }
+    conn.prepare("SELECT day, from_time FROM sick")?
+        .query_map([], |r| Ok((r.get(0)?, Sick { from: r.get(1)? })))?
+        .collect()
 }
 
 /// The vacation registration ticks; none in a database from before them
@@ -788,7 +812,7 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
          DELETE FROM private_running; DELETE FROM account; \
          DELETE FROM home_intervals; DELETE FROM home_running; DELETE FROM trip_overrides; \
          DELETE FROM private_dismissed; DELETE FROM work_end; \
-         DELETE FROM vacation_registered; DELETE FROM danlon_balance; \
+         DELETE FROM vacation_registered; DELETE FROM danlon_balance; DELETE FROM sick; \
          DELETE FROM meta WHERE key IN ('private_next_id', 'home_next_id');",
     )?;
     let mut st = conn.prepare("INSERT INTO lunch (day, start, minutes) VALUES (?1, ?2, ?3)")?;
@@ -886,6 +910,10 @@ pub(crate) fn write_rows(conn: &Connection, state: &State) -> rusqlite::Result<(
         conn.prepare("INSERT INTO danlon_balance (year, read_on, days) VALUES (?1, ?2, ?3)")?;
     for (year, b) in &state.danlon_balances {
         st.execute(params![year, b.read_on, b.days])?;
+    }
+    let mut st = conn.prepare("INSERT INTO sick (day, from_time) VALUES (?1, ?2)")?;
+    for (day, s) in &state.sick {
+        st.execute(params![day, s.from])?;
     }
     Ok(())
 }

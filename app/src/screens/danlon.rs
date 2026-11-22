@@ -97,6 +97,21 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     let mut menu = use_signal(|| None::<NaiveDate>);
     let mut message = use_signal(|| None::<Result<String, String>>);
     let mut toast = use_signal(|| None::<(u32, String)>);
+    // Copies `text` and says so for two seconds.
+    let copy = move |text: String| {
+        spawn(async move {
+            let said = match crate::platform::copy_text(&text) {
+                Ok(()) => format!("Copied {text}"),
+                Err(e) => format!("Copying failed: {e:#}"),
+            };
+            let id = toast.peek().as_ref().map_or(0, |t| t.0) + 1;
+            toast.set(Some((id, said)));
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if toast.peek().as_ref().is_some_and(|t| t.0 == id) {
+                toast.set(None);
+            }
+        });
+    };
     let cal_sync = use_context::<Signal<super::CalendarSync>>();
     let loaded = use_resource(move || {
         let _ = cal_sync.read().version;
@@ -274,6 +289,9 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                 h2 { id: "dl-progress-h", "{p.days_done} of {p.days_total} working days entered" }
                 span { class: "sub small",
                     "Komme/gå {p.days_done} of {p.days_total} · Kørsel {p.trips_done} of {p.trips_total} trips"
+                    if p.absences_total > 0 {
+                        " · Fravær {p.absences_done} of {p.absences_total}"
+                    }
                     if p.fix_first > 0 {
                         " · {p.fix_first} to fix first"
                     }
@@ -418,24 +436,36 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                                             role: "menuitem",
                                                             onclick: move |_| {
                                                                 menu.set(None);
-                                                                let text = text.clone();
-                                                                spawn(async move {
-                                                                    let said = match crate::platform::copy_text(&text) {
-                                                                        Ok(()) => format!("Copied {text}"),
-                                                                        Err(e) => format!("Copying failed: {e:#}"),
-                                                                    };
-                                                                    let id = toast.peek().as_ref().map_or(0, |t| t.0) + 1;
-                                                                    toast.set(Some((id, said)));
-                                                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                                                    if toast.peek().as_ref().is_some_and(|t| t.0 == id) {
-                                                                        toast.set(None);
-                                                                    }
-                                                                });
+                                                                copy(text.clone());
                                                             },
                                                             "{label}"
                                                         }
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                    if let Some(f) = day.fravaer.filter(|_| to_enter) {
+                                        div { class: "dl-item",
+                                            span { class: "dl-kind fv", "Fravær" }
+                                            span { class: "dl-route", "Sygdom · {f.total_text()}" }
+                                            span { class: "dl-detail",
+                                                match f.from {
+                                                    Some(t) => format!("Went home sick {} · the rest of the planned day", t.format("%H:%M")),
+                                                    None => "Sick all day · the planned day".to_string(),
+                                                }
+                                            }
+                                            button {
+                                                class: "small-btn",
+                                                "aria-label": "Copy hours {f.hours_text()}",
+                                                onclick: move |_| copy(f.hours_text()),
+                                                "Copy {f.hours_text()}"
+                                            }
+                                            button {
+                                                class: "small-btn",
+                                                "aria-label": "Copy note {f.note_text()}",
+                                                onclick: move |_| copy(f.note_text()),
+                                                "Copy note"
                                             }
                                         }
                                     }

@@ -20,7 +20,7 @@ use crate::address::{self, Places};
 use crate::calendar::Occurrence;
 use crate::config::Config;
 use crate::holidays;
-use crate::state::{PlannedWindow, PrivateInterval, State};
+use crate::state::{PlannedWindow, PrivateInterval, Sick, State};
 use crate::trips::Trip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +120,12 @@ pub struct Day {
     /// The day's lunch break, deducted where it overlaps `segments`.
     pub lunch: Lunch,
     pub worked_hours: f64,
+    /// Reported sick on a working day: the whole day, or from the time you
+    /// went home sick. `norm_hours` is then cut to the planned time before
+    /// it (none for the whole day), and `sick_hours` are the rest.
+    pub sick: Option<Sick>,
+    /// The norm hours the sickness took: Sygdom in the Danløn app.
+    pub sick_hours: f64,
 }
 
 /// Why a day is not a working day.
@@ -566,7 +572,7 @@ pub fn build(
             };
             // Planned time in the calendar includes the lunch break; the norm
             // does not, so a normal day with lunch has no difference.
-            let norm_hours = match (&off_reason, norm_from_calendar) {
+            let full_norm = match (&off_reason, norm_from_calendar) {
                 (Some(_), _) => 0.0,
                 (None, true) => {
                     let lunch_window: Vec<Span> = lunch.window.into_iter().collect();
@@ -577,17 +583,37 @@ pub fn build(
                 }
                 (None, false) => cfg.work_week.hours(date.weekday()),
             };
+            // Sick on a working day: no norm from when it started, so the
+            // day is not short. Without planned times the norm is cut to the
+            // hours worked (below).
+            let sick = state
+                .sick
+                .get(&date)
+                .copied()
+                .filter(|_| off_reason.is_none() && full_norm > 0.0);
+            let sick_at = sick
+                .and_then(|s| s.from)
+                .and_then(|t| tz.from_local_datetime(&date.and_time(t)).earliest());
+            let planned_until = |at: DateTime<Tz>| {
+                let lunch_window: Vec<Span> = lunch.window.into_iter().collect();
+                subtract(&clip(day_plan, at), &lunch_window)
+                    .iter()
+                    .map(|(s, e)| (*e - *s).num_minutes() as f64 / 60.0)
+                    .fold(0.0, |a, b| a + b)
+            };
+            let norm_hours = match (sick, sick_at) {
+                (None, _) => full_norm,
+                (Some(_), None) => 0.0,
+                (Some(_), Some(at)) if norm_from_calendar => planned_until(at).min(full_norm),
+                (Some(_), Some(_)) => full_norm,
+            };
             // Today with the current time: the planned time up to now minus
             // the lunch break that has passed. Without planned times (the
             // norm from `[work_week]`) the day's norm.
             let so_far = now.filter(|n| n.date_naive() == date);
             let expected_hours = match so_far {
                 Some(now) if off_reason.is_none() && norm_from_calendar => {
-                    let lunch_window: Vec<Span> = lunch.window.into_iter().collect();
-                    subtract(&clip(day_plan, now), &lunch_window)
-                        .iter()
-                        .map(|(s, e)| (*e - *s).num_minutes() as f64 / 60.0)
-                        .fold(0.0, |a, b| a + b)
+                    planned_until(now).min(norm_hours)
                 }
                 _ => norm_hours,
             };
@@ -660,10 +686,12 @@ pub fn build(
                     .collect();
                 // Left work without a trip ("Stop work (left early)"): the
                 // open period ends then.
+                // Went home sick: the same, then.
                 let left = state
                     .left_work
                     .get(&date)
-                    .and_then(|at| tz.from_local_datetime(at).earliest());
+                    .and_then(|at| tz.from_local_datetime(at).earliest())
+                    .or(sick_at);
                 let open_now = match (w.open, left) {
                     (Some((since, loc)), Some(left)) if since < left => {
                         segments.push((since, left));
@@ -740,6 +768,25 @@ pub fn build(
             }
 
             let worked_hours = worked(&segments, lunch.window, cfg.periods.round_to_minutes);
+            let (norm_hours, expected_hours) = match sick_at {
+                Some(_) if !norm_from_calendar => {
+                    let cut = worked_hours.min(full_norm);
+                    (
+                        cut,
+                        if so_far.is_some() {
+                            expected_hours.min(cut)
+                        } else {
+                            cut
+                        },
+                    )
+                }
+                _ => (norm_hours, expected_hours),
+            };
+            let sick_hours = if sick.is_some() {
+                ((full_norm - norm_hours) * 100.0).round() / 100.0
+            } else {
+                0.0
+            };
             Day {
                 date,
                 norm_hours,
@@ -759,6 +806,8 @@ pub fn build(
                 check,
                 lunch,
                 worked_hours,
+                sick,
+                sick_hours,
             }
         })
         .collect();
@@ -1278,6 +1327,67 @@ END:VEVENT
         // Not a vacation word and not a days-off keyword: a working day.
         assert_eq!(day(20).off_reason, None);
         assert_eq!(day(20).norm_hours, 8.0);
+    }
+
+    #[test]
+    fn a_sick_day_has_no_norm_and_going_home_sick_cuts_it() {
+        let mut cfg = cfg("");
+        cfg.calendar = Some(crate::config::CalendarConfig {
+            source: String::new(),
+            norm_from_calendar: true,
+            days_off_keywords: vec![],
+            private_keywords: vec![],
+            name: None,
+            default_location: Some("Kontorvej 1, 8000 Aarhus C".into()),
+        });
+        let event = |day: &str| {
+            format!(
+                "BEGIN:VEVENT\nUID:k{day}\nSUMMARY:Kontor\nLOCATION:Kontorvej 1\\, 8000 Aarhus C\n\
+                 DTSTART;TZID=Europe/Copenhagen:202611{day}T080000\n\
+                 DTEND;TZID=Europe/Copenhagen:202611{day}T160000\nEND:VEVENT\n"
+            )
+        };
+        let ics = format!(
+            "BEGIN:VCALENDAR\n{}{}{}END:VCALENDAR\n",
+            event("18"),
+            event("19"),
+            event("20")
+        );
+        let m = Month::parse("2026-11").unwrap();
+        let occ = calendar::occurrences(&ics, cfg.timezone, m.first_day(), m.last_day()).unwrap();
+        let (home, office) = ("Hjemvej 3, 8200 Aarhus N", "Kontorvej 1, 8000 Aarhus C");
+        let trips = vec![located_trip(
+            &cfg,
+            "2026-11-19 08:12",
+            "2026-11-19 08:25",
+            home,
+            office,
+        )];
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let mut state = State::default();
+        state.sick.insert(d("2026-11-18"), Sick { from: None });
+        state.sick.insert(
+            d("2026-11-19"),
+            Sick {
+                from: chrono::NaiveTime::from_hms_opt(13, 10, 0),
+            },
+        );
+        // A weekend has no norm to take: not a sick day.
+        state.sick.insert(d("2026-11-21"), Sick { from: None });
+        let r = build(&cfg, m, &trips, &occ, &state, d("2026-11-30"));
+        let day = |n: usize| &r.days[n - 1];
+
+        assert_eq!((day(18).norm_hours, day(18).sick_hours), (0.0, 7.5));
+        assert_eq!(day(18).worked_hours, 0.0);
+        // At work 08:25 until going home sick at 13:10, lunch 12:00–12:30;
+        // the norm is the planned 08:00–13:10 less lunch.
+        assert_eq!(day(19).periods_text(), "08:25–13:10");
+        assert_eq!(day(19).worked_hours, 4.25);
+        assert!((day(19).norm_hours - 4.0 - 40.0 / 60.0).abs() < 1e-9);
+        assert_eq!(day(19).sick_hours, 2.83);
+        assert_eq!(day(19).check, None);
+        assert_eq!((day(20).norm_hours, day(20).sick), (7.5, None));
+        assert_eq!((day(21).sick, day(21).sick_hours), (None, 0.0));
     }
 
     fn located_trip(cfg: &Config, s: &str, e: &str, from: &str, to: &str) -> Trip {

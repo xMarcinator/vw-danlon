@@ -1,6 +1,7 @@
 //! What to type into the Danløn app, day by day: Komme/gå registrations from
-//! the day's work periods and one Kørsel registration from its business
-//! trips. Neither form's Description is filled in.
+//! the day's work periods, one Kørsel registration from its business
+//! trips and, on a day reported sick, one Fravær registration (Sygdom) for
+//! the planned hours it took. Neither form's Description is filled in.
 //!
 //! Private time splits the day into separate Komme/gå entries and is never
 //! registered; a gap overlapping the lunch window (an errand) is bridged and
@@ -10,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveTime, Weekday};
 
 use crate::address::{self, Places};
 use crate::config::Config;
@@ -25,6 +26,36 @@ pub struct ChecklistDay {
     pub status: Status,
     pub komme_gaa: Vec<KommeGaa>,
     pub korsel: Option<Korsel>,
+    pub fravaer: Option<Fravaer>,
+}
+
+/// One Fravær registration: Sygdom for the planned hours a day reported
+/// sick took (the whole day, or the rest of it after going home sick).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fravaer {
+    pub minutes: i64,
+    /// When you went home sick; `None`: the whole day.
+    pub from: Option<NaiveTime>,
+}
+
+impl Fravaer {
+    /// E.g. "2h 50m".
+    pub fn total_text(&self) -> String {
+        duration_text(self.minutes)
+    }
+
+    /// The hours as the app takes them, e.g. "2,83".
+    pub fn hours_text(&self) -> String {
+        format!("{:.2}", self.minutes as f64 / 60.0).replace('.', ",")
+    }
+
+    /// E.g. "Syg fra 13:10", or "Syg" for the whole day.
+    pub fn note_text(&self) -> String {
+        match self.from {
+            Some(t) => format!("Syg fra {}", t.format("%H:%M")),
+            None => "Syg".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +120,15 @@ pub fn render(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> String {
                 let _ = writeln!(out, "              check: no trip from {from} to {to}");
             }
         }
+        if let Some(f) = &day.fravaer {
+            let _ = writeln!(
+                out,
+                "    Fravær    Sygdom · {} ({} h) · {}",
+                f.total_text(),
+                f.hours_text(),
+                f.note_text()
+            );
+        }
     }
     let p = progress(days, entered);
     let _ = write!(
@@ -96,6 +136,13 @@ pub fn render(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> String {
         "\nDays entered: {} of {} · Trips entered: {} of {}",
         p.days_done, p.days_total, p.trips_done, p.trips_total
     );
+    if p.absences_total > 0 {
+        let _ = write!(
+            out,
+            " · Fravær entered: {} of {}",
+            p.absences_done, p.absences_total
+        );
+    }
     if p.fix_first > 0 {
         let _ = write!(out, " · {} to fix first", p.fix_first);
     }
@@ -111,6 +158,9 @@ pub struct Progress {
     pub days_total: usize,
     pub trips_done: usize,
     pub trips_total: usize,
+    /// Fravær (Sygdom) registrations on the days to enter.
+    pub absences_done: usize,
+    pub absences_total: usize,
     pub fix_first: usize,
 }
 
@@ -125,6 +175,10 @@ pub fn progress(days: &[ChecklistDay], entered: &BTreeSet<NaiveDate>) -> Progres
                 if day.korsel.is_some() {
                     p.trips_total += 1;
                     p.trips_done += ticked;
+                }
+                if day.fravaer.is_some() {
+                    p.absences_total += 1;
+                    p.absences_done += ticked;
                 }
             }
             Status::FixFirst(_) => p.fix_first += 1,
@@ -228,11 +282,16 @@ pub fn build(
                 .filter(|e| e.start.date_naive() == day.date)
                 .collect();
             let korsel = korsel(day.date, &day_entries, trips, &names);
+            let fravaer = day.sick.filter(|_| day.sick_hours > 0.0).map(|s| Fravaer {
+                minutes: (day.sick_hours * 60.0).round() as i64,
+                from: s.from,
+            });
             ChecklistDay {
                 date: day.date,
                 status: status(day, korsel.is_some()),
                 komme_gaa: komme_gaa(day),
                 korsel,
+                fravaer,
             }
         })
         .collect()
@@ -240,8 +299,11 @@ pub fn build(
 
 fn status(day: &Day, driving: bool) -> Status {
     let weekend = matches!(day.date.weekday(), Weekday::Sat | Weekday::Sun);
+    // A day reported sick has Sygdom to enter, worked or not.
+    let sick = day.sick.is_some() && day.sick_hours > 0.0;
     let working = !day.segments.is_empty()
         || driving
+        || sick
         || day.norm_hours > 0.0
         || (day.off_reason.is_none() && !weekend);
     let nothing = || {
@@ -266,7 +328,7 @@ fn status(day: &Day, driving: bool) -> Status {
         .collect();
     if !flags.is_empty() {
         Status::FixFirst(flags.join("; "))
-    } else if day.segments.is_empty() && !driving {
+    } else if day.segments.is_empty() && !driving && !sick {
         nothing()
     } else {
         Status::ToEnter
@@ -630,6 +692,51 @@ END:VEVENT
     }
 
     #[test]
+    fn a_sick_day_is_fravaer_to_enter() {
+        let cfg = Config::parse(BASE).unwrap();
+        let trips = vec![trip("19", "08:12", "08:25", HOME, OFFICE, 9.0)];
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let mut state = State::default();
+        state
+            .sick
+            .insert(d("2026-11-18"), crate::state::Sick { from: None });
+        state.sick.insert(
+            d("2026-11-19"),
+            crate::state::Sick {
+                from: NaiveTime::from_hms_opt(13, 10, 0),
+            },
+        );
+        let (_, days) = checklist_with(&cfg, "", &trips, &state);
+        let day = |n: usize| &days[n - 1];
+        // Sick all day: Sygdom for the planned day, nothing worked.
+        assert_eq!(day(18).status, Status::ToEnter);
+        assert!(day(18).komme_gaa.is_empty());
+        let f = day(18).fravaer.unwrap();
+        assert_eq!(
+            (f.total_text(), f.hours_text(), f.note_text()),
+            ("7h 30m".into(), "7,50".into(), "Syg".into())
+        );
+        // Went home sick at 13:10: Komme/gå until then, Sygdom for the rest.
+        assert_eq!(day(19).status, Status::ToEnter);
+        assert_eq!(
+            texts(day(19)),
+            texts_of(&[("08:25 to 13:10", "30m", "4h 15m")])
+        );
+        let f = day(19).fravaer.unwrap();
+        assert_eq!(
+            (f.total_text(), f.hours_text(), f.note_text()),
+            ("2h 50m".into(), "2,83".into(), "Syg fra 13:10".into())
+        );
+        assert_eq!(day(20).fravaer, None);
+        let text = render(&days[17..19], &BTreeSet::from([d("2026-11-18")]));
+        assert!(
+            text.contains("    Fravær    Sygdom · 2h 50m (2,83 h) · Syg fra 13:10\n"),
+            "{text}"
+        );
+        assert!(text.ends_with("· Fravær entered: 1 of 2\n"), "{text}");
+    }
+
+    #[test]
     fn private_time_splits_the_day() {
         let (_, days) = november();
         let nov19 = day(&days, 19);
@@ -789,6 +896,7 @@ END:VEVENT
                 trips_done: 1,
                 trips_total: 3,
                 fix_first: 2,
+                ..Progress::default()
             }
         );
         assert!(

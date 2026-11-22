@@ -151,6 +151,8 @@ mod tests {
                 source: LunchSource::Default,
             },
             worked_hours: worked,
+            sick: None,
+            sick_hours: 0.0,
         }
     }
 
