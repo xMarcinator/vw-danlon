@@ -4499,3 +4499,19 @@ button.cal-day:focus-visible {
 .dock-menu-item + .dock-menu-at + .dock-menu-item {
   border-top: 1px solid var(--row);
 }
+
+/* A day reported sick in the month and week: not greyed out like a day
+   off, a red edge and its Sygdom as a red chip. */
+table.days tr.sick {
+  box-shadow: inset 4px 0 0 var(--bad);
+}
+
+.day-row.sick {
+  box-shadow: inset 4px 0 0 var(--bad);
+}
+
+.chip.sick {
+  background: var(--bad-bg);
+  color: var(--bad);
+  font-weight: 600;
+}

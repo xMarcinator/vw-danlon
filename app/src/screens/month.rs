@@ -41,6 +41,19 @@ pub(super) fn month_title(m: Month) -> String {
 
 /// Where the day was, or why it was off.
 fn place(d: &Day) -> String {
+    match d.sick.map(|s| s.from) {
+        Some(None) => return "Sick all day".to_string(),
+        Some(Some(t)) => {
+            let at = d.work_locations.join(" | ");
+            let at = if at.is_empty() && !d.home.is_empty() { "Home".to_string() } else { at };
+            return if at.is_empty() {
+                format!("Went home sick {}", t.format("%H:%M"))
+            } else {
+                format!("{at} · went home sick {}", t.format("%H:%M"))
+            };
+        }
+        None => {}
+    }
     match &d.off_reason {
         Some(r) => r.to_string(),
         None if !d.work_locations.is_empty() => d.work_locations.join(" | "),
@@ -53,6 +66,8 @@ fn place(d: &Day) -> String {
 fn note_class(d: &Day) -> &'static str {
     if d.check.is_some() {
         "chip warn strong"
+    } else if d.sick.is_some() {
+        "chip sick"
     } else if matches!(d.off_reason, Some(OffReason::Leave { .. })) {
         "chip"
     } else if !d.appointments.is_empty() || !d.home.is_empty() {
@@ -67,6 +82,11 @@ fn note_class(d: &Day) -> &'static str {
 /// The day's note; on a client visit without one, the km driven for it.
 fn remark(d: &Day, business_km: &BTreeMap<NaiveDate, f64>) -> String {
     let remark = d.remark();
+    // Sick: the Sygdom it leaves to enter in Danløn first.
+    if d.sick.is_some() {
+        let sygdom = format!("Sygdom {}", sick_text(d.sick_hours));
+        return if remark.is_empty() { sygdom } else { format!("{sygdom}; {remark}") };
+    }
     if !remark.is_empty() || d.clients.is_empty() {
         return remark;
     }
@@ -76,8 +96,9 @@ fn remark(d: &Day, business_km: &BTreeMap<NaiveDate, f64>) -> String {
     }
 }
 
+/// Nothing to count: greyed out. A day reported sick is not.
 fn quiet(d: &Day) -> bool {
-    d.norm_hours == 0.0 && d.worked_hours == 0.0
+    d.norm_hours == 0.0 && d.worked_hours == 0.0 && d.sick.is_none()
 }
 
 fn planned(d: &Day) -> String {
@@ -629,6 +650,8 @@ fn day_rows(
                                     "flagged"
                                 } else if is_today {
                                     "today"
+                                } else if d.sick.is_some() {
+                                    "sick"
                                 } else if quiet(d) {
                                     "quiet"
                                 } else {
@@ -701,6 +724,8 @@ fn day_rows(
                         }
                         let class = if is_today {
                             "day-row today"
+                        } else if d.sick.is_some() {
+                            "day-row sick"
                         } else if quiet(d) {
                             "day-row quiet"
                         } else {
