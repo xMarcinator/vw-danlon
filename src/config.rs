@@ -744,8 +744,13 @@ impl Config {
 
     /// The `[places]` coordinates paired with the addresses they belong to.
     fn resolve_places(&self) -> Result<Places> {
+        // Without `[places]` none are configured, but the default radius
+        // still holds for the ones learned from the trips.
         let Some(p) = &self.places else {
-            return Ok(Places::default());
+            return Ok(Places {
+                known: Vec::new(),
+                radius_m: default_radius(),
+            });
         };
         if p.radius_m.is_nan() || p.radius_m <= 0.0 {
             bail!("places.radius_m must be a positive number of metres");

@@ -85,6 +85,13 @@ radius_m = 150          # default
 
 A trip ending within `radius_m` of one counts as arriving there.
 
+Without them, the coordinates are learned from the stored trips: where the
+trips ending at the workplace's (or home's) address end, at least three of
+them. The account names a spot after the nearest street, which can change
+for the same car park ("Lysbrohøjen, Lysbro" one day, "Lysbrovænget, 8600
+Silkeborg" the next); a trip ending within `radius_m` (150 m) of the learned
+spot still counts as arriving there.
+
 ## Trip sync from the account (optional)
 
 Instead of exporting by hand, `trips sync` can fetch the same trips from

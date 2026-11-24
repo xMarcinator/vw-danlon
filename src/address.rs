@@ -153,6 +153,53 @@ impl Places {
     }
 }
 
+/// How many trip ends at a place's address it takes to learn where it is.
+const LEARN_MIN_ENDS: usize = 3;
+
+impl Places {
+    /// These places plus where each of `targets` (the workplace, home)
+    /// lies, learned from `ends` (trip ends with their address and
+    /// position): the median position of the ends whose address matches the
+    /// target, given [`LEARN_MIN_ENDS`] of them. The account names a spot
+    /// after the nearest street, which can change from day to day for the
+    /// same car park; with the learned position a trip end within the radius
+    /// counts as at the target whatever street it was named after. A target
+    /// already configured with coordinates is kept as it is.
+    pub fn learned<'a>(
+        &self,
+        targets: &[&str],
+        ends: impl IntoIterator<Item = (&'a str, Option<Position>)> + Clone,
+    ) -> Places {
+        let mut out = self.clone();
+        for target in targets {
+            if target.trim().is_empty() || self.known.iter().any(|(a, _)| matches(a, target)) {
+                continue;
+            }
+            let at: Vec<Position> = ends
+                .clone()
+                .into_iter()
+                .filter(|(addr, _)| matches(addr, target))
+                .filter_map(|(_, pos)| pos)
+                .collect();
+            if at.len() < LEARN_MIN_ENDS {
+                continue;
+            }
+            let median = |mut v: Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                v[v.len() / 2]
+            };
+            out.known.push((
+                target.to_string(),
+                Position {
+                    lat: median(at.iter().map(|p| p.lat).collect()),
+                    lon: median(at.iter().map(|p| p.lon).collect()),
+                },
+            ));
+        }
+        out
+    }
+}
+
 /// Great-circle distance in metres.
 pub fn distance_m(a: Position, b: Position) -> f64 {
     const EARTH_RADIUS_M: f64 = 6_371_000.0;
@@ -263,5 +310,40 @@ mod tests {
             Some(near),
             "Torvet 1, 8600 Silkeborg"
         ));
+    }
+
+    #[test]
+    fn a_place_is_learned_from_trips_that_end_at_its_address() {
+        let work = "Lysbrohøjen 3, 8600 Silkeborg";
+        let at = |lat: f64| Some(Position { lat, lon: 9.5 });
+        // The car park is named after Lysbrohøjen three times, then after
+        // the next street; and one far-off end of the same name.
+        let ends = [
+            ("Lysbrohøjen, Lysbro", at(56.1580)),
+            ("Lysbrohøjen, Lysbro", at(56.1581)),
+            ("Lysbrohøjen, Lysbro", at(56.1582)),
+            ("Lysbrohøjen, Lysbro", at(56.2000)),
+            ("Arendalsvej, 8600 Silkeborg", at(56.10)),
+        ];
+        let none = Places {
+            known: Vec::new(),
+            radius_m: 150.0,
+        };
+        let places = none.learned(&[work], ends);
+        assert_eq!(places.known.len(), 1);
+        assert!(places.at("Lysbrovænget, 8600 Silkeborg", at(56.1585), work));
+        assert!(!places.at("Lysbrovænget, 8600 Silkeborg", at(56.1700), work));
+        // Two ends are too few to learn from.
+        assert!(
+            none.learned(&[work], ends[..2].iter().cloned())
+                .known
+                .is_empty()
+        );
+        // A place configured with coordinates is kept as it is.
+        let set = Places {
+            known: vec![(work.to_string(), Position { lat: 1.0, lon: 1.0 })],
+            radius_m: 150.0,
+        };
+        assert_eq!(set.learned(&[work], ends).known, set.known);
     }
 }

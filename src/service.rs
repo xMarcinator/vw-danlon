@@ -426,15 +426,41 @@ pub fn effective_workplace(
 }
 
 /// `cfg` with the workplace detected for `month` when none is configured
-/// (see [`effective_workplace`]).
+/// (see [`effective_workplace`]), and where the workplace and home are,
+/// learned from the stored trips (see [`Places::learned`]): a trip ending
+/// in the same car park counts as there, whichever street the account
+/// named it after.
 fn with_workplace<'a>(cfg: &'a Config, cal: &[Occurrence], month: Month) -> Cow<'a, Config> {
-    match effective_workplace(cfg, cal, month) {
+    let mut out = match effective_workplace(cfg, cal, month) {
         Some((w, WorkplaceSource::Detected)) => Cow::Owned(Config {
             workplace: Some(w),
             ..cfg.clone()
         }),
         _ => Cow::Borrowed(cfg),
+    };
+    let targets: Vec<String> = out
+        .workplace
+        .iter()
+        .chain(out.mileage.as_ref().and_then(|m| m.home.as_ref()))
+        .cloned()
+        .collect();
+    if targets.is_empty() || !cfg.database.exists() {
+        return out;
     }
+    // Without the stored trips nothing is learned; the addresses still match.
+    let Ok(store) = trip_store::TripStore::load(&cfg.database) else {
+        return out;
+    };
+    let ends = store
+        .trips
+        .iter()
+        .flat_map(|t| [(t.from.as_str(), t.start_pos), (t.to.as_str(), t.end_pos)]);
+    let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let places = out.known_places.learned(&targets, ends);
+    if places.known.len() > out.known_places.known.len() {
+        out.to_mut().known_places = places;
+    }
+    out
 }
 
 /// The month's work calendar and norm hours, without trips or the state
