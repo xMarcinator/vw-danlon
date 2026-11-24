@@ -119,15 +119,17 @@ the cars and stops.
 Then sync:
 
 ```sh
-cargo run -- trips sync                      # from the newest stored trip's day
+cargo run -- trips sync                      # from 3 days before the newest stored trip
 cargo run -- trips sync --from 2026-10-01    # from a given day
+cargo run -- trips sync --from 2026-11-18 --to 2026-11-20
 ```
 
-Without `--from` it starts on the day of the newest stored trip (1 January
-when nothing is stored yet) and runs to today. Trips are fetched month by
-month and merged like an export: a trip with the same start time and start
-odometer is stored once, so syncing trips already imported from an export
-adds nothing. It prints how many trips were added, how many were already
+Without `--from` it starts 3 days before the newest stored trip (1 January
+when nothing is stored yet) and runs to today (or `--to`). Trips are fetched
+month by month and merged like an export: a trip with the same start time
+and start odometer is stored once, so syncing trips already imported from an
+export adds nothing. A stored trip the account first sent without addresses,
+positions or odometer gets them when it is synced again ("filled in"). It prints how many trips were added, how many were already
 present, how many came without position, and the period. Trips without an
 address or coordinates are still stored; turn on position sharing in the
 app to get them.

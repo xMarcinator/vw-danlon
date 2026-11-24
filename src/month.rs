@@ -745,7 +745,21 @@ pub fn build(
                     None => text,
                 });
             }
-            let home_spans: Vec<Span> = day_home.iter().map(|(span, _)| *span).collect();
+            // Sick: no work counts from then on (a home-working event in the
+            // calendar included); sick all day, none that day.
+            let sick_cut = sick.map(|_| {
+                sick_at.unwrap_or_else(|| {
+                    tz.from_local_datetime(&date.and_time(chrono::NaiveTime::MIN))
+                        .earliest()
+                        .unwrap_or_else(|| {
+                            tz.from_utc_datetime(&date.and_time(chrono::NaiveTime::MIN))
+                        })
+                })
+            });
+            let mut home_spans: Vec<Span> = day_home.iter().map(|(span, _)| *span).collect();
+            if let Some(cut) = sick_cut {
+                home_spans = clip(&home_spans, cut);
+            }
             let segments = merge(segments.into_iter().chain(home_spans.iter().copied()));
             let day_appointments = appointments.get(&date).map(Vec::as_slice).unwrap_or(&[]);
             for ((s, e), summary) in day_appointments {
@@ -765,6 +779,10 @@ pub fn build(
             if let Some(now) = so_far {
                 segments = clip(&segments, now);
                 clients = clip(&clients, now);
+            }
+            if let Some(cut) = sick_cut {
+                segments = clip(&segments, cut);
+                clients = clip(&clients, cut);
             }
 
             let worked_hours = worked(&segments, lunch.window, cfg.periods.round_to_minutes);
@@ -1374,6 +1392,15 @@ END:VEVENT
         );
         // A weekend has no norm to take: not a sick day.
         state.sick.insert(d("2026-11-21"), Sick { from: None });
+        // Home-working time recorded on the whole sick day does not count.
+        state.home.intervals.push(PrivateInterval {
+            id: 1,
+            start: d("2026-11-18").and_hms_opt(8, 0, 0).unwrap(),
+            end: d("2026-11-18").and_hms_opt(12, 0, 0).unwrap(),
+            label: "Hjemmearbejde".into(),
+            kind: Default::default(),
+            replaces: None,
+        });
         let r = build(&cfg, m, &trips, &occ, &state, d("2026-11-30"));
         let day = |n: usize| &r.days[n - 1];
 

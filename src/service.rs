@@ -936,16 +936,22 @@ pub fn set_left_work(cfg: &Config, date: NaiveDate, at: Option<NaiveDateTime>) -
 
 /// Reports `date` sick: the whole day (`from` none) or from the time you
 /// went home sick. Its norm ends then and the planned hours left are
-/// Sygdom in the Danløn checklist. Going home sick today stops the
-/// home-working timer then. None in `sick` takes it back.
+/// Sygdom in the Danløn checklist. Going home sick stops that day's
+/// home-working timer then; a whole sick day drops it. None in `sick`
+/// takes it back.
 pub fn set_sick(cfg: &Config, date: NaiveDate, sick: Option<Sick>) -> Result<()> {
     State::update(&cfg.database, |s| match sick {
         Some(sick) => {
-            if let (Some(from), Some(r)) = (sick.from, &s.home.running)
-                && r.start.date() == date
-                && r.start.time() < from
-            {
-                s.home.stop(date.and_time(from))?;
+            // The home-working timer of that day: stopped when you went
+            // home sick, dropped for a whole sick day.
+            if let Some(r) = s.home.running.as_ref().filter(|r| r.start.date() == date) {
+                match sick.from {
+                    Some(from) if r.start.time() < from => {
+                        s.home.stop(date.and_time(from))?;
+                    }
+                    Some(_) => {}
+                    None => s.home.running = None,
+                }
             }
             s.sick.insert(date, sick);
             Ok(())

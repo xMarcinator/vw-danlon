@@ -51,7 +51,29 @@ impl StoredTrip {
         if self.manual || other.manual {
             return same_minute(self.start, other.start);
         }
-        self.start == other.start && self.start_odometer == other.start_odometer
+        // An odometer reading the account did not have yet is no other trip.
+        self.start == other.start
+            && (self.start_odometer == other.start_odometer
+                || self.start_odometer.is_none()
+                || other.start_odometer.is_none())
+    }
+
+    /// Fills in what this trip lacks from `newer`, the same trip read
+    /// again: the account can send a trip before its addresses, positions
+    /// or odometer are known. Whether anything changed.
+    fn fill_from(&mut self, newer: &StoredTrip) -> bool {
+        let before = self.clone();
+        if self.from.is_empty() {
+            self.from.clone_from(&newer.from);
+        }
+        if self.to.is_empty() {
+            self.to.clone_from(&newer.to);
+        }
+        self.start_pos = self.start_pos.or(newer.start_pos);
+        self.end_pos = self.end_pos.or(newer.end_pos);
+        self.start_odometer = self.start_odometer.or(newer.start_odometer);
+        self.distance_km = self.distance_km.or(newer.distance_km);
+        *self != before
     }
 }
 
@@ -163,16 +185,22 @@ pub struct Merged {
     pub already: usize,
     /// Trips of 0 km, not stored.
     pub zero_km: usize,
+    /// Trips already stored that got an address, position or distance
+    /// they lacked (counted in `already` too).
+    pub updated: usize,
 }
 
 impl Merged {
-    /// ", 2 skipped (0 km)", or nothing when none were.
+    /// ", 1 filled in, 2 skipped (0 km)", or nothing when none were.
     pub fn zero_km_text(&self) -> String {
-        if self.zero_km == 0 {
-            String::new()
-        } else {
-            format!(", {} skipped (0 km)", self.zero_km)
+        let mut out = String::new();
+        if self.updated > 0 {
+            out.push_str(&format!(", {} filled in", self.updated));
         }
+        if self.zero_km > 0 {
+            out.push_str(&format!(", {} skipped (0 km)", self.zero_km));
+        }
+        out
     }
 }
 
@@ -214,6 +242,7 @@ fn merge_into(db: &Path, imported: &[ExportTrip]) -> Result<Merged> {
                 added: 0,
                 already: 0,
                 zero_km: 0,
+                updated: 0,
             });
         };
         // Only stored trips starting in the same span (to the minute) can
@@ -226,8 +255,11 @@ fn merge_into(db: &Path, imported: &[ExportTrip]) -> Result<Merged> {
             )?,
         };
         let before = store.trips.len();
-        let merged = store.merge(imported);
+        let (merged, filled) = store.merge_filling(imported);
         insert(tx, &store.trips[before..])?;
+        for &i in &filled {
+            update(tx, &store.trips[i])?;
+        }
         Ok(merged)
     })
 }
@@ -283,6 +315,7 @@ pub fn sync(
             added: 0,
             already: 0,
             zero_km: 0,
+            updated: 0,
         },
         without_position: 0,
     };
@@ -301,19 +334,25 @@ pub fn sync(
         synced.merged.added += merged.added;
         synced.merged.already += merged.already;
         synced.merged.zero_km += merged.zero_km;
+        synced.merged.updated += merged.updated;
         synced.without_position += crate::connected_cars::without_position(&fetched);
         first = last + Duration::days(1);
     }
     Ok(synced)
 }
 
-/// The day a sync without `--from` starts: the newest stored trip's day
-/// (trips later that day may be missing from an export), else 1 January of
-/// `today`'s year.
+/// How many days before the newest stored trip a sync starts: the account
+/// can report a trip late, or before its addresses are known.
+const SYNC_LOOK_BACK_DAYS: i64 = 3;
+
+/// The day a sync without `--from` starts: [`SYNC_LOOK_BACK_DAYS`] before
+/// the newest stored trip's day (trips reported late are found, ones sent
+/// without addresses get them), else 1 January of `today`'s year.
 pub fn sync_start(db: &Path, tz: Tz, today: NaiveDate) -> Result<NaiveDate> {
-    Ok(summary(db, tz)?
-        .last_start
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap()))
+    Ok(summary(db, tz)?.last_start.map_or_else(
+        || NaiveDate::from_ymd_opt(today.year(), 1, 1).unwrap(),
+        |last| last - Duration::days(SYNC_LOOK_BACK_DAYS),
+    ))
 }
 
 /// How many trips are stored and the days they span.
@@ -461,6 +500,28 @@ pub(crate) fn read_all(conn: &Connection) -> rusqlite::Result<TripStore> {
     })
 }
 
+/// Writes what [`StoredTrip::fill_from`] filled in to the stored trip that
+/// starts at the same time (not one added by hand).
+fn update(conn: &Connection, t: &StoredTrip) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE trips SET start_odometer = ?2, distance_km = ?3, from_place = ?4, \
+         to_place = ?5, start_lat = ?6, start_lon = ?7, end_lat = ?8, end_lon = ?9 \
+         WHERE start = ?1 AND manual = 0",
+        params![
+            t.start,
+            t.start_odometer,
+            t.distance_km,
+            t.from,
+            t.to,
+            t.start_pos.map(|p| p.lat),
+            t.start_pos.map(|p| p.lon),
+            t.end_pos.map(|p| p.lat),
+            t.end_pos.map(|p| p.lon),
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn insert(conn: &Connection, trips: &[StoredTrip]) -> rusqlite::Result<()> {
     let mut st = conn.prepare(&format!(
         "INSERT INTO trips (start_ts, {COLUMNS}) \
@@ -533,7 +594,14 @@ impl TripStore {
     /// Adds the trips not stored yet, keeping the store sorted by start;
     /// 0 km trips are skipped.
     pub fn merge(&mut self, imported: &[ExportTrip]) -> Merged {
+        self.merge_filling(imported).0
+    }
+
+    /// [`merge`](Self::merge), filling in what stored trips lack from the
+    /// same trips imported again; also the indexes of those filled in.
+    fn merge_filling(&mut self, imported: &[ExportTrip]) -> (Merged, Vec<usize>) {
         let (mut added, mut zero) = (0, 0);
+        let mut filled = Vec::new();
         let before = self.trips.len();
         for e in imported {
             if zero_km(e.trip.distance_km) {
@@ -541,17 +609,27 @@ impl TripStore {
                 continue;
             }
             let t = StoredTrip::from(e);
-            if !self.trips.iter().any(|s| s.same_trip(&t)) {
-                self.trips.push(t);
-                added += 1;
+            match self.trips.iter().position(|s| s.same_trip(&t)) {
+                Some(i) => {
+                    if i < before && !self.trips[i].manual && self.trips[i].fill_from(&t) {
+                        filled.push(i);
+                    }
+                }
+                None => {
+                    self.trips.push(t);
+                    added += 1;
+                }
             }
         }
         self.trips[before..].sort_by_key(|t| t.start);
-        Merged {
+        filled.dedup();
+        let merged = Merged {
             added,
             already: imported.len() - added - zero,
             zero_km: zero,
-        }
+            updated: filled.len(),
+        };
+        (merged, filled)
     }
 }
 
@@ -561,6 +639,59 @@ mod tests {
     use crate::trips::tests::{HEADER, ROWS, temp_dir, write_export};
 
     const TZ: Tz = chrono_tz::Europe::Copenhagen;
+
+    #[test]
+    fn a_trip_synced_before_its_addresses_gets_them_later() {
+        let dir = temp_dir("store-fill");
+        let db = dir.join(crate::db::FILE_NAME);
+        let start = chrono::TimeZone::with_ymd_and_hms(&TZ, 2026, 11, 20, 7, 40, 0).unwrap();
+        let bare = ExportTrip {
+            trip: Trip {
+                start,
+                end: start + Duration::minutes(20),
+                distance_km: Some(14.2),
+                from: String::new(),
+                to: String::new(),
+                purpose: String::new(),
+                business: None,
+                start_pos: None,
+                end_pos: None,
+            },
+            start_odometer: None,
+        };
+        let mut full = bare.clone();
+        full.trip.from = "Hjemvej 3, 8200 Aarhus N".into();
+        full.trip.to = "Kontorvej 1, 8000 Aarhus C".into();
+        full.trip.end_pos = Some(Position {
+            lat: 56.15,
+            lon: 10.2,
+        });
+        full.start_odometer = Some(1200.0);
+        let day = start.date_naive();
+        let mut answers = vec![vec![full.clone()], vec![bare.clone()]];
+        let mut fetch = |_, _| Ok(answers.pop().unwrap());
+
+        let first = sync(&db, day, day, TZ, &mut fetch).unwrap();
+        assert_eq!((first.merged.added, first.merged.updated), (1, 0));
+        // The same trip again, now with its addresses and odometer: filled
+        // in, not added twice.
+        let again = sync(&db, day, day, TZ, &mut fetch).unwrap();
+        assert_eq!(
+            (
+                again.merged.added,
+                again.merged.already,
+                again.merged.updated
+            ),
+            (0, 1, 1)
+        );
+        assert_eq!(again.merged.zero_km_text(), ", 1 filled in");
+        let stored = TripStore::load(&db).unwrap().trips;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].to, "Kontorvej 1, 8000 Aarhus C");
+        assert_eq!(stored[0].start_odometer, Some(1200.0));
+        assert!(stored[0].end_pos.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn overlapping_exports_add_each_trip_once() {
@@ -576,7 +707,8 @@ mod tests {
             Merged {
                 added: 2,
                 already: 0,
-                zero_km: 0
+                zero_km: 0,
+                updated: 0
             }
         );
         let day = |s| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
@@ -587,7 +719,8 @@ mod tests {
             Merged {
                 added: 1,
                 already: 1,
-                zero_km: 0
+                zero_km: 0,
+                updated: 0
             }
         );
         let (merged, _) = import(&store, &b, TZ).unwrap();
@@ -596,7 +729,8 @@ mod tests {
             Merged {
                 added: 0,
                 already: 2,
-                zero_km: 0
+                zero_km: 0,
+                updated: 0
             }
         );
 
@@ -797,7 +931,8 @@ mod tests {
             Merged {
                 added: 0,
                 already: 1,
-                zero_km: 0
+                zero_km: 0,
+                updated: 0
             }
         );
         let stored = TripStore::load(&store).unwrap();
@@ -838,7 +973,8 @@ mod tests {
             Merged {
                 added: 1,
                 already: 0,
-                zero_km: 1
+                zero_km: 1,
+                updated: 0
             }
         );
         assert_eq!(merged.zero_km_text(), ", 1 skipped (0 km)");

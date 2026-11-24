@@ -213,8 +213,8 @@ enum TripsAction {
     /// Fetch trips from the connected Min Volkswagen account (unofficial,
     /// read-only) and merge them into the stored trips, month by month.
     Sync {
-        /// First day as YYYY-MM-DD (default: the newest stored trip's day,
-        /// else 1 January).
+        /// First day as YYYY-MM-DD (default: 3 days before the newest stored
+        /// trip, else 1 January).
         #[arg(long)]
         from: Option<String>,
         /// Last day as YYYY-MM-DD (default: today).

@@ -886,7 +886,8 @@ mod tests {
                 merged: trip_store::Merged {
                     added: 0,
                     already: 3,
-                    zero_km: 0
+                    zero_km: 0,
+                    updated: 0
                 },
                 without_position: 1,
             },

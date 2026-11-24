@@ -280,6 +280,78 @@ pub fn share(title: &str, mime: &str, text: &str, html: Option<&str>) -> Result<
     .map_err(|e| e.context("the share sheet can't be opened"))
 }
 
+/// Saves `bytes` as `name` in the phone's Downloads folder through
+/// MediaStore (Android 10 and later; no permission needed) and returns
+/// where. A name already taken gets a number from Android. Before Android
+/// 10 the text goes to the share sheet instead.
+#[cfg(target_os = "android")]
+pub fn save_download(name: &str, mime: &str, bytes: &[u8]) -> Result<String> {
+    use jni::objects::{JObject, JValue};
+    let sdk = android::with_context(|env, _| {
+        env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()
+    })?;
+    if sdk < 29 {
+        share(name, mime, &String::from_utf8_lossy(bytes), None)?;
+        return Ok("the share sheet".into());
+    }
+    android::with_context(|env, context| {
+        let resolver = env
+            .call_method(
+                context,
+                "getContentResolver",
+                "()Landroid/content/ContentResolver;",
+                &[],
+            )?
+            .l()?;
+        let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+        for (key, value) in [
+            ("_display_name", name),
+            ("mime_type", mime),
+            ("relative_path", "Download/"),
+        ] {
+            let (key, value) = (android::string(env, key)?, android::string(env, value)?);
+            env.call_method(
+                &values,
+                "put",
+                "(Ljava/lang/String;Ljava/lang/String;)V",
+                &[JValue::Object(&key), JValue::Object(&value)],
+            )?;
+        }
+        let downloads = env
+            .get_static_field(
+                "android/provider/MediaStore$Downloads",
+                "EXTERNAL_CONTENT_URI",
+                "Landroid/net/Uri;",
+            )?
+            .l()?;
+        let item = env
+            .call_method(
+                &resolver,
+                "insert",
+                "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+                &[JValue::Object(&downloads), JValue::Object(&values)],
+            )?
+            .l()?;
+        if item.is_null() {
+            return Err(jni::errors::Error::NullPtr("MediaStore insert"));
+        }
+        let out = env
+            .call_method(
+                &resolver,
+                "openOutputStream",
+                "(Landroid/net/Uri;)Ljava/io/OutputStream;",
+                &[JValue::Object(&item)],
+            )?
+            .l()?;
+        let data: JObject = env.byte_array_from_slice(bytes)?.into();
+        env.call_method(&out, "write", "([B)V", &[JValue::Object(&data)])?;
+        env.call_method(&out, "close", "()V", &[])?;
+        Ok(format!("Download/{name}"))
+    })
+    .map_err(|e| e.context("the file can't be saved in Downloads"))
+}
+
 /// Puts `text` on the clipboard through the ClipboardManager.
 #[cfg(target_os = "android")]
 pub fn copy_text(text: &str) -> Result<()> {

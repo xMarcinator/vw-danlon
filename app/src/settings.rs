@@ -158,8 +158,12 @@ fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
 
 #[cfg(target_os = "android")]
 fn save_backup(name: &str, json: &str) -> anyhow::Result<String> {
-    crate::platform::share(name, "application/json", json, None)?;
-    Ok("Shared the backup. No links or tokens.".into())
+    // A file, not shared text: a backup of many trips is too large for the
+    // share sheet, and apps saved it as text.
+    let at = crate::platform::save_download(name, "application/json", json.as_bytes())?;
+    Ok(format!(
+        "Saved {at}. No links or tokens. To restore, share it to vw-danlon."
+    ))
 }
 
 /// Reads the data directory again after a change.

@@ -1114,6 +1114,16 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                         span { "Went home sick · {hm(now)}" }
                         span { class: "small muted", "Stops work; the rest of the planned day is Sygdom" }
                     }
+                    button {
+                        class: "dock-menu-item sick",
+                        role: "menuitem",
+                        onclick: move |_| {
+                            close();
+                            on_action.call(Action::Sick { date: now.date(), from: None });
+                        },
+                        span { "Sick all day" }
+                        span { class: "small muted", "I did not work today; no hours and no norm" }
+                    }
                 }
             }
             if open {
@@ -1386,6 +1396,20 @@ fn WorkButtons(work: WorkToday, on_action: Callback<Action, bool>) -> Element {
                                             on_action.call(Action::WentHomeSick);
                                         },
                                         "Went home sick"
+                                    }
+                                }
+                                if has(WorkAction::WentHomeSick) {
+                                    button {
+                                        class: "menu-item sick",
+                                        role: "menuitem",
+                                        onclick: move |_| {
+                                            close();
+                                            on_action.call(Action::Sick {
+                                                date: chrono::Local::now().date_naive(),
+                                                from: None,
+                                            });
+                                        },
+                                        "Sick all day"
                                     }
                                 }
                             }

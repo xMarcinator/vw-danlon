@@ -836,7 +836,8 @@ fn account_token(cfg: &Config, store: &dyn SecretStore) -> Result<(State, String
     Ok((state, token))
 }
 
-/// Fetches the trips since the newest stored one from the account.
+/// Fetches the trips from a few days before the newest stored one from
+/// the account.
 pub fn sync_account(
     cfg: &Config,
     store: &dyn SecretStore,
