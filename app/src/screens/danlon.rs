@@ -95,6 +95,8 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
     // Bumped after a tick so the list rereads the state file.
     let mut ticks = use_signal(|| 0u32);
     let mut menu = use_signal(|| None::<NaiveDate>);
+    // The open ⋯ menu of a day's Fravær.
+    let mut fv_menu = use_signal(|| None::<NaiveDate>);
     let mut message = use_signal(|| None::<Result<String, String>>);
     let mut toast = use_signal(|| None::<(u32, String)>);
     // Copies `text` and says so for two seconds.
@@ -149,6 +151,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
         Callback::new(move |next: Period| {
             message.set(None);
             menu.set(None);
+            fv_menu.set(None);
             period.set(next);
         }),
     );
@@ -317,6 +320,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                     "aria-selected": if s == current { "true" } else { "false" },
                     onclick: move |_| {
                         menu.set(None);
+                        fv_menu.set(None);
                         show.set(s);
                     },
                     "{label}"
@@ -402,6 +406,7 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                                 "aria-expanded": if menu() == Some(date) { "true" } else { "false" },
                                                 onclick: move |_| {
                                                     let open = menu() == Some(date);
+                                                    fv_menu.set(None);
                                                     menu.set(if open { None } else { Some(date) });
                                                 },
                                                 svg {
@@ -449,23 +454,47 @@ pub fn DanlonScreen(setup: Signal<Setup>, screen: Signal<Screen>) -> Element {
                                         div { class: "dl-item",
                                             span { class: "dl-kind fv", "Fravær" }
                                             span { class: "dl-route", "Sygdom · {f.total_text()}" }
-                                            span { class: "dl-detail",
-                                                match f.from {
-                                                    Some(t) => format!("Went home sick {} · the rest of the planned day", t.format("%H:%M")),
-                                                    None => "Sick all day · the planned day".to_string(),
+                                            span { class: "dl-detail", "{f.detail_text()}" }
+                                            button {
+                                                class: "small-btn dl-more",
+                                                "aria-label": "More actions for Sygdom",
+                                                "aria-haspopup": "menu",
+                                                "aria-expanded": if fv_menu() == Some(date) { "true" } else { "false" },
+                                                onclick: move |_| {
+                                                    let open = fv_menu() == Some(date);
+                                                    menu.set(None);
+                                                    fv_menu.set(if open { None } else { Some(date) });
+                                                },
+                                                svg {
+                                                    "aria-hidden": "true",
+                                                    width: "16",
+                                                    height: "16",
+                                                    view_box: "0 0 24 24",
+                                                    fill: "currentColor",
+                                                    circle { cx: "5", cy: "12", r: "1.8" }
+                                                    circle { cx: "12", cy: "12", r: "1.8" }
+                                                    circle { cx: "19", cy: "12", r: "1.8" }
                                                 }
                                             }
-                                            button {
-                                                class: "small-btn",
-                                                "aria-label": "Copy hours {f.hours_text()}",
-                                                onclick: move |_| copy(f.hours_text()),
-                                                "Copy {f.hours_text()}"
-                                            }
-                                            button {
-                                                class: "small-btn",
-                                                "aria-label": "Copy note {f.note_text()}",
-                                                onclick: move |_| copy(f.note_text()),
-                                                "Copy note"
+                                            if fv_menu() == Some(date) {
+                                                div { class: "dl-menu", role: "menu", "aria-label": "Actions",
+                                                    button {
+                                                        role: "menuitem",
+                                                        onclick: move |_| {
+                                                            fv_menu.set(None);
+                                                            copy(f.hours_text());
+                                                        },
+                                                        "Copy hours · {f.hours_text()}"
+                                                    }
+                                                    button {
+                                                        role: "menuitem",
+                                                        onclick: move |_| {
+                                                            fv_menu.set(None);
+                                                            copy(f.note_text());
+                                                        },
+                                                        "Copy note · {f.note_text()}"
+                                                    }
+                                                }
                                             }
                                         }
                                     }

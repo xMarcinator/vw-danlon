@@ -1010,6 +1010,7 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
     let mut menu = use_signal(|| false);
     let mut stop_menu = use_signal(|| false);
     let mut at = use_signal(String::new);
+    let mut left_at = use_signal(String::new);
     let has = |a: WorkAction| work.actions.contains(&a);
     // Reported sick today: what it means, and Not sick to take it back.
     if let Some(sick) = work
@@ -1020,6 +1021,19 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
         return rsx! {
             div { class: "dock-actions",
                 div { class: "sick-bar", role: "status",
+                    svg {
+                        "aria-hidden": "true",
+                        width: "20",
+                        height: "20",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        path { d: "M14 4v10.5a4 4 0 1 1-4 0V4a2 2 0 1 1 4 0z" }
+                        path { d: "M12 17.5v-6" }
+                    }
                     span { class: "grow",
                         b { "{sick_title(sick)}" }
                         span { class: "small", "Sygdom {sick_text(work.sick_hours)} to enter in Danløn" }
@@ -1084,6 +1098,7 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
         stop_menu.set(false);
     };
     let stop_now = stop.clone();
+    let stop_home = matches!(stop, Some(Action::HomeStop));
     rsx! {
         div { class: "dock-actions",
             if stop_open {
@@ -1104,6 +1119,27 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                             "Stop work now · {hm(now)}"
                         }
                     }
+                    div { class: "dock-menu-at",
+                        label { r#for: "stop-menu-at", "Left at" }
+                        input {
+                            id: "stop-menu-at",
+                            r#type: "time",
+                            value: "{left_at}",
+                            oninput: move |e| left_at.set(e.value()),
+                        }
+                        button {
+                            class: "small-btn primary-sm",
+                            onclick: move |_| {
+                                if on_action.call(Action::StopWorkAt {
+                                    home: stop_home,
+                                    at: left_at(),
+                                }) {
+                                    close();
+                                }
+                            },
+                            "Stop"
+                        }
+                    }
                     button {
                         class: "dock-menu-item sick",
                         role: "menuitem",
@@ -1113,16 +1149,6 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                         },
                         span { "Went home sick · {hm(now)}" }
                         span { class: "small muted", "Stops work; the rest of the planned day is Sygdom" }
-                    }
-                    button {
-                        class: "dock-menu-item sick",
-                        role: "menuitem",
-                        onclick: move |_| {
-                            close();
-                            on_action.call(Action::Sick { date: now.date(), from: None });
-                        },
-                        span { "Sick all day" }
-                        span { class: "small muted", "I did not work today; no hours and no norm" }
                     }
                 }
             }
@@ -1182,6 +1208,8 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                         },
                         if next.is_some() {
                             span { class: "split-sub", "Start private time" }
+                        } else if sick_today {
+                            span { class: "split-sub", "Not at work" }
                         }
                         span { class: "split-label", "{main}" }
                     }
@@ -1208,6 +1236,7 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                         onclick: move |_| {
                             if went_home_sick {
                                 menu.set(false);
+                                left_at.set(hm(now));
                                 stop_menu.set(!stop_open);
                             } else {
                                 close();
@@ -1222,7 +1251,7 @@ fn CardActions(work: WorkToday, now: NaiveDateTime, on_action: Callback<Action, 
                 }
                 if sick_today {
                     button {
-                        class: "pt-btn stop-work",
+                        class: "pt-btn stop-work sick-today",
                         onclick: move |_| {
                             close();
                             on_action.call(Action::Sick { date: now.date(), from: None });

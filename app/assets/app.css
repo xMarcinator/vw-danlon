@@ -4457,3 +4457,45 @@ button.cal-day:focus-visible {
 .sick-menu .note {
   padding: 6px 14px 8px;
 }
+
+/* Sick on the timeline: the planned time it took, hatched. */
+.bar.sick,
+.swatch.sick {
+  background: repeating-linear-gradient(135deg, var(--bad) 0 3px, var(--bad-bg) 3px 7px);
+  border: 1px solid var(--bad);
+}
+
+.step-dot.sick {
+  background: var(--bad);
+}
+
+.step-sub.sick {
+  color: var(--bad);
+}
+
+/* Mark sick in the Day's header: its menu opens to the left. */
+.day-sick.end .sick-menu {
+  left: auto;
+  right: 0;
+}
+
+.sick-menu .menu-item.sick-all {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 44px;
+  padding-block: 4px;
+}
+
+.sick-bar > svg {
+  flex-shrink: 0;
+}
+
+.dock-work .pt-btn.stop-work.sick-today {
+  padding: 0 16px;
+}
+
+.dock-menu-item + .dock-menu-at + .dock-menu-item {
+  border-top: 1px solid var(--row);
+}

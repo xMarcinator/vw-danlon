@@ -36,6 +36,8 @@ pub struct Fravaer {
     pub minutes: i64,
     /// When you went home sick; `None`: the whole day.
     pub from: Option<NaiveTime>,
+    /// The planned day it was cut from, when the calendar has one.
+    pub planned: Option<(NaiveTime, NaiveTime)>,
 }
 
 impl Fravaer {
@@ -47,6 +49,20 @@ impl Fravaer {
     /// The hours as the app takes them, e.g. "2,83".
     pub fn hours_text(&self) -> String {
         format!("{:.2}", self.minutes as f64 / 60.0).replace('.', ",")
+    }
+
+    /// What it covers: "Went home sick 13:10 · the rest of the planned day
+    /// to 16:00", or "Sick all day · the planned day 08:00–16:00".
+    pub fn detail_text(&self) -> String {
+        let hm = |t: NaiveTime| t.format("%H:%M").to_string();
+        match (self.from, self.planned) {
+            (Some(t), Some((_, e))) => {
+                format!("Went home sick {} · the rest of the planned day to {}", hm(t), hm(e))
+            }
+            (Some(t), None) => format!("Went home sick {} · the rest of the planned day", hm(t)),
+            (None, Some((s, e))) => format!("Sick all day · the planned day {}–{}", hm(s), hm(e)),
+            (None, None) => "Sick all day · the planned day".into(),
+        }
     }
 
     /// E.g. "Syg fra 13:10", or "Syg" for the whole day.
@@ -285,6 +301,9 @@ pub fn build(
             let fravaer = day.sick.filter(|_| day.sick_hours > 0.0).map(|s| Fravaer {
                 minutes: (day.sick_hours * 60.0).round() as i64,
                 from: s.from,
+                planned: day
+                    .planned
+                    .map(|(s, e)| (s.naive_local().time(), e.naive_local().time())),
             });
             ChecklistDay {
                 date: day.date,
@@ -734,6 +753,14 @@ END:VEVENT
             "{text}"
         );
         assert!(text.ends_with("· Fravær entered: 1 of 2\n"), "{text}");
+        // What each covers, as the app shows it.
+        let detail = |n: usize| days[n - 1].fravaer.unwrap().detail_text();
+        assert!(detail(18).starts_with("Sick all day · the planned day"), "{}", detail(18));
+        assert!(
+            detail(19).starts_with("Went home sick 13:10 · the rest of the planned day"),
+            "{}",
+            detail(19)
+        );
     }
 
     #[test]

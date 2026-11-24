@@ -349,6 +349,9 @@ pub enum Action {
     StartAt(String),
     /// At work without a departure: you left now without a trip.
     LeaveWork,
+    /// Stop work earlier today, as typed: the home-working timer (`home`),
+    /// or left work then.
+    StopWorkAt { home: bool, at: String },
     /// Take back "left work" on that day.
     UndoLeaveWork(NaiveDate),
     /// Report that day sick: the whole day, or from the time typed (went
@@ -421,6 +424,7 @@ impl Action {
             | Action::HomeStop
             | Action::HomeStartAt(_)
             | Action::LeaveWork
+            | Action::StopWorkAt { .. }
             | Action::UndoLeaveWork(_)
             | Action::Sick { .. }
             | Action::WentHomeSick
@@ -492,6 +496,20 @@ pub fn apply(cfg: &Config, cal: &[Occurrence], action: &Action) -> Result<String
                 "Left work at {} · the time at work ends then",
                 hm(now.naive_local())
             )
+        }
+        Action::StopWorkAt { home, at } => {
+            let typed = state::parse_time(at.trim())?;
+            let at = now.date_naive().and_time(typed);
+            if at > now.naive_local() {
+                anyhow::bail!("{} is in the future", typed.format("%H:%M"));
+            }
+            if *home {
+                let i = service::stop_home(cfg, at)?;
+                format!("Recorded {} {}–{}", i.label, hm(i.start), hm(i.end))
+            } else {
+                service::set_left_work(cfg, at.date(), Some(at))?;
+                format!("Left work at {} · the time at work ends then", hm(at))
+            }
         }
         Action::UndoLeaveWork(date) => {
             service::set_left_work(cfg, *date, None)?;

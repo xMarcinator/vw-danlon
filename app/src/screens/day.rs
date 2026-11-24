@@ -285,6 +285,26 @@ pub fn render(a: DayArgs) -> Element {
         None => format!("of {}", hours(d.norm_hours)),
     };
     let left_work = state.left_work.get(&date).copied();
+    // Reported sick: the day no longer counts towards now; its norm is cut
+    // (or cancelled) and the planned hours lost are Sygdom.
+    let counting = so_far && d.sick.is_none();
+    let full_norm = d.norm_hours + d.sick_hours;
+    let norm_sub = match d.sick.map(|s| s.from) {
+        Some(Some(t)) => format!("cut at {} · was {}", t.format("%H:%M"), hours(full_norm)),
+        Some(None) => format!("{} cancelled", hours(full_norm)),
+        None => String::new(),
+    };
+    let diff_sub = if norm_sub.is_empty() {
+        format!("norm {} h", hours(d.norm_hours))
+    } else {
+        format!("norm {} · {norm_sub}", hours(d.norm_hours))
+    };
+    let worked_sub = match d.sick {
+        Some(s) if s.from.is_none() => "sick".to_string(),
+        _ => worked_sub,
+    };
+    let can_mark_sick = d.off_reason.is_none() && (d.norm_hours > 0.0 || d.sick.is_some());
+    let sick_at = d.last_end.map(|t| t.format("%H:%M").to_string()).unwrap_or_else(|| hm(now));
     let home = home_entries(state, date);
     let planned_hm = d
         .planned
@@ -329,6 +349,17 @@ pub fn render(a: DayArgs) -> Element {
                 Icon { d: "M12 5v14M5 12h14", size: 15 }
                 "Add time"
             }
+            if can_mark_sick && d.sick.is_none() {
+                SickControl {
+                    date,
+                    sick: None,
+                    sick_hours: d.sick_hours,
+                    full_hours: full_norm,
+                    at: sick_at.clone(),
+                    class: "end",
+                    on_action,
+                }
+            }
         }
 
         div { class: "kpis day-kpis",
@@ -346,17 +377,20 @@ pub fn render(a: DayArgs) -> Element {
                 span { class: "kpi-sub", "{planned_text}" }
             }
             section { class: "kpi",
-                h2 { if so_far { "Worked so far" } else { "Worked" } }
+                h2 { if counting { "Worked so far" } else { "Worked" } }
                 span { class: "kpi-value", "{hours(d.worked_hours)}" }
-                span { class: if so_far { "kpi-sub" } else { "kpi-sub wide-only" }, "{worked_sub}" }
+                span { class: if so_far || d.sick.is_some() { "kpi-sub" } else { "kpi-sub wide-only" }, "{worked_sub}" }
             }
-            if !so_far {
+            if !counting {
                 section { class: "kpi narrow-only",
                     h2 { "Norm" }
                     span { class: "kpi-value", "{hours(d.norm_hours)}" }
+                    if !norm_sub.is_empty() {
+                        span { class: "kpi-sub", "{norm_sub}" }
+                    }
                 }
             }
-            if so_far {
+            if counting {
                 section { class: "kpi",
                     h2 { "Expected so far" }
                     span { class: "kpi-value", "{hours(d.expected_hours)}" }
@@ -365,7 +399,7 @@ pub fn render(a: DayArgs) -> Element {
             }
             section { class: "kpi",
                 h2 {
-                    if so_far {
+                    if counting {
                         "Diff"
                     } else {
                         span { class: "narrow-only", "Diff" }
@@ -373,10 +407,13 @@ pub fn render(a: DayArgs) -> Element {
                     }
                 }
                 span { class: "kpi-value {diff_class(d.difference())}", "{signed(d.difference())}" }
-                if so_far {
+                if counting {
                     span { class: "kpi-sub", "{late_text}" }
                 } else {
-                    span { class: "kpi-sub wide-only", "norm {hours(d.norm_hours)} h" }
+                    if so_far && !late_text.is_empty() {
+                        span { class: "kpi-sub narrow-only", "{late_text}" }
+                    }
+                    span { class: "kpi-sub wide-only", "{diff_sub}" }
                 }
             }
             if view.mileage.is_some() {
@@ -409,12 +446,20 @@ pub fn render(a: DayArgs) -> Element {
                 }
             }
         }
-        if d.off_reason.is_none() && (d.norm_hours > 0.0 || d.sick.is_some()) {
+        // Today on a phone the dock has Sick today, Went home sick and the
+        // sick bar; when wide the header has Mark sick.
+        if can_mark_sick && (d.sick.is_some() || date != today) {
             SickControl {
                 date,
                 sick: d.sick,
                 sick_hours: d.sick_hours,
-                at: d.last_end.map(|t| t.format("%H:%M").to_string()).unwrap_or_else(|| hm(now)),
+                full_hours: full_norm,
+                at: sick_at,
+                class: match (d.sick.is_some(), date == today) {
+                    (true, true) => "wide-only",
+                    (true, false) => "",
+                    (false, _) => "narrow-only",
+                },
                 on_action,
             }
         }
@@ -694,6 +739,15 @@ fn day_steps(
     steps
 }
 
+/// The sick part of the planned day: from going home sick (or the planned
+/// start) to the planned end.
+fn sick_span(d: &Day) -> Option<LocalSpan> {
+    let sick = d.sick?;
+    let (ps, pe) = d.planned.map(|(s, e)| (s.naive_local(), e.naive_local()))?;
+    let from = sick.from.map(|t| d.date.and_time(t)).unwrap_or(ps).max(ps);
+    (from < pe).then_some((from, pe))
+}
+
 /// The timeline's fixed hours.
 const TL_FROM: f64 = 6.0;
 const TL_TO: f64 = 18.0;
@@ -789,6 +843,7 @@ fn timeline(
     )
     .into_iter()
     .map(|(s, e, kind)| (s, e, timeline_class(kind)))
+    .chain(sick_span(d).map(|(s, e)| (s, e, "sick")))
     .collect();
     // Always 06–18: what lies outside is cut at the edge.
     let day_start = d.date.and_hms_opt(0, 0, 0).unwrap();
@@ -804,6 +859,7 @@ fn timeline(
     let mut steps = steps;
     // Today: counting starts at the planned start; now; the planned end.
     if d.so_far
+        && d.sick.is_none()
         && let Some((ps, pe)) = d.planned
     {
         let late = match d.first_start {
@@ -847,6 +903,41 @@ fn timeline(
                 edit: None,
             });
         }
+    }
+    // Sick: when it started and the Sygdom it leaves.
+    if let Some(sick) = d.sick {
+        let planned = d.planned.map(|(s, e)| (naive(s), naive(e)));
+        steps.push(match sick.from {
+            Some(t) => Step {
+                at: d.date.and_time(t),
+                title: "Went home sick".into(),
+                sub: match planned {
+                    Some((_, pe)) => format!(
+                        "Sygdom {} · until the planned end {}",
+                        super::month::sick_text(d.sick_hours),
+                        hm(pe)
+                    ),
+                    None => format!("Sygdom {}", super::month::sick_text(d.sick_hours)),
+                },
+                kind: "sick",
+                edit: None,
+            },
+            None => Step {
+                at: planned.map(|(s, _)| s).unwrap_or_else(|| d.date.and_hms_opt(0, 0, 0).unwrap()),
+                title: "Reported sick".into(),
+                sub: match planned {
+                    Some((ps, pe)) => format!(
+                        "Sygdom {} · the whole planned day {}–{}",
+                        super::month::sick_text(d.sick_hours),
+                        hm(ps),
+                        hm(pe)
+                    ),
+                    None => format!("Sygdom {}", super::month::sick_text(d.sick_hours)),
+                },
+                kind: "sick",
+                edit: None,
+            },
+        });
     }
     for i in private {
         if let Some((s, e)) = private_span(i, now) {
@@ -903,8 +994,9 @@ fn timeline(
     if d.so_far {
         label.push_str(&format!("; now {}", hm(now)));
     }
+    let sick_legend = d.sick.is_some().then_some(("sick", "Sick"));
     let legend = rsx! {
-        for (class , text) in LEGEND {
+        for (class , text) in LEGEND.into_iter().chain(sick_legend) {
             span { class: "legend",
                 span { class: "swatch {class}" }
                 "{text}"
@@ -1290,7 +1382,11 @@ fn SickControl(
     date: NaiveDate,
     sick: Option<vw_danlon::state::Sick>,
     sick_hours: f64,
+    /// The day's whole norm: what Sick all day makes Sygdom.
+    full_hours: f64,
     at: String,
+    /// Extra classes: "end" opens the menu to the left, as in the header.
+    class: &'static str,
     on_action: Callback<Action, bool>,
 ) -> Element {
     let mut open = use_signal(|| false);
@@ -1300,13 +1396,16 @@ fn SickControl(
             div { class: "menu-backdrop", onclick: move |_| open.set(false) }
             div { class: "sick-menu", role: "menu", "aria-label": "Mark sick",
                 button {
-                    class: "menu-item",
+                    class: "menu-item sick-all",
                     role: "menuitem",
                     onclick: move |_| {
                         open.set(false);
                         on_action.call(Action::Sick { date, from: None });
                     },
-                    "Sick all day"
+                    span { "Sick all day" }
+                    span { class: "small muted",
+                        "No hours, no norm · Sygdom {super::month::sick_text(full_hours)}"
+                    }
                 }
                 div { class: "menu-edit",
                     label { r#for: "sick-from", "Went home sick at" }
@@ -1334,7 +1433,7 @@ fn SickControl(
     };
     match sick {
         None => rsx! {
-            div { class: "day-sick",
+            div { class: "day-sick {class}",
                 button {
                     class: "small-btn sick",
                     "aria-haspopup": "menu",
@@ -1356,7 +1455,7 @@ fn SickControl(
             };
             let sygdom = super::month::sick_text(sick_hours);
             rsx! {
-                div { class: "day-sick alert sick", role: "status",
+                div { class: "day-sick alert sick {class}", role: "status",
                     b { "{title}" }
                     span { class: "grow", "{rest}Fravær · Sygdom {sygdom} to enter in Danløn" }
                     button {
